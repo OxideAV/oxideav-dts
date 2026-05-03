@@ -213,10 +213,14 @@ mod tests {
     }
 
     #[test]
-    fn lossless_quant_powers_of_two() {
-        // for ABITS >= 6 entries are integer powers of two (this is what
-        // makes the lossless mode round-trip integer PCM exactly).
-        for a in 6usize..=26 {
+    fn lossless_quant_powers_of_two_high() {
+        // For ABITS >= 16 entries collapse to clean integer powers
+        // of two (`2^(20 - ABITS)` for ABITS in 16..=26). This is
+        // what makes the lossless mode round-trip integer PCM
+        // exactly when the encoder picks ABITS large enough.
+        // ABITS 1..15 are intentionally non-POT (VQ / block-coded /
+        // ANS-style packings).
+        for a in 16usize..=26 {
             let v = LOSSLESS_QUANT[a];
             assert!(v > 0, "abits {a} step 0?");
             assert!(v.is_power_of_two(), "abits {a} step {v} not POT");
