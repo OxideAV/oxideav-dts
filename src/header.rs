@@ -9,9 +9,7 @@ use oxideav_core::{Error, Result};
 
 use crate::bits::BitReader;
 use crate::syncwords;
-use crate::tables::{
-    BITS_PER_SAMPLE, CHANNELS_BY_AMODE, CORE_BIT_RATES, CORE_SAMPLE_RATES,
-};
+use crate::tables::{BITS_PER_SAMPLE, CHANNELS_BY_AMODE, CORE_BIT_RATES, CORE_SAMPLE_RATES};
 
 /// Decoded DTS Core frame header (104 bits without the optional CRC,
 /// 120 bits with it).
@@ -90,9 +88,7 @@ pub fn parse(data: &[u8]) -> Result<CoreHeader> {
     let sfreq = r.read(4)? as usize;
     let sample_rate = CORE_SAMPLE_RATES[sfreq];
     if sample_rate == 0 {
-        return Err(Error::invalid(format!(
-            "dts: SFREQ {sfreq} reserved"
-        )));
+        return Err(Error::invalid(format!("dts: SFREQ {sfreq} reserved")));
     }
     let rate_code = r.read(5)? as u8;
     let bit_rate = CORE_BIT_RATES[rate_code as usize];

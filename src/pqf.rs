@@ -67,11 +67,8 @@ impl PqfSynth {
         let mut cos_table = vec![0.0; 64 * 32];
         for n in 0..64 {
             for i in 0..32 {
-                cos_table[n * 32 + i] = ((2 * i + 1) as f64
-                    * (n as i32 - 16) as f64
-                    * PI
-                    / 64.0)
-                    .cos();
+                cos_table[n * 32 + i] =
+                    ((2 * i + 1) as f64 * (n as i32 - 16) as f64 * PI / 64.0).cos();
             }
         }
         Self {

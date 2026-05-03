@@ -74,11 +74,7 @@ fn find_core_sync(data: &[u8], from: usize) -> Option<usize> {
         return None;
     }
     for i in from..(data.len() - 4) {
-        if data[i] == 0x7F
-            && data[i + 1] == 0xFE
-            && data[i + 2] == 0x80
-            && data[i + 3] == 0x01
-        {
+        if data[i] == 0x7F && data[i + 1] == 0xFE && data[i + 2] == 0x80 && data[i + 3] == 0x01 {
             return Some(i);
         }
     }
@@ -121,7 +117,11 @@ fn decode_ffmpeg_dca_sine_produces_pcm() {
     let mut total_energy = 0.0f64;
     let mut decoded_frames = 0usize;
     for frame_bytes in frames.iter().take(20) {
-        let packet = Packet::new(0, TimeBase::new(1, SAMPLE_RATE as i64), frame_bytes.to_vec());
+        let packet = Packet::new(
+            0,
+            TimeBase::new(1, SAMPLE_RATE as i64),
+            frame_bytes.to_vec(),
+        );
         if dec.send_packet(&packet).is_err() {
             continue;
         }
@@ -147,10 +147,7 @@ fn decode_ffmpeg_dca_sine_produces_pcm() {
         "decoder produced no frames from {} input frames",
         frames.len()
     );
-    assert!(
-        total_samples > 0,
-        "decoder returned zero PCM samples"
-    );
+    assert!(total_samples > 0, "decoder returned zero PCM samples");
     let mean_energy = total_energy / total_samples as f64;
     // The PSNR proxy here is the signal-to-clipping margin: 0 dBFS
     // sine input has mean energy 0.5, so the decoded output should

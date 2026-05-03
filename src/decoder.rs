@@ -105,8 +105,8 @@ impl DtsDecoder {
         // audio coding header as "best-effort": we still produce a
         // frame of zeros so the rest of the pipeline survives.
         let frame_bytes = &data[..hdr.frame_size as usize];
-        let payload = decode_audio_payload(&hdr, frame_bytes)
-            .unwrap_or_else(|_| FrameOutput::silence(nch));
+        let payload =
+            decode_audio_payload(&hdr, frame_bytes).unwrap_or_else(|_| FrameOutput::silence(nch));
 
         // Run synthesis: 16 blocks × 32 samples → 512 PCM per channel.
         let samples_per_ch = SAMPLES_PER_FRAME as usize;

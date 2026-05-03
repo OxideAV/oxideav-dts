@@ -183,8 +183,7 @@ pub fn decode_audio_payload(hdr: &CoreHeader, data: &[u8]) -> Result<FrameOutput
             let hi = ach.subs[ch] as usize;
             for b in lo..hi {
                 let sf_idx = (r.read(7)? as usize) & 0x7F;
-                scale_q22[ch][b] =
-                    SCALE_FACTOR_QUANT7.get(sf_idx).copied().unwrap_or(0);
+                scale_q22[ch][b] = SCALE_FACTOR_QUANT7.get(sf_idx).copied().unwrap_or(0);
             }
         }
 
@@ -210,8 +209,7 @@ pub fn decode_audio_payload(hdr: &CoreHeader, data: &[u8]) -> Result<FrameOutput
                             // landing in round 2.
                             let vq_idx = r.read(10)? as usize;
                             let v = vq::lookup(vq_idx);
-                            let scale = scale_q22[ch][b] as f64
-                                / SCALE_FACTOR_UNITY as f64;
+                            let scale = scale_q22[ch][b] as f64 / SCALE_FACTOR_UNITY as f64;
                             // Spread the 32-sample VQ vector across
                             // the 8 PCM samples of this sub-subframe
                             // block (samples 0..7 at strides of 4).
@@ -253,8 +251,7 @@ pub fn decode_audio_payload(hdr: &CoreHeader, data: &[u8]) -> Result<FrameOutput
                                 LOSSY_QUANT[a]
                             } as f64
                                 / STEP_UNITY_Q20 as f64;
-                            let sf = scale_q22[ch][b] as f64
-                                / SCALE_FACTOR_UNITY as f64;
+                            let sf = scale_q22[ch][b] as f64 / SCALE_FACTOR_UNITY as f64;
                             let v = sample as f64 * step_q20 * sf;
                             let bidx = block_idx;
                             if bidx < BLOCKS_PER_FRAME {
@@ -285,10 +282,7 @@ fn consume_dsync(r: &mut BitReader) -> Result<()> {
     Ok(())
 }
 
-fn parse_audio_coding_header(
-    r: &mut BitReader,
-    hdr: &CoreHeader,
-) -> Result<AudioCodingHeader> {
+fn parse_audio_coding_header(r: &mut BitReader, hdr: &CoreHeader) -> Result<AudioCodingHeader> {
     let nsubframes = (r.read(4)? as u8) + 1;
     let nchannels = (r.read(3)? as u8) + 1;
     if nchannels as u32 != hdr.primary_channels as u32 {
@@ -327,7 +321,7 @@ fn parse_audio_coding_header(
     // support yet). Total = nch × 10 codebook classes ×
     // QUANT_INDEX_SEL_NBITS[class] bits; for round-1 simplicity we
     // skip a constant 10-class slab in the documented widths.
-    use crate::tables::{QUANT_INDEX_SEL_NBITS, QUANT_INDEX_GROUP_SIZE};
+    use crate::tables::{QUANT_INDEX_GROUP_SIZE, QUANT_INDEX_SEL_NBITS};
     for _ in 0..nch {
         for c in 0..10 {
             let group_size = QUANT_INDEX_GROUP_SIZE[c] as usize;
