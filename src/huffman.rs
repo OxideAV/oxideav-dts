@@ -380,7 +380,7 @@ mod tests {
         // Codes: 1 → 0; 2 → 10; 0 → 11.
         // After offset -1: 1→0, 2→1, 0→-1.
         let v = bitalloc_codebook(0, 0);
-        let data = [0b0_10_11_000];
+        let data = [0b01011000];
         let mut r = BitReader::new(&data);
         assert_eq!(v.decode(&mut r).unwrap(), 0); // sym 1
         assert_eq!(v.decode(&mut r).unwrap(), 1); // sym 2

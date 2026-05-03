@@ -5,7 +5,7 @@
 //!
 //!   1. The 32 sub-band samples are converted into a 64-point IDCT-IV
 //!      vector via the modulation formula
-//!         `v[n] = sum_i s[i] * cos((2i+1)(n-16)*pi/64)`,
+//!      `v[n] = sum_i s[i] * cos((2i+1)(n-16)*pi/64)`,
 //!      with `n = 0..63`.
 //!   2. A 1024-sample shift register is updated by prepending the 64
 //!      new V samples.
@@ -231,7 +231,7 @@ mod tests {
         }
         // peak should be within a few taps of centre (255 or 256).
         assert!(
-            max_idx >= 250 && max_idx <= 261,
+            (250..=261).contains(&max_idx),
             "peak at idx {max_idx} not near centre"
         );
     }

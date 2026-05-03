@@ -114,14 +114,10 @@ impl DtsDecoder {
         for ch in 0..nch {
             for blk in 0..16 {
                 let mut sb = [0.0f64; SUBBANDS];
-                for b in 0..32 {
-                    sb[b] = payload.subband[ch][blk][b];
-                }
+                sb[..32].copy_from_slice(&payload.subband[ch][blk][..32]);
                 let out = self.synths[ch].synth_block(&sb);
                 let off = ch * samples_per_ch + blk * 32;
-                for n in 0..32 {
-                    pcm_planar[off + n] = out[n];
-                }
+                pcm_planar[off..off + 32].copy_from_slice(&out[..32]);
             }
         }
 
