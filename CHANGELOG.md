@@ -5,6 +5,16 @@ All notable changes to `oxideav-dts` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/)
 and the project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.0.2](https://github.com/OxideAV/oxideav-dts/compare/v0.0.1...v0.0.2) - 2026-05-03
+
+### Fixed
+
+- fix clippy: byte literal grouping, manual_memcpy, range_contains, doc indent
+
+### Other
+
+- replace manual find loop with Iterator::find in test helper
+
 ## [0.0.1] — 2026-05-02
 
 Initial scaffold (round 1).
