@@ -73,12 +73,9 @@ fn find_core_sync(data: &[u8], from: usize) -> Option<usize> {
     if data.len() < 4 {
         return None;
     }
-    for i in from..(data.len() - 4) {
-        if data[i] == 0x7F && data[i + 1] == 0xFE && data[i + 2] == 0x80 && data[i + 3] == 0x01 {
-            return Some(i);
-        }
-    }
-    None
+    (from..(data.len() - 4)).find(|&i| {
+        data[i] == 0x7F && data[i + 1] == 0xFE && data[i + 2] == 0x80 && data[i + 3] == 0x01
+    })
 }
 
 /// Split a raw .dts elementary stream into individual Core frames
