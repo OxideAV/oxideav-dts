@@ -15,12 +15,3 @@ categories = ["multimedia::encoding", "multimedia::audio"]
 
 [dependencies]
 oxideav-core = "0.1"
-
-# Self-contained workspace marker so `cargo test` from inside this crate
-# does not walk up into the parent monorepo workspace (which currently
-# contains other crates that also declare their own [workspace] block,
-# causing cargo to error out with "multiple workspace roots"). The crate
-# ships standalone via crates.io and is built standalone in CI; this
-# empty workspace keeps in-tree test runs equally hermetic. Mirrors the
-# pattern in oxideav-indeo / oxideav-tta / oxideav-vp8.
-[workspace]
