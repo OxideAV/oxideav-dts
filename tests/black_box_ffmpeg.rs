@@ -19,7 +19,10 @@
 //! out — once the tables land in `docs/`, the resolvers can also
 //! be checked against `(48000, 768000, 2)` here.
 
-use oxideav_dts::{parse_frame_header, FrameType, SyncWordEncoding};
+use oxideav_dts::{
+    parse_frame_header, parse_frame_header_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder,
+    FrameType, SyncWordEncoding,
+};
 
 /// 16 bytes captured from a real `ffmpeg -c:a dca -b:a 768k -ar
 /// 48000 -ac 2` output (frame 0). 4-byte sync + 12 bytes of header
@@ -58,4 +61,103 @@ fn parses_real_ffmpeg_frame_header() {
     assert_eq!(hdr.sample_rate_hz(), None);
     assert_eq!(hdr.bit_rate_bps(), None);
     assert_eq!(hdr.channel_count(), None);
+}
+
+/// The same `ffmpeg` frame as above, repacked into the 14-bit BE
+/// container format. Each 16-bit container carries 14 payload bits
+/// (sign-extended into the upper 2). The first six bytes match the
+/// wiki's documented 14-bit BE sync `1F FF E8 00 07 F0`; the
+/// remaining bytes carry the same payload as the 16-bit-raw frame
+/// above, repacked. Round 2's `parse_frame_header_14bit` must
+/// recover the identical structural fields the raw-BE parse
+/// produces.
+const FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER_14BIT_BE: [u8; 20] = [
+    0x1f, 0xff, 0xe8, 0x00, 0x07, 0xf0, 0xfc, 0x3f, 0xfc, 0x2d, 0x1e, 0x00, 0x04, 0xe0, 0x00, 0x03,
+    0xfb, 0xdf, 0xf0, 0x00,
+];
+
+/// LE 14-bit-packed mirror of the same ffmpeg frame.
+const FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER_14BIT_LE: [u8; 20] = [
+    0xff, 0x1f, 0x00, 0xe8, 0xf0, 0x07, 0x3f, 0xfc, 0x2d, 0xfc, 0x00, 0x1e, 0xe0, 0x04, 0x03, 0x00,
+    0xdf, 0xfb, 0x00, 0xf0,
+];
+
+#[test]
+fn parses_14bit_be_repacked_ffmpeg_frame_header() {
+    let hdr = parse_frame_header_14bit(&FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER_14BIT_BE)
+        .expect("parse_frame_header_14bit should succeed on the BE-repacked ffmpeg frame");
+    assert_eq!(
+        hdr.sync_word_encoding,
+        SyncWordEncoding::FourteenBitBigEndian,
+    );
+    assert_eq!(hdr.frame_type, FrameType::Normal);
+    assert_eq!(hdr.sample_count_per_block, 32);
+    assert!(!hdr.crc_present);
+    assert_eq!(hdr.blocks_per_frame, 15);
+    assert_eq!(hdr.frame_size_bytes, 1024);
+    assert_eq!(hdr.amode, 2);
+    assert_eq!(hdr.sfreq_index, 13);
+    assert_eq!(hdr.rate_index, 15);
+    assert_eq!(hdr.sample_rate_hz(), None);
+    assert_eq!(hdr.bit_rate_bps(), None);
+    assert_eq!(hdr.channel_count(), None);
+}
+
+#[test]
+fn parses_14bit_le_repacked_ffmpeg_frame_header() {
+    let hdr = parse_frame_header_14bit(&FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER_14BIT_LE)
+        .expect("parse_frame_header_14bit should succeed on the LE-repacked ffmpeg frame");
+    assert_eq!(
+        hdr.sync_word_encoding,
+        SyncWordEncoding::FourteenBitLittleEndian,
+    );
+    assert_eq!(hdr.frame_type, FrameType::Normal);
+    assert_eq!(hdr.sample_count_per_block, 32);
+    assert!(!hdr.crc_present);
+    assert_eq!(hdr.blocks_per_frame, 15);
+    assert_eq!(hdr.frame_size_bytes, 1024);
+    assert_eq!(hdr.amode, 2);
+    assert_eq!(hdr.sfreq_index, 13);
+    assert_eq!(hdr.rate_index, 15);
+}
+
+/// Both 14-bit forms decode to the same logical frame as the
+/// 16-bit raw form.
+#[test]
+fn three_input_encodings_decode_to_identical_header_fields() {
+    let raw = parse_frame_header(&FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER).unwrap();
+    let be14 =
+        parse_frame_header_14bit(&FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER_14BIT_BE).unwrap();
+    let le14 =
+        parse_frame_header_14bit(&FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER_14BIT_LE).unwrap();
+    // Sync-word fields differ by design; the rest must match.
+    for (a, b) in [(raw, be14), (raw, le14)] {
+        assert_eq!(a.frame_type, b.frame_type);
+        assert_eq!(a.sample_count_per_block, b.sample_count_per_block);
+        assert_eq!(a.crc_present, b.crc_present);
+        assert_eq!(a.blocks_per_frame, b.blocks_per_frame);
+        assert_eq!(a.frame_size_bytes, b.frame_size_bytes);
+        assert_eq!(a.amode, b.amode);
+        assert_eq!(a.sfreq_index, b.sfreq_index);
+        assert_eq!(a.rate_index, b.rate_index);
+    }
+}
+
+/// `unpack_14bit_to_16bit` on the 14-bit-BE buffer reproduces the
+/// original raw-BE byte sequence as its leading prefix.
+#[test]
+fn unpacked_be_buffer_prefix_matches_raw_be_header() {
+    let unpacked = unpack_14bit_to_16bit(
+        &FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER_14BIT_BE,
+        FourteenBitByteOrder::BigEndian,
+    )
+    .unwrap();
+    // The raw-BE fixture is the first 16 bytes of the same frame; the
+    // 14-bit-packed buffer carries those 16 bytes (= 128 bits) plus a
+    // little extra padding. The first 16 bytes of the unpacked output
+    // must therefore equal the raw-BE fixture exactly.
+    assert_eq!(
+        &unpacked[..FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER.len()],
+        &FFMPEG_DTS_48K_STEREO_768K_FRAME0_HEADER,
+    );
 }

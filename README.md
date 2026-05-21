@@ -5,15 +5,16 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
-**Round 1 — clean-room frame-header parser.** The orphan rebuild
-that followed the 2026-05-18 audit ships its first piece of real
-functionality: a structural decoder for the DTS Core frame sync
-header per ETSI TS 102 114 §5.3 (mirrored at
-`docs/audio/dts/wiki/DTS.wiki`).
+**Round 2 — 14-bit sync unpacking.** Round 1 (2026-05-21) landed the
+structural frame-header parser; round 2 adds support for the two
+14-bit-packed sync encodings (`1F FF E8 00 07 Fx` BE and
+`FF 1F 00 E8 Fx 07` LE) by way of a small bit-level unpacker
+(`unpack_14bit_to_16bit`) that converts 14-bit-packed input into
+the equivalent 16-bit raw-BE byte stream the round-1 parser already
+understands. A dedicated `parse_frame_header_14bit` entry point
+keeps the two accepted-input sets disjoint at the type level.
 
-The parser handles the two 16-bit raw sync encodings
-(`7F FE 80 01` and the byte-swapped `FE 7F 01 80`) and surfaces a
-typed `DtsFrameHeader`:
+The parser surfaces a typed `DtsFrameHeader`:
 
 | Field                     | Source                              |
 | ------------------------- | ----------------------------------- |
@@ -29,13 +30,13 @@ typed `DtsFrameHeader`:
 
 A black-box test against a real `ffmpeg -c:a dca -ar 48000 -ac 2
 -b:a 768k` frame is included; ffmpeg is invoked only as an
-opaque generator, not consulted as source.
+opaque generator, not consulted as source. Round 2 adds two
+companion fixtures repacked into the 14-bit BE and LE container
+forms; all three encodings recover the identical structural
+fields.
 
-Round 1 does **not** unpack the 14-bit sync variants
-(`1F FF E8 00 07 Fx` / `FF 1F 00 E8 Fx 07`) — they are detected and
-the parser returns `Error::UnsupportedFourteenBit`. Subband, QMF,
-Huffman, vector-quantisation, DTS-HD / EXSS / XLL / X96 / XCH all
-remain out of scope.
+Subband, QMF, Huffman, vector-quantisation, DTS-HD / EXSS / XLL /
+X96 / XCH all remain out of scope.
 
 ## Docs gaps (filed for the docs collaborator)
 

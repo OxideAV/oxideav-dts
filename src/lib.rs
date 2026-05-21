@@ -3,13 +3,16 @@
 //! Pure-Rust DTS Coherent Acoustics decoder for the
 //! [oxideav](https://github.com/OxideAV/oxideav) framework.
 //!
-//! **Status:** clean-room rebuild round 1 (frame-header parser only).
+//! **Status:** clean-room rebuild round 2 (frame-header parser +
+//! 14-bit sync unpacking).
 //!
-//! Round 1 lands a structural [`DtsFrameHeader`] parser for the DTS
-//! Core frame sync header (per the multimedia.cx wiki snapshot at
-//! `docs/audio/dts/wiki/DTS.wiki`, which mirrors the ETSI TS 102 114
-//! §5.3 bit layout). Bitstream / subframe decoding is **not** part of
-//! this round.
+//! Round 1 (2026-05-21) landed a structural [`DtsFrameHeader`] parser
+//! for the DTS Core frame sync header (per the multimedia.cx wiki
+//! snapshot at `docs/audio/dts/wiki/DTS.wiki`, which mirrors the
+//! ETSI TS 102 114 §5.3 bit layout). Round 2 (2026-05-21) adds a
+//! 14-bit unpacker so both 14-bit container forms decode through
+//! the same structural parser as the two 16-bit raw forms.
+//! Bitstream / subframe decoding is **not** part of this round.
 //!
 //! The parser distinguishes the four documented bitstream encodings
 //! via the 32-bit (or 40-bit) syncword (see [`SyncWordEncoding`]) and
@@ -46,7 +49,12 @@
 //! - [`DtsFrameHeader`] — typed parse result.
 //! - [`SyncWordEncoding`] — the four documented sync variants.
 //! - [`FrameType`] — termination vs normal.
-//! - [`parse_frame_header`] — non-allocating single-frame parser.
+//! - [`parse_frame_header`] — non-allocating single-frame parser
+//!   for the two raw 16-bit syncs.
+//! - [`parse_frame_header_14bit`] — single-frame parser for the two
+//!   14-bit packed syncs (added in round 2).
+//! - [`unpack_14bit_to_16bit`] / [`FourteenBitByteOrder`] — the
+//!   underlying 14→16-bit unpacker (added in round 2).
 //! - [`Error`] — crate-local error type.
 //!
 //! The crate `forbid`s `unsafe`.
@@ -59,8 +67,12 @@ use oxideav_core::RuntimeContext;
 
 mod bitreader;
 mod header;
+mod unpack14;
 
-pub use crate::header::{parse_frame_header, DtsFrameHeader, FrameType, SyncWordEncoding};
+pub use crate::header::{
+    parse_frame_header, parse_frame_header_14bit, DtsFrameHeader, FrameType, SyncWordEncoding,
+};
+pub use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
 
 /// Crate-local error type. Round 1 surfaces only the parser-related
 /// variants; future rounds will extend this enum as decoding stages
@@ -73,8 +85,12 @@ pub enum Error {
     /// None of the four documented DTS sync words matched the first
     /// 4–5 bytes of the input.
     NoSync,
-    /// A 14-bit DTS sync was detected. Round 1 only parses the
-    /// 16-bit raw variants; 14-bit unpacking is a follow-up.
+    /// A 14-bit DTS sync was detected at the 16-bit-input entry
+    /// point [`parse_frame_header`]. Round 2 added a dedicated
+    /// [`parse_frame_header_14bit`] entry point plus
+    /// [`unpack_14bit_to_16bit`] for callers that want to convert
+    /// 14-bit-packed bytes into the raw-BE form. This variant
+    /// remains for callers that route by sync up-front.
     UnsupportedFourteenBit,
     /// The decoded `NBLKS` field reported fewer than 5 blocks per
     /// frame — the wiki/spec disallow this.
@@ -99,8 +115,9 @@ impl core::fmt::Display for Error {
             }
             Error::UnsupportedFourteenBit => write!(
                 f,
-                "oxideav-dts: 14-bit DTS bitstream not yet supported (round-1 \
-                 parser handles 16-bit raw streams only)"
+                "oxideav-dts: 14-bit DTS sync detected at the 16-bit-input \
+                 entry point; call parse_frame_header_14bit (or \
+                 unpack_14bit_to_16bit + parse_frame_header) instead"
             ),
             Error::BlockCountOutOfRange { blocks } => write!(
                 f,

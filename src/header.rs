@@ -14,8 +14,11 @@
 //! ```
 //!
 //! Round 1 fully parses the two 16-bit raw variants and returns
-//! [`Error::UnsupportedFourteenBit`] for the 14-bit variants — the
-//! 14→16 bit unpacking step is a follow-up task.
+//! [`Error::UnsupportedFourteenBit`] for the 14-bit variants from
+//! [`parse_frame_header`]. Round 2 adds [`parse_frame_header_14bit`]
+//! plus a [`crate::unpack_14bit_to_16bit`] primitive that converts a
+//! 14-bit-packed buffer into its 16-bit-equivalent raw-BE form so the
+//! existing parser can consume both encodings uniformly.
 //!
 //! ## Field layout (after the 32-bit sync, MSB-first)
 //!
@@ -37,6 +40,7 @@
 //! them.
 
 use crate::bitreader::BitReader;
+use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
 use crate::{Error, Result};
 
 /// The four documented DTS Core syncword encodings (per the wiki
@@ -50,11 +54,13 @@ pub enum SyncWordEncoding {
     /// `FE 7F 01 80` — byte-swapped little-endian raw 16-bit-per-word
     /// DTS. Commonly seen inside DTS-in-WAV / CD-DA encapsulation.
     RawLittleEndian,
-    /// `1F FF E8 00 07 Fx` — 14-bit big-endian packed DTS. Round 1
-    /// does not unpack this variant.
+    /// `1F FF E8 00 07 Fx` — 14-bit big-endian packed DTS. The
+    /// `unpack14` module (round 2) converts this into the raw-BE
+    /// form for [`parse_frame_header_14bit`].
     FourteenBitBigEndian,
-    /// `FF 1F 00 E8 Fx 07` — 14-bit little-endian packed DTS. Round
-    /// 1 does not unpack this variant.
+    /// `FF 1F 00 E8 Fx 07` — 14-bit little-endian packed DTS. The
+    /// `unpack14` module (round 2) converts this into the raw-BE
+    /// form for [`parse_frame_header_14bit`].
     FourteenBitLittleEndian,
 }
 
@@ -144,12 +150,17 @@ impl DtsFrameHeader {
 /// Parse a single DTS Core frame-sync header from the start of
 /// `bytes`.
 ///
-/// The buffer must contain at least the 32-bit sync (or 40 bits for
-/// a 14-bit sync) plus the ~10 bytes of header that follow. Returns
-/// [`Error::UnexpectedEof`] on a short buffer, [`Error::NoSync`] if
-/// no documented sync sequence matches at offset zero, and
-/// [`Error::UnsupportedFourteenBit`] if a 14-bit sync is found
-/// (round-1 limitation).
+/// The buffer must begin with one of the two **raw 16-bit** sync
+/// sequences (`7F FE 80 01` or its byte-swapped form
+/// `FE 7F 01 80`) and contain ~15 bytes total (4-byte sync + 82
+/// header bits). Returns:
+/// - [`Error::UnexpectedEof`] on a short buffer.
+/// - [`Error::NoSync`] if no documented sync sequence matches at
+///   offset zero.
+/// - [`Error::UnsupportedFourteenBit`] if a 14-bit-packed sync is
+///   found at offset zero — callers with 14-bit input should use
+///   [`parse_frame_header_14bit`] (or pre-unpack with
+///   [`crate::unpack_14bit_to_16bit`]) instead.
 ///
 /// The parser is non-allocating and side-effect free.
 pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
@@ -235,9 +246,79 @@ pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
     })
 }
 
+/// Parse a single DTS Core frame-sync header from a 14-bit-packed
+/// buffer.
+///
+/// The buffer must start with one of the two 14-bit sync sequences
+/// documented in `docs/audio/dts/wiki/DTS.wiki`
+/// (`1F FF E8 00 07 Fx` for big-endian containers,
+/// `FF 1F 00 E8 Fx 07` for little-endian containers). The function
+/// runs [`crate::unpack_14bit_to_16bit`] to convert the input into
+/// the raw-BE 16-bit form and then delegates to
+/// [`parse_frame_header`].
+///
+/// Returns:
+/// - [`Error::NoSync`] if the buffer does not start with a 14-bit
+///   sync (callers should route raw 16-bit inputs to
+///   [`parse_frame_header`] instead).
+/// - [`Error::UnexpectedEof`] if the buffer has an odd length, or
+///   if the unpacked stream is shorter than the 15 bytes the
+///   header parser requires.
+/// - the same out-of-range / EOF errors as [`parse_frame_header`]
+///   once the unpack succeeds.
+///
+/// The unpacker output is byte-aligned every four containers
+/// (4 × 14 = 56 bits); the header parser only walks the first 96
+/// bits (sync + 82 header bits = 114 bits → 15 bytes), so an input
+/// of at least 18 bytes (= nine 14-bit containers = 126 bits >= 114)
+/// is sufficient. The function does not require more than that.
+pub fn parse_frame_header_14bit(bytes: &[u8]) -> Result<DtsFrameHeader> {
+    let sync = detect_sync(bytes)?;
+    let order = match FourteenBitByteOrder::from_sync(sync) {
+        Some(o) => o,
+        None => {
+            // Caller supplied a raw 16-bit sync to the 14-bit entry
+            // point. Report NoSync to keep the two entry points'
+            // accepted-input sets disjoint and unambiguous.
+            return Err(Error::NoSync);
+        }
+    };
+    // Need at least 18 input bytes (= 9 containers = 126 payload
+    // bits = 15.75 unpacked bytes, rounded up to 16) so the parser
+    // can read its 15-byte header window.
+    if bytes.len() < 18 {
+        return Err(Error::UnexpectedEof);
+    }
+    let unpacked = unpack_14bit_to_16bit(bytes, order)?;
+    if unpacked.len() < 15 {
+        return Err(Error::UnexpectedEof);
+    }
+    // After unpacking, the stream is raw-BE; delegate to the
+    // existing parser. We override the returned sync_word_encoding
+    // so callers see the original 14-bit variant rather than the
+    // synthesised RawBigEndian one.
+    let mut hdr = parse_frame_header(&unpacked)?;
+    hdr.sync_word_encoding = sync;
+    Ok(hdr)
+}
+
 /// Detect which of the four documented sync sequences (if any)
 /// appears at the start of `bytes`. Public to the crate so tests can
 /// exercise sync detection independently of header decoding.
+///
+/// For the two raw (16-bit) variants this is a literal byte-pattern
+/// match against the wiki's documented prefixes.
+///
+/// For the two 14-bit variants the detector matches on the **lower
+/// 14 bits** of each of the first three 16-bit containers, ignoring
+/// the upper 2 bits of each container. This mirrors the unpacker
+/// semantics (`docs/audio/dts/wiki/DTS.wiki` says the upper 2 bits
+/// are sign-extension, which is informative-only when interpreting
+/// the bytes as audio samples). The wiki's literal documented
+/// prefixes (`1F FF E8 00 07 Fx` BE and `FF 1F 00 E8 Fx 07` LE) are
+/// one specific instantiation of those payloads; sign-extended
+/// instantiations encoding the same payloads are also valid 14-bit
+/// DTS sync.
 pub(crate) fn detect_sync(bytes: &[u8]) -> Result<SyncWordEncoding> {
     if bytes.len() < 4 {
         return Err(Error::UnexpectedEof);
@@ -249,18 +330,36 @@ pub(crate) fn detect_sync(bytes: &[u8]) -> Result<SyncWordEncoding> {
     if bytes[..4] == [0xFE, 0x7F, 0x01, 0x80] {
         return Ok(SyncWordEncoding::RawLittleEndian);
     }
-    // 14-bit sequences (5 bytes, with low nibble of byte 5 wildcarded
-    // per the wiki: `1F FF E8 00 07 Fx` and `FF 1F 00 E8 Fx 07`).
-    if bytes.len() >= 6 && bytes[..5] == [0x1F, 0xFF, 0xE8, 0x00, 0x07] && (bytes[5] & 0xF0) == 0xF0
-    {
-        return Ok(SyncWordEncoding::FourteenBitBigEndian);
-    }
-    if bytes.len() >= 6
-        && bytes[..4] == [0xFF, 0x1F, 0x00, 0xE8]
-        && (bytes[4] & 0xF0) == 0xF0
-        && bytes[5] == 0x07
-    {
-        return Ok(SyncWordEncoding::FourteenBitLittleEndian);
+    // 14-bit sequences (6 bytes = three 16-bit containers carrying
+    // 42 payload bits). The DTS syncword is 32 payload bits
+    // (0x7FFE8001); a 14-bit-packed stream encodes those 32 bits
+    // across containers 0/1 in full (14 + 14 = 28 bits) and the top
+    // 4 bits of container 2 (28..32). Container 2's bottom 10 bits
+    // carry frame-header data (FTYPE..NBLKS_high) and must NOT
+    // participate in sync detection — earlier round-1 code matched
+    // them too, which incidentally only accepted frames whose
+    // FTYPE/deficit/CRC/NBLKS_high happened to be `1/31/1/000`.
+    //
+    // We confirm bits 0..31 of the unpacked payload equal
+    // 0x7FFE_8001 by:
+    //   container 0 lower 14 bits == 0x1FFF (covers bits 0..13)
+    //   container 1 lower 14 bits == 0x2800 (covers bits 14..27)
+    //   container 2 lower 14 bits, top 4 == 0b0001 (covers bits 28..31)
+    if bytes.len() >= 6 {
+        let c0_be = u16::from_be_bytes([bytes[0], bytes[1]]) & 0x3FFF;
+        let c1_be = u16::from_be_bytes([bytes[2], bytes[3]]) & 0x3FFF;
+        let c2_be = u16::from_be_bytes([bytes[4], bytes[5]]) & 0x3FFF;
+        // c2's top 4 bits within its 14-bit payload: shift right 10
+        // and mask to 4 bits.
+        if c0_be == 0x1FFF && c1_be == 0x2800 && ((c2_be >> 10) & 0xF) == 0x1 {
+            return Ok(SyncWordEncoding::FourteenBitBigEndian);
+        }
+        let c0_le = u16::from_le_bytes([bytes[0], bytes[1]]) & 0x3FFF;
+        let c1_le = u16::from_le_bytes([bytes[2], bytes[3]]) & 0x3FFF;
+        let c2_le = u16::from_le_bytes([bytes[4], bytes[5]]) & 0x3FFF;
+        if c0_le == 0x1FFF && c1_le == 0x2800 && ((c2_le >> 10) & 0xF) == 0x1 {
+            return Ok(SyncWordEncoding::FourteenBitLittleEndian);
+        }
     }
     Err(Error::NoSync)
 }
@@ -507,6 +606,166 @@ mod tests {
             parse_frame_header(&buf).unwrap_err(),
             Error::UnsupportedFourteenBit
         );
+    }
+
+    /// Build a 14-bit BE-packed buffer carrying the same DTS frame
+    /// the `build_be_header` helper produces in raw-BE form.
+    #[allow(clippy::too_many_arguments)]
+    fn build_14bit_packed_header(
+        order: FourteenBitByteOrder,
+        ftype: u32,
+        sample_count_m1: u32,
+        crc_present: u32,
+        nblks: u32,
+        fsize_m1: u32,
+        amode: u32,
+        sfreq: u32,
+        rate: u32,
+        extra_bits: u32,
+    ) -> Vec<u8> {
+        // Step 1: build the equivalent raw-BE byte buffer using the
+        // existing helper.
+        let raw_be = build_be_header(
+            ftype,
+            sample_count_m1,
+            crc_present,
+            nblks,
+            fsize_m1,
+            amode,
+            sfreq,
+            rate,
+            extra_bits,
+        );
+        // Step 2: walk the raw bit stream MSB-first, emitting 14-bit
+        // payloads packed into 16-bit containers in the requested
+        // byte order.
+        let mut packed: Vec<u8> = Vec::new();
+        let mut bit_pos: usize = 0;
+        let total_bits = raw_be.len() * 8;
+        while bit_pos + 14 <= total_bits {
+            let mut payload: u16 = 0;
+            for i in 0..14 {
+                let abs = bit_pos + i;
+                let bit = (raw_be[abs / 8] >> (7 - (abs % 8))) & 1;
+                payload = (payload << 1) | bit as u16;
+            }
+            // Sign-extend bit 13 into bits 14..16 per the wiki's
+            // "upper two bits are sign bit extension" rule.
+            let container = if payload & 0x2000 != 0 {
+                payload | 0xC000
+            } else {
+                payload & 0x3FFF
+            };
+            let bytes = match order {
+                FourteenBitByteOrder::BigEndian => container.to_be_bytes(),
+                FourteenBitByteOrder::LittleEndian => container.to_le_bytes(),
+            };
+            packed.extend_from_slice(&bytes);
+            bit_pos += 14;
+        }
+        packed
+    }
+
+    #[test]
+    fn parse_frame_header_14bit_be_matches_raw_be() {
+        let raw = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0b1010_0101_0011);
+        let packed = build_14bit_packed_header(
+            FourteenBitByteOrder::BigEndian,
+            1,
+            31,
+            1,
+            16,
+            1023,
+            9,
+            13,
+            25,
+            0b1010_0101_0011,
+        );
+        let hdr_raw = parse_frame_header(&raw).unwrap();
+        let hdr_packed = parse_frame_header_14bit(&packed).unwrap();
+        assert_eq!(
+            hdr_packed.sync_word_encoding,
+            SyncWordEncoding::FourteenBitBigEndian,
+        );
+        // Every structural field must agree with the raw-BE parse.
+        assert_eq!(hdr_packed.frame_type, hdr_raw.frame_type);
+        assert_eq!(
+            hdr_packed.sample_count_per_block,
+            hdr_raw.sample_count_per_block,
+        );
+        assert_eq!(hdr_packed.crc_present, hdr_raw.crc_present);
+        assert_eq!(hdr_packed.blocks_per_frame, hdr_raw.blocks_per_frame);
+        assert_eq!(hdr_packed.frame_size_bytes, hdr_raw.frame_size_bytes);
+        assert_eq!(hdr_packed.amode, hdr_raw.amode);
+        assert_eq!(hdr_packed.sfreq_index, hdr_raw.sfreq_index);
+        assert_eq!(hdr_packed.rate_index, hdr_raw.rate_index);
+    }
+
+    #[test]
+    fn parse_frame_header_14bit_le_matches_raw_be() {
+        let raw = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0);
+        let packed = build_14bit_packed_header(
+            FourteenBitByteOrder::LittleEndian,
+            0,
+            0,
+            0,
+            5,
+            94,
+            0,
+            0,
+            0,
+            0,
+        );
+        let hdr_raw = parse_frame_header(&raw).unwrap();
+        let hdr_packed = parse_frame_header_14bit(&packed).unwrap();
+        assert_eq!(
+            hdr_packed.sync_word_encoding,
+            SyncWordEncoding::FourteenBitLittleEndian,
+        );
+        assert_eq!(hdr_packed.frame_type, FrameType::Termination);
+        assert_eq!(hdr_packed.frame_type, hdr_raw.frame_type);
+        assert_eq!(hdr_packed.blocks_per_frame, hdr_raw.blocks_per_frame);
+        assert_eq!(hdr_packed.frame_size_bytes, hdr_raw.frame_size_bytes);
+    }
+
+    /// `parse_frame_header_14bit` must reject a raw-16-bit buffer
+    /// with `NoSync` so the two entry points stay disjoint.
+    #[test]
+    fn parse_frame_header_14bit_rejects_raw_be_input() {
+        let raw = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0);
+        assert_eq!(parse_frame_header_14bit(&raw).unwrap_err(), Error::NoSync,);
+    }
+
+    #[test]
+    fn parse_frame_header_14bit_short_buffer_returns_eof() {
+        // Just the 6-byte sync prefix is below the 18-byte minimum.
+        let buf = [0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xF0];
+        assert_eq!(
+            parse_frame_header_14bit(&buf).unwrap_err(),
+            Error::UnexpectedEof,
+        );
+    }
+
+    #[test]
+    fn parse_frame_header_14bit_value_resolvers_still_none() {
+        let packed = build_14bit_packed_header(
+            FourteenBitByteOrder::BigEndian,
+            1,
+            31,
+            1,
+            16,
+            1023,
+            9,
+            13,
+            25,
+            0,
+        );
+        let hdr = parse_frame_header_14bit(&packed).unwrap();
+        // The SFREQ/RATE/AMODE tables remain missing from docs/; the
+        // resolvers must still return None.
+        assert_eq!(hdr.sample_rate_hz(), None);
+        assert_eq!(hdr.bit_rate_bps(), None);
+        assert_eq!(hdr.channel_count(), None);
     }
 
     #[test]
