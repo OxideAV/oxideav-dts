@@ -6,6 +6,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.1](https://github.com/OxideAV/oxideav-dts/releases/tag/v0.0.1) - 2026-05-21
+
+### Other
+
+- round 1: frame-header parser per ETSI TS 102 114 §5.3
+- orphan rebuild: clean-room scaffold post 2026-05-18 audit
+
 ### Added
 
 - Round 1 (2026-05-21) — structural frame-sync header parser per
