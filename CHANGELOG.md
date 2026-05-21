@@ -8,6 +8,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 3 (2026-05-21) — trailing-13-bit field + optional
+  16-bit header-CRC field surfaced through `DtsFrameHeader`.
+  After RATE the parser now consumes (in MSB-first order, per
+  `docs/audio/dts/wiki/DTS.wiki`): `downmix` (1 bit),
+  `dynamic_range` (1 bit), `time_stamp` (1 bit),
+  `aux_data` (1 bit), `hdcd` (1 bit), `ext_descr` (3 bits),
+  `ext_coding` (1 bit), `aspf` (1 bit), `lfe` (2-bit `LfeMode`
+  enum: `None | Mode1 | Mode2 | Mode3`), and `predictor_history`
+  (1 bit). When `crc_present` is set, the trailing 16-bit
+  `HEADER_CRC` field is captured into `header_crc: Option<u16>`.
+  `DtsFrameHeader::verify_header_crc()` returns `None` (polynomial
+  undocumented; see README docs gap #4). The black-box ffmpeg
+  fixture's new-field assertions confirm `LfeMode::None`,
+  `predictor_history == true`, `header_crc == None`, and every
+  other trailing-flag false for the captured frame; the same
+  values are observed through the 14-bit BE and LE repacked
+  fixtures, so all three documented sync encodings now agree on
+  the full 56-bit header window plus optional CRC.
+- New `LfeMode` enum re-exported from the crate root; `code()`
+  and `is_present()` accessors.
+- Twelve new unit tests covering: all four LFE codes, CRC-field
+  present / absent paths, all-zero and all-one trailing windows,
+  and round-3 fields equivalence across raw-BE / raw-LE /
+  14-bit-BE / 14-bit-LE encodings.
 - Round 2 (2026-05-21) — 14-bit sync unpacking. New
   `unpack14` module exports `unpack_14bit_to_16bit` plus
   `FourteenBitByteOrder` for the two documented 14-bit packings
@@ -50,6 +74,11 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `docs/audio/dts/`. The corresponding `DtsFrameHeader::sample_rate_hz` /
   `bit_rate_bps` / `channel_count` resolvers return `None` until
   the tables are mirrored from ETSI TS 102 114 §5.3.
+- Header-CRC polynomial / coverage / seed / endianness: the wiki
+  snapshot lists the 16-bit field but does not specify its CRC
+  contract. `DtsFrameHeader::verify_header_crc()` returns `None`
+  until the contract lands in `docs/`. Filed in `README.md` as
+  round-3 gap #4.
 
 ### Erased
 

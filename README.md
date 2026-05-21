@@ -5,14 +5,17 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
-**Round 2 — 14-bit sync unpacking.** Round 1 (2026-05-21) landed the
-structural frame-header parser; round 2 adds support for the two
-14-bit-packed sync encodings (`1F FF E8 00 07 Fx` BE and
-`FF 1F 00 E8 Fx 07` LE) by way of a small bit-level unpacker
-(`unpack_14bit_to_16bit`) that converts 14-bit-packed input into
-the equivalent 16-bit raw-BE byte stream the round-1 parser already
-understands. A dedicated `parse_frame_header_14bit` entry point
-keeps the two accepted-input sets disjoint at the type level.
+**Round 3 — trailing-13-bit flags + optional header-CRC field.**
+Round 1 landed the structural frame-header parser; round 2 added
+the two 14-bit-packed sync encodings (`1F FF E8 00 07 Fx` BE and
+`FF 1F 00 E8 Fx 07` LE) via `unpack_14bit_to_16bit` plus the
+dedicated `parse_frame_header_14bit` entry point. Round 3
+(2026-05-21) extends the typed header through the 13 single-bit
+and small-field flags that follow RATE in the wiki layout
+(downmix, dynamic-range, time-stamp, aux-data, HDCD, 3-bit
+extension-audio descriptor, extension-audio coding, ASPF,
+2-bit LFE mode, predictor-history) plus the optional 16-bit
+`HEADER_CRC` field that is emitted iff `crc_present` is set.
 
 The parser surfaces a typed `DtsFrameHeader`:
 
@@ -27,13 +30,32 @@ The parser surfaces a typed `DtsFrameHeader`:
 | `amode`                   | AMODE (6 bits)                      |
 | `sfreq_index`             | SFREQ (4 bits)                      |
 | `rate_index`              | RATE (5 bits)                       |
+| `downmix`                 | DOWNMIX (1 bit)                     |
+| `dynamic_range`           | DYNRANGE (1 bit)                    |
+| `time_stamp`              | TIMSTP (1 bit)                      |
+| `aux_data`                | AUXDATA (1 bit)                     |
+| `hdcd`                    | HDCD (1 bit)                        |
+| `ext_descr`               | EXT_DESCR (3 bits)                  |
+| `ext_coding`              | EXT_CODING (1 bit)                  |
+| `aspf`                    | ASPF (1 bit)                        |
+| `lfe`                     | LFE (2 bits) → `LfeMode` enum       |
+| `predictor_history`       | PRED_HISTORY (1 bit)                |
+| `header_crc`              | `Option<u16>` — `Some` iff `crc_present` |
+
+`DtsFrameHeader::verify_header_crc()` currently returns `None`:
+the wiki snapshot names the 16-bit `HEADER_CRC` field but does
+not document the polynomial, seed, or covered bit range, so
+verification waits on a docs follow-up (see "Docs gaps" below).
+The raw 16-bit field is still surfaced for pass-through use
+cases (re-muxing, equality / hash).
 
 A black-box test against a real `ffmpeg -c:a dca -ar 48000 -ac 2
 -b:a 768k` frame is included; ffmpeg is invoked only as an
-opaque generator, not consulted as source. Round 2 adds two
-companion fixtures repacked into the 14-bit BE and LE container
-forms; all three encodings recover the identical structural
-fields.
+opaque generator, not consulted as source. Round 2's two companion
+fixtures repacked into the 14-bit BE and LE container forms are
+extended in round 3 to also check the trailing-flag and CRC
+fields. All three encodings recover identical structural plus
+trailing-flag fields.
 
 Subband, QMF, Huffman, vector-quantisation, DTS-HD / EXSS / XLL /
 X96 / XCH all remain out of scope.
@@ -60,6 +82,18 @@ tables are not in `docs/`:
 A clean-room recipe for filling the gap: cite ETSI TS 102 114
 §5.3.1 tables 5.7 / 5.8 / 5.9 verbatim (the spec is public on the
 ETSI portal) and mirror them into `docs/audio/dts/spec/`.
+
+### Round-3 docs gaps
+
+4. **`HEADER_CRC` polynomial / coverage**: the wiki snapshot lists
+   the 16-bit field as "`Header CRC | if CRC present above is
+   set`" without spelling out the generator polynomial, the seed
+   value, the byte / bit endianness, or the exact bit range the
+   CRC covers. `DtsFrameHeader::verify_header_crc()` therefore
+   returns `None` even when the raw field is present. The ETSI
+   TS 102 114 main spec is the same external clean-room source
+   recommended for gaps 1–3 above — it documents the CRC
+   contract in §5.3.
 
 ## License
 

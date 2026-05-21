@@ -3,8 +3,9 @@
 //! Pure-Rust DTS Coherent Acoustics decoder for the
 //! [oxideav](https://github.com/OxideAV/oxideav) framework.
 //!
-//! **Status:** clean-room rebuild round 2 (frame-header parser +
-//! 14-bit sync unpacking).
+//! **Status:** clean-room rebuild round 3 (frame-header parser +
+//! 14-bit sync unpacking + trailing-flag fields + optional
+//! 16-bit header CRC field).
 //!
 //! Round 1 (2026-05-21) landed a structural [`DtsFrameHeader`] parser
 //! for the DTS Core frame sync header (per the multimedia.cx wiki
@@ -12,6 +13,15 @@
 //! ETSI TS 102 114 §5.3 bit layout). Round 2 (2026-05-21) adds a
 //! 14-bit unpacker so both 14-bit container forms decode through
 //! the same structural parser as the two 16-bit raw forms.
+//! Round 3 (2026-05-21) extends the typed header through the 13
+//! trailing single-bit / small-field flags after RATE (downmix,
+//! dynamic-range, time-stamp, aux-data, HDCD, ext-audio-descr,
+//! ext-audio-coding, ASPF, 2-bit LFE mode, predictor-history) plus
+//! the optional 16-bit `HEADER_CRC` field that follows when
+//! [`DtsFrameHeader::crc_present`] is set. The CRC polynomial is
+//! not yet documented in `docs/`, so
+//! [`DtsFrameHeader::verify_header_crc`] returns `None` for now;
+//! the raw 16-bit field is still surfaced for pass-through callers.
 //! Bitstream / subframe decoding is **not** part of this round.
 //!
 //! The parser distinguishes the four documented bitstream encodings
@@ -70,7 +80,8 @@ mod header;
 mod unpack14;
 
 pub use crate::header::{
-    parse_frame_header, parse_frame_header_14bit, DtsFrameHeader, FrameType, SyncWordEncoding,
+    parse_frame_header, parse_frame_header_14bit, DtsFrameHeader, FrameType, LfeMode,
+    SyncWordEncoding,
 };
 pub use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
 

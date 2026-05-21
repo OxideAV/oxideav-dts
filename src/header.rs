@@ -32,12 +32,23 @@
 //! | 6    | AMODE (channel cfg)   | 0..=15 standard, 16..=63 user      |
 //! | 4    | SFREQ                 | sample-freq index (tables missing) |
 //! | 5    | RATE                  | bitrate index (tables missing)     |
+//! | 1    | DOWNMIX               | embedded downmix-coefficients flag |
+//! | 1    | DYNRANGE              | embedded dynamic-range data flag   |
+//! | 1    | TIMSTP                | timestamp-field-present flag       |
+//! | 1    | AUXDATA               | auxiliary-data-field-present flag  |
+//! | 1    | HDCD                  | HDCD-encoded-source flag           |
+//! | 3    | EXT_DESCR             | extension-audio-descriptor (0..=7) |
+//! | 1    | EXT_CODING            | extension-audio-coding flag        |
+//! | 1    | ASPF                  | audio-sync-word in subframes flag  |
+//! | 2    | LFE                   | LFE channel mode (0..=3)           |
+//! | 1    | PRED_HISTORY          | predictor-history-enabled flag     |
+//! | 16   | HEADER_CRC            | only present when CRC_PRESENT == 1 |
 //!
-//! Round 1 stops after RATE; the remaining bits (downmix, dynrng,
-//! timstp, auxdata, HDCD, ext-audio-descr, ext-audio, ASPF, LFE,
-//! predictor-history, header CRC) are documented in the wiki but
-//! not surfaced via the typed header until a future round needs
-//! them.
+//! Round 3 (2026-05-21) surfaces every field in the table above
+//! through [`DtsFrameHeader`]; the remaining wiki entries
+//! (multirate-inter, version, copy-history, source-PCM-resolution,
+//! front-sum, surround-sum, dialog-normalization) are deferred
+//! to a future round.
 
 use crate::bitreader::BitReader;
 use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
@@ -74,6 +85,59 @@ pub enum FrameType {
     Normal,
 }
 
+/// LFE-channel mode (`LFE`, 2 bits wide).
+///
+/// The wiki snapshot lists the field as a 2-bit code without naming
+/// the four values. ETSI TS 102 114 §5.3.1 documents the codes as
+/// "no LFE channel" (0), "128-sample-decimated LFE" (1),
+/// "64-sample-decimated LFE" (2), and "reserved/invalid" (3); the
+/// wiki snapshot itself does not include those labels, so this enum
+/// keeps the names neutral — `code` is the raw 2-bit value and
+/// [`Self::is_present`] discriminates "no LFE" (code 0) from the
+/// three present-LFE codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LfeMode {
+    /// Raw LFE code 0. The wiki implies this is "no LFE channel"
+    /// because the LFE field is the gate to the LFE-stream
+    /// subblocks; this implementation does not assert it.
+    None,
+    /// Raw LFE code 1 — present, mode-1 (see `docs/audio/dts/wiki/`).
+    Mode1,
+    /// Raw LFE code 2 — present, mode-2.
+    Mode2,
+    /// Raw LFE code 3 — reserved-or-mode-3 per the wiki snapshot.
+    Mode3,
+}
+
+impl LfeMode {
+    /// Construct from the raw 2-bit code (`0..=3`).
+    fn from_raw(code: u8) -> Self {
+        match code & 0b11 {
+            0 => LfeMode::None,
+            1 => LfeMode::Mode1,
+            2 => LfeMode::Mode2,
+            _ => LfeMode::Mode3,
+        }
+    }
+
+    /// Recover the raw 2-bit LFE code.
+    pub fn code(self) -> u8 {
+        match self {
+            LfeMode::None => 0,
+            LfeMode::Mode1 => 1,
+            LfeMode::Mode2 => 2,
+            LfeMode::Mode3 => 3,
+        }
+    }
+
+    /// Whether *any* LFE channel is present. Codes 1..=3 all signal a
+    /// present LFE channel per the wiki; only code 0 marks its
+    /// absence.
+    pub fn is_present(self) -> bool {
+        !matches!(self, LfeMode::None)
+    }
+}
+
 /// Parsed DTS Core frame-sync header.
 ///
 /// Round 1 surfaces only the structural fields whose semantics are
@@ -108,6 +172,41 @@ pub struct DtsFrameHeader {
     /// Transmission-bitrate index (RATE, 0..=31). The bps mapping
     /// is not yet in `docs/`; see [`Self::bit_rate_bps`].
     pub rate_index: u8,
+    /// Embedded-downmix-coefficients flag (`DOWNMIX`, 1 bit).
+    pub downmix: bool,
+    /// Embedded-dynamic-range-data flag (`DYNRANGE`, 1 bit).
+    pub dynamic_range: bool,
+    /// Timestamp-field-present flag (`TIMSTP`, 1 bit). The wiki
+    /// snapshot only names the bit; round 3 does not interpret the
+    /// optional timestamp payload that may appear later in the
+    /// bitstream.
+    pub time_stamp: bool,
+    /// Auxiliary-data-field-present flag (`AUXDATA`, 1 bit).
+    pub aux_data: bool,
+    /// HDCD-encoded-source flag (`HDCD`, 1 bit).
+    pub hdcd: bool,
+    /// Extension-audio-descriptor (`EXT_DESCR`, 3 bits, 0..=7). The
+    /// wiki snapshot does not enumerate the value semantics; the raw
+    /// 3-bit code is preserved verbatim.
+    pub ext_descr: u8,
+    /// Extension-audio-coding flag (`EXT_CODING`, 1 bit). Indicates
+    /// whether an extension substream (X96 / XCH / XXCH / EXSS) is
+    /// muxed alongside the Core stream.
+    pub ext_coding: bool,
+    /// Audio-sync-word-in-subframes flag (`ASPF`, 1 bit).
+    pub aspf: bool,
+    /// LFE-channel mode (`LFE`, 2 bits). See [`LfeMode`].
+    pub lfe: LfeMode,
+    /// Predictor-history-enabled flag (`PRED_HISTORY`, 1 bit).
+    pub predictor_history: bool,
+    /// 16-bit header-CRC value (`HEADER_CRC`). Present iff
+    /// [`Self::crc_present`] is `true`; `None` otherwise. The CRC
+    /// polynomial is **not** documented in the wiki snapshot under
+    /// `docs/audio/dts/`, so [`Self::verify_header_crc`] currently
+    /// returns `None` — the field is exposed for round-3 callers
+    /// that want to forward the raw value, but verification waits
+    /// for the polynomial to land in `docs/`.
+    pub header_crc: Option<u16>,
 }
 
 impl DtsFrameHeader {
@@ -134,8 +233,8 @@ impl DtsFrameHeader {
     }
 
     /// Resolve [`Self::amode`] to a count of audio channels (LFE
-    /// excluded; the LFE field lives later in the header and is
-    /// not surfaced in round 1).
+    /// excluded; round 3 surfaces the LFE field separately via
+    /// [`Self::lfe`] / [`LfeMode::is_present`]).
     ///
     /// Returns `None` for now: the AMODE→channel-layout table is
     /// missing from `docs/audio/dts/`. The wiki snapshot only says
@@ -143,6 +242,29 @@ impl DtsFrameHeader {
     /// out the layouts.
     pub fn channel_count(&self) -> Option<u8> {
         let _ = self.amode;
+        None
+    }
+
+    /// Verify the 16-bit [`Self::header_crc`] against the bits
+    /// covered by the DTS Core header-CRC contract.
+    ///
+    /// Returns:
+    /// - `None` if [`Self::crc_present`] is `false` (no CRC field
+    ///   was emitted), or if the CRC polynomial is not yet
+    ///   documented in `docs/audio/dts/`. As of round 3 the wiki
+    ///   snapshot (`docs/audio/dts/wiki/DTS.wiki`) only names the
+    ///   field (`16 bits | Header CRC | if CRC present above is
+    ///   set`) without spelling out the polynomial, the seed
+    ///   value, the byte order, or the bit range the CRC covers.
+    /// - `Some(true)` / `Some(false)` if a future round lands the
+    ///   polynomial specification.
+    ///
+    /// The caller can use [`Self::header_crc`] directly for
+    /// pass-through scenarios that do not need verification (e.g.
+    /// re-muxing).
+    pub fn verify_header_crc(&self) -> Option<bool> {
+        // Polynomial undocumented; see the comment above.
+        let _ = self.header_crc?;
         None
     }
 }
@@ -233,6 +355,30 @@ pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
     let sfreq_index = br.read_bits(4)? as u8;
     let rate_index = br.read_bits(5)? as u8;
 
+    // Round 3: 13 bits of trailing single-bit / small-field flags.
+    // Per the wiki snapshot, in this order:
+    //   1 DOWNMIX, 1 DYNRANGE, 1 TIMSTP, 1 AUXDATA, 1 HDCD,
+    //   3 EXT_DESCR, 1 EXT_CODING, 1 ASPF, 2 LFE, 1 PRED_HISTORY.
+    let downmix = br.read_bit()?;
+    let dynamic_range = br.read_bit()?;
+    let time_stamp = br.read_bit()?;
+    let aux_data = br.read_bit()?;
+    let hdcd = br.read_bit()?;
+    let ext_descr = br.read_bits(3)? as u8;
+    let ext_coding = br.read_bit()?;
+    let aspf = br.read_bit()?;
+    let lfe_raw = br.read_bits(2)? as u8;
+    let lfe = LfeMode::from_raw(lfe_raw);
+    let predictor_history = br.read_bit()?;
+
+    // Round 3: optional 16-bit HEADER_CRC field — present iff
+    // CRC_PRESENT was set above.
+    let header_crc = if crc_present {
+        Some(br.read_bits(16)? as u16)
+    } else {
+        None
+    };
+
     Ok(DtsFrameHeader {
         sync_word_encoding: sync,
         frame_type,
@@ -243,6 +389,17 @@ pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
         amode,
         sfreq_index,
         rate_index,
+        downmix,
+        dynamic_range,
+        time_stamp,
+        aux_data,
+        hdcd,
+        ext_descr,
+        ext_coding,
+        aspf,
+        lfe,
+        predictor_history,
+        header_crc,
     })
 }
 
@@ -268,10 +425,13 @@ pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
 ///   once the unpack succeeds.
 ///
 /// The unpacker output is byte-aligned every four containers
-/// (4 × 14 = 56 bits); the header parser only walks the first 96
-/// bits (sync + 82 header bits = 114 bits → 15 bytes), so an input
-/// of at least 18 bytes (= nine 14-bit containers = 126 bits >= 114)
-/// is sufficient. The function does not require more than that.
+/// (4 × 14 = 56 bits); the header parser walks at most
+/// sync + 56 header bits + 16 CRC bits = 104 bits → 13 bytes for
+/// raw-BE input. The 14-bit-packed input therefore needs at least
+/// `ceil(104 / 14) * 2 = 16` bytes (= eight 14-bit containers =
+/// 112 bits ≥ 104). We require 18 bytes to keep a small margin and
+/// to ensure the unpacked stream meets the 15-byte minimum the
+/// raw-BE parser asserts up-front.
 pub fn parse_frame_header_14bit(bytes: &[u8]) -> Result<DtsFrameHeader> {
     let sync = detect_sync(bytes)?;
     let order = match FourteenBitByteOrder::from_sync(sync) {
@@ -371,21 +531,24 @@ mod tests {
     /// Build a synthetic raw-BE DTS frame header with explicit field
     /// values, in the bit order documented above.
     ///
-    /// `extra_bits_after_rate` are the 12 trailing header bits the
-    /// parser does not consume in round 1 (downmix..predictor) plus
-    /// any padding; passed as a `u32` (only the bottom 12 bits used)
-    /// to keep the test inputs explicit.
+    /// `extra_bits` are the 13 trailing header bits the parser
+    /// consumes after RATE in round 3 (downmix .. predictor history),
+    /// passed as a `u32` (only the bottom 13 bits used) so callers
+    /// can spell the bit-pattern out literally. If
+    /// `header_crc` is `Some`, the 16-bit CRC is emitted after the
+    /// 13 trailing bits and `crc_present` should be `1`.
     #[allow(clippy::too_many_arguments)]
     fn build_be_header(
         ftype: u32,
-        sample_count_m1: u32, // 5 bits
-        crc_present: u32,     // 1 bit
-        nblks: u32,           // 7 bits
-        fsize_m1: u32,        // 14 bits
-        amode: u32,           // 6 bits
-        sfreq: u32,           // 4 bits
-        rate: u32,            // 5 bits
-        extra_bits: u32,      // 12 bits (downmix..predictor)
+        sample_count_m1: u32,    // 5 bits
+        crc_present: u32,        // 1 bit
+        nblks: u32,              // 7 bits
+        fsize_m1: u32,           // 14 bits
+        amode: u32,              // 6 bits
+        sfreq: u32,              // 4 bits
+        rate: u32,               // 5 bits
+        extra_bits: u32,         // 13 bits (downmix..predictor)
+        header_crc: Option<u32>, // 16 bits, only when crc_present == 1
     ) -> Vec<u8> {
         // We will accumulate a bit-vector MSB-first and then chunk to
         // bytes.
@@ -407,7 +570,10 @@ mod tests {
         push(&mut bv, amode, 6);
         push(&mut bv, sfreq, 4);
         push(&mut bv, rate, 5);
-        push(&mut bv, extra_bits, 12);
+        push(&mut bv, extra_bits, 13);
+        if let Some(crc) = header_crc {
+            push(&mut bv, crc, 16);
+        }
         // pad to whole bytes
         while bv.len() % 8 != 0 {
             bv.push(false);
@@ -486,15 +652,16 @@ mod tests {
         // those Hz/bps/channels — pick arbitrary codes since the
         // parser only roundtrips the raw indices).
         let bytes = build_be_header(
-            1,                // FTYPE = normal
-            31,               // sample_count_m1 = 31 → 32 samples/block
-            1,                // CRC present
-            15,               // NBLKS = 15  (16 blocks)
-            1023,             // FSIZE-1 = 1023 → frame size = 1024 bytes
-            9,                // AMODE = 9 (raw index)
-            13,               // SFREQ = 13
-            25,               // RATE = 25
-            0b1010_0101_0011, // extra trailing 12 bits
+            1,                  // FTYPE = normal
+            31,                 // sample_count_m1 = 31 → 32 samples/block
+            1,                  // CRC present
+            15,                 // NBLKS = 15  (16 blocks)
+            1023,               // FSIZE-1 = 1023 → frame size = 1024 bytes
+            9,                  // AMODE = 9 (raw index)
+            13,                 // SFREQ = 13
+            25,                 // RATE = 25
+            0b1_0100_1010_0011, // extra trailing 13 bits
+            Some(0xC0DE),       // CRC field present
         );
 
         let hdr = parse_frame_header(&bytes).unwrap();
@@ -507,22 +674,51 @@ mod tests {
         assert_eq!(hdr.amode, 9);
         assert_eq!(hdr.sfreq_index, 13);
         assert_eq!(hdr.rate_index, 25);
+        // Round 3: trailing-13-bit flags decoded MSB-first from
+        // 0b1_0100_1010_0011 → downmix=1, dyn=0, time=1, aux=0,
+        // hdcd=0, ext_descr=101=5, ext_coding=0, aspf=0, lfe=01,
+        // predictor=1.
+        assert!(hdr.downmix);
+        assert!(!hdr.dynamic_range);
+        assert!(hdr.time_stamp);
+        assert!(!hdr.aux_data);
+        assert!(!hdr.hdcd);
+        assert_eq!(hdr.ext_descr, 0b101);
+        assert!(!hdr.ext_coding);
+        assert!(!hdr.aspf);
+        assert_eq!(hdr.lfe, LfeMode::Mode1);
+        assert!(hdr.predictor_history);
+        // CRC field present.
+        assert_eq!(hdr.header_crc, Some(0xC0DE));
     }
 
     #[test]
     fn parse_termination_frame_be() {
-        let bytes = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0);
+        let bytes = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0, None);
         let hdr = parse_frame_header(&bytes).unwrap();
         assert_eq!(hdr.frame_type, FrameType::Termination);
         assert_eq!(hdr.sample_count_per_block, 1);
         assert!(!hdr.crc_present);
         assert_eq!(hdr.blocks_per_frame, 5);
         assert_eq!(hdr.frame_size_bytes, 95);
+        // All trailing flags zero by construction.
+        assert!(!hdr.downmix);
+        assert!(!hdr.dynamic_range);
+        assert!(!hdr.time_stamp);
+        assert!(!hdr.aux_data);
+        assert!(!hdr.hdcd);
+        assert_eq!(hdr.ext_descr, 0);
+        assert!(!hdr.ext_coding);
+        assert!(!hdr.aspf);
+        assert_eq!(hdr.lfe, LfeMode::None);
+        assert!(!hdr.predictor_history);
+        // crc_present == 0 means no CRC field follows.
+        assert_eq!(hdr.header_crc, None);
     }
 
     #[test]
     fn parse_rejects_nblks_below_5() {
-        let bytes = build_be_header(1, 31, 1, 4, 1023, 0, 0, 0, 0);
+        let bytes = build_be_header(1, 31, 1, 4, 1023, 0, 0, 0, 0, Some(0));
         assert_eq!(
             parse_frame_header(&bytes).unwrap_err(),
             Error::BlockCountOutOfRange { blocks: 4 }
@@ -531,7 +727,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_frame_size_below_95() {
-        let bytes = build_be_header(1, 31, 1, 16, 93, 0, 0, 0, 0);
+        let bytes = build_be_header(1, 31, 1, 16, 93, 0, 0, 0, 0, Some(0));
         assert_eq!(
             parse_frame_header(&bytes).unwrap_err(),
             Error::FrameSizeOutOfRange { frame_size: 94 }
@@ -542,19 +738,43 @@ mod tests {
     fn parse_accepts_largest_documented_values() {
         // NBLKS = 127, FSIZE-1 = 16383 → 16384 bytes, AMODE = 63,
         // SFREQ = 15, RATE = 31 — all the max-index values the
-        // wiki allows for these fields.
-        let bytes = build_be_header(1, 31, 1, 127, 16383, 63, 15, 31, 0);
+        // wiki allows for these fields. Also exercises the
+        // largest documented trailing-field codes: ext_descr=7,
+        // lfe code 3 (Mode3), and all flag bits set.
+        let bytes = build_be_header(
+            1,
+            31,
+            1,
+            127,
+            16383,
+            63,
+            15,
+            31,
+            0b1_1111_1111_1111,
+            Some(0xFFFF),
+        );
         let hdr = parse_frame_header(&bytes).unwrap();
         assert_eq!(hdr.blocks_per_frame, 127);
         assert_eq!(hdr.frame_size_bytes, 16384);
         assert_eq!(hdr.amode, 63);
         assert_eq!(hdr.sfreq_index, 15);
         assert_eq!(hdr.rate_index, 31);
+        assert!(hdr.downmix);
+        assert!(hdr.dynamic_range);
+        assert!(hdr.time_stamp);
+        assert!(hdr.aux_data);
+        assert!(hdr.hdcd);
+        assert_eq!(hdr.ext_descr, 0b111);
+        assert!(hdr.ext_coding);
+        assert!(hdr.aspf);
+        assert_eq!(hdr.lfe, LfeMode::Mode3);
+        assert!(hdr.predictor_history);
+        assert_eq!(hdr.header_crc, Some(0xFFFF));
     }
 
     #[test]
     fn parse_short_buffer_returns_eof() {
-        let mut bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0);
+        let mut bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0));
         bytes.truncate(8);
         assert_eq!(
             parse_frame_header(&bytes).unwrap_err(),
@@ -567,7 +787,18 @@ mod tests {
         // Build BE bytes then byte-swap each 16-bit word; the
         // parsed structural fields must match the BE version
         // exactly (only the sync_word_encoding differs).
-        let be = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0);
+        let be = build_be_header(
+            1,
+            31,
+            1,
+            16,
+            1023,
+            9,
+            13,
+            25,
+            0b1_0100_1010_0011,
+            Some(0xBEEF),
+        );
         let mut le = Vec::with_capacity(be.len());
         for chunk in be.chunks_exact(2) {
             le.push(chunk[1]);
@@ -586,6 +817,19 @@ mod tests {
         assert_eq!(hdr_le.amode, hdr_be.amode);
         assert_eq!(hdr_le.sfreq_index, hdr_be.sfreq_index);
         assert_eq!(hdr_le.rate_index, hdr_be.rate_index);
+        // Round 3 fields must also round-trip identically through
+        // the LE byte-swap path.
+        assert_eq!(hdr_le.downmix, hdr_be.downmix);
+        assert_eq!(hdr_le.dynamic_range, hdr_be.dynamic_range);
+        assert_eq!(hdr_le.time_stamp, hdr_be.time_stamp);
+        assert_eq!(hdr_le.aux_data, hdr_be.aux_data);
+        assert_eq!(hdr_le.hdcd, hdr_be.hdcd);
+        assert_eq!(hdr_le.ext_descr, hdr_be.ext_descr);
+        assert_eq!(hdr_le.ext_coding, hdr_be.ext_coding);
+        assert_eq!(hdr_le.aspf, hdr_be.aspf);
+        assert_eq!(hdr_le.lfe, hdr_be.lfe);
+        assert_eq!(hdr_le.predictor_history, hdr_be.predictor_history);
+        assert_eq!(hdr_le.header_crc, hdr_be.header_crc);
     }
 
     #[test]
@@ -622,6 +866,7 @@ mod tests {
         sfreq: u32,
         rate: u32,
         extra_bits: u32,
+        header_crc: Option<u32>,
     ) -> Vec<u8> {
         // Step 1: build the equivalent raw-BE byte buffer using the
         // existing helper.
@@ -635,6 +880,7 @@ mod tests {
             sfreq,
             rate,
             extra_bits,
+            header_crc,
         );
         // Step 2: walk the raw bit stream MSB-first, emitting 14-bit
         // payloads packed into 16-bit containers in the requested
@@ -668,7 +914,18 @@ mod tests {
 
     #[test]
     fn parse_frame_header_14bit_be_matches_raw_be() {
-        let raw = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0b1010_0101_0011);
+        let raw = build_be_header(
+            1,
+            31,
+            1,
+            16,
+            1023,
+            9,
+            13,
+            25,
+            0b1_0100_1010_0011,
+            Some(0xC0DE),
+        );
         let packed = build_14bit_packed_header(
             FourteenBitByteOrder::BigEndian,
             1,
@@ -679,7 +936,8 @@ mod tests {
             9,
             13,
             25,
-            0b1010_0101_0011,
+            0b1_0100_1010_0011,
+            Some(0xC0DE),
         );
         let hdr_raw = parse_frame_header(&raw).unwrap();
         let hdr_packed = parse_frame_header_14bit(&packed).unwrap();
@@ -699,11 +957,24 @@ mod tests {
         assert_eq!(hdr_packed.amode, hdr_raw.amode);
         assert_eq!(hdr_packed.sfreq_index, hdr_raw.sfreq_index);
         assert_eq!(hdr_packed.rate_index, hdr_raw.rate_index);
+        // Round 3: trailing flags + optional CRC must round-trip
+        // identically through 14-bit packing.
+        assert_eq!(hdr_packed.downmix, hdr_raw.downmix);
+        assert_eq!(hdr_packed.dynamic_range, hdr_raw.dynamic_range);
+        assert_eq!(hdr_packed.time_stamp, hdr_raw.time_stamp);
+        assert_eq!(hdr_packed.aux_data, hdr_raw.aux_data);
+        assert_eq!(hdr_packed.hdcd, hdr_raw.hdcd);
+        assert_eq!(hdr_packed.ext_descr, hdr_raw.ext_descr);
+        assert_eq!(hdr_packed.ext_coding, hdr_raw.ext_coding);
+        assert_eq!(hdr_packed.aspf, hdr_raw.aspf);
+        assert_eq!(hdr_packed.lfe, hdr_raw.lfe);
+        assert_eq!(hdr_packed.predictor_history, hdr_raw.predictor_history);
+        assert_eq!(hdr_packed.header_crc, hdr_raw.header_crc);
     }
 
     #[test]
     fn parse_frame_header_14bit_le_matches_raw_be() {
-        let raw = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0);
+        let raw = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0, None);
         let packed = build_14bit_packed_header(
             FourteenBitByteOrder::LittleEndian,
             0,
@@ -715,6 +986,7 @@ mod tests {
             0,
             0,
             0,
+            None,
         );
         let hdr_raw = parse_frame_header(&raw).unwrap();
         let hdr_packed = parse_frame_header_14bit(&packed).unwrap();
@@ -726,13 +998,15 @@ mod tests {
         assert_eq!(hdr_packed.frame_type, hdr_raw.frame_type);
         assert_eq!(hdr_packed.blocks_per_frame, hdr_raw.blocks_per_frame);
         assert_eq!(hdr_packed.frame_size_bytes, hdr_raw.frame_size_bytes);
+        // No CRC when crc_present == 0.
+        assert_eq!(hdr_packed.header_crc, None);
     }
 
     /// `parse_frame_header_14bit` must reject a raw-16-bit buffer
     /// with `NoSync` so the two entry points stay disjoint.
     #[test]
     fn parse_frame_header_14bit_rejects_raw_be_input() {
-        let raw = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0);
+        let raw = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, None);
         assert_eq!(parse_frame_header_14bit(&raw).unwrap_err(), Error::NoSync,);
     }
 
@@ -759,6 +1033,7 @@ mod tests {
             13,
             25,
             0,
+            Some(0),
         );
         let hdr = parse_frame_header_14bit(&packed).unwrap();
         // The SFREQ/RATE/AMODE tables remain missing from docs/; the
@@ -776,10 +1051,102 @@ mod tests {
 
     #[test]
     fn value_resolvers_return_none_until_tables_land() {
-        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0);
+        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0));
         let hdr = parse_frame_header(&bytes).unwrap();
         assert_eq!(hdr.sample_rate_hz(), None);
         assert_eq!(hdr.bit_rate_bps(), None);
         assert_eq!(hdr.channel_count(), None);
+    }
+
+    // ---------------------------------------------------------------
+    // Round 3 — trailing-13-bit field + optional 16-bit HEADER_CRC.
+    // ---------------------------------------------------------------
+
+    /// Walk every 2-bit LFE code (0..=3) and verify the [`LfeMode`]
+    /// round-trips through the parser.
+    #[test]
+    fn lfe_mode_codes_round_trip() {
+        for code in 0..=3u32 {
+            // extra_bits layout (13 bits MSB-first): 11 leading
+            // zeros + 2-bit LFE code + 0 predictor.
+            //   bits 0..10 = 0  (downmix..aspf, 11 bits total)
+            //   bits 11..12 = lfe code (we shift left 1 so
+            //                 predictor bit stays 0)
+            let extra = (code & 0b11) << 1;
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, extra, None);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(hdr.lfe.code(), code as u8, "code {code}");
+            assert_eq!(hdr.lfe.is_present(), code != 0, "is_present({code})");
+            // Spot-check the typed enum mapping.
+            let expected = match code {
+                0 => LfeMode::None,
+                1 => LfeMode::Mode1,
+                2 => LfeMode::Mode2,
+                _ => LfeMode::Mode3,
+            };
+            assert_eq!(hdr.lfe, expected, "enum mapping for code {code}");
+        }
+    }
+
+    /// When `crc_present == 0` the parser must NOT consume the
+    /// optional 16-bit CRC field; `header_crc` must be `None`.
+    #[test]
+    fn header_crc_absent_when_crc_present_bit_is_zero() {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(!hdr.crc_present);
+        assert_eq!(hdr.header_crc, None);
+        // verify_header_crc returns None when there is nothing to
+        // verify.
+        assert_eq!(hdr.verify_header_crc(), None);
+    }
+
+    /// When `crc_present == 1` the parser captures the 16-bit field
+    /// verbatim; verification still returns `None` because the
+    /// polynomial is undocumented.
+    #[test]
+    fn header_crc_present_returns_raw_field_and_unverified() {
+        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0x1234));
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(hdr.crc_present);
+        assert_eq!(hdr.header_crc, Some(0x1234));
+        // Polynomial undocumented -> still None.
+        assert_eq!(hdr.verify_header_crc(), None);
+    }
+
+    /// All-zeros 13-bit trailing window decodes to all-false flags,
+    /// `ext_descr == 0`, and `LfeMode::None`.
+    #[test]
+    fn trailing_bits_all_zero_decodes_clean() {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(!hdr.downmix);
+        assert!(!hdr.dynamic_range);
+        assert!(!hdr.time_stamp);
+        assert!(!hdr.aux_data);
+        assert!(!hdr.hdcd);
+        assert_eq!(hdr.ext_descr, 0);
+        assert!(!hdr.ext_coding);
+        assert!(!hdr.aspf);
+        assert_eq!(hdr.lfe, LfeMode::None);
+        assert!(!hdr.predictor_history);
+    }
+
+    /// All-ones 13-bit trailing window decodes to all-true flags,
+    /// `ext_descr == 7`, and `LfeMode::Mode3`.
+    #[test]
+    fn trailing_bits_all_one_decodes_max() {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0b1_1111_1111_1111, None);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(hdr.downmix);
+        assert!(hdr.dynamic_range);
+        assert!(hdr.time_stamp);
+        assert!(hdr.aux_data);
+        assert!(hdr.hdcd);
+        assert_eq!(hdr.ext_descr, 0b111);
+        assert!(hdr.ext_coding);
+        assert!(hdr.aspf);
+        assert_eq!(hdr.lfe, LfeMode::Mode3);
+        assert!(hdr.predictor_history);
     }
 }

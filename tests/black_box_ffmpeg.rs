@@ -21,7 +21,7 @@
 
 use oxideav_dts::{
     parse_frame_header, parse_frame_header_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder,
-    FrameType, SyncWordEncoding,
+    FrameType, LfeMode, SyncWordEncoding,
 };
 
 /// 16 bytes captured from a real `ffmpeg -c:a dca -b:a 768k -ar
@@ -61,6 +61,28 @@ fn parses_real_ffmpeg_frame_header() {
     assert_eq!(hdr.sample_rate_hz(), None);
     assert_eq!(hdr.bit_rate_bps(), None);
     assert_eq!(hdr.channel_count(), None);
+
+    // Round 3: trailing-13-bit field as observed in the real
+    // ffmpeg frame. Bytes 9..11 carry 0xE0 0x01 = 1110_0000
+    // 0000_0001 → after RATE (which ends at byte-9 bit 2) the 13
+    // trailing bits are 00000_0000_0001 (MSB-first), so every flag
+    // is zero, ext_descr = 0, LFE code = 0 (no LFE channel — ffmpeg
+    // was invoked with -ac 2 stereo), predictor_history = 1.
+    assert!(!hdr.downmix);
+    assert!(!hdr.dynamic_range);
+    assert!(!hdr.time_stamp);
+    assert!(!hdr.aux_data);
+    assert!(!hdr.hdcd);
+    assert_eq!(hdr.ext_descr, 0);
+    assert!(!hdr.ext_coding);
+    assert!(!hdr.aspf);
+    assert_eq!(hdr.lfe, LfeMode::None);
+    assert!(!hdr.lfe.is_present());
+    assert!(hdr.predictor_history);
+    // crc_present was 0 on this fixture, so the optional CRC field
+    // is absent and `verify_header_crc` has nothing to verify.
+    assert_eq!(hdr.header_crc, None);
+    assert_eq!(hdr.verify_header_crc(), None);
 }
 
 /// The same `ffmpeg` frame as above, repacked into the 14-bit BE
@@ -101,6 +123,10 @@ fn parses_14bit_be_repacked_ffmpeg_frame_header() {
     assert_eq!(hdr.sample_rate_hz(), None);
     assert_eq!(hdr.bit_rate_bps(), None);
     assert_eq!(hdr.channel_count(), None);
+    // Round 3: trailing-field equivalence with the raw-BE parse.
+    assert_eq!(hdr.lfe, LfeMode::None);
+    assert!(hdr.predictor_history);
+    assert_eq!(hdr.header_crc, None);
 }
 
 #[test]
@@ -119,6 +145,10 @@ fn parses_14bit_le_repacked_ffmpeg_frame_header() {
     assert_eq!(hdr.amode, 2);
     assert_eq!(hdr.sfreq_index, 13);
     assert_eq!(hdr.rate_index, 15);
+    // Round 3.
+    assert_eq!(hdr.lfe, LfeMode::None);
+    assert!(hdr.predictor_history);
+    assert_eq!(hdr.header_crc, None);
 }
 
 /// Both 14-bit forms decode to the same logical frame as the
@@ -140,6 +170,19 @@ fn three_input_encodings_decode_to_identical_header_fields() {
         assert_eq!(a.amode, b.amode);
         assert_eq!(a.sfreq_index, b.sfreq_index);
         assert_eq!(a.rate_index, b.rate_index);
+        // Round 3: trailing flags + CRC field must also be
+        // bit-equivalent across the three documented encodings.
+        assert_eq!(a.downmix, b.downmix);
+        assert_eq!(a.dynamic_range, b.dynamic_range);
+        assert_eq!(a.time_stamp, b.time_stamp);
+        assert_eq!(a.aux_data, b.aux_data);
+        assert_eq!(a.hdcd, b.hdcd);
+        assert_eq!(a.ext_descr, b.ext_descr);
+        assert_eq!(a.ext_coding, b.ext_coding);
+        assert_eq!(a.aspf, b.aspf);
+        assert_eq!(a.lfe, b.lfe);
+        assert_eq!(a.predictor_history, b.predictor_history);
+        assert_eq!(a.header_crc, b.header_crc);
     }
 }
 
