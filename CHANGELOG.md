@@ -8,6 +8,48 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 4 (2026-05-22) — `oxideav-core` framework integration. A
+  new default-on `registry` cargo feature gates the
+  `oxideav-core` dep, the `Decoder` trait impl, and the
+  `oxideav_core::register!("dts", register)` macro invocation.
+  With the feature off, the crate retains the standalone
+  `parse_frame_header` / `parse_frame_header_14bit` /
+  `unpack_14bit_to_16bit` APIs plus the crate-local `Error` /
+  `Result` types and pulls no `oxideav-core` dep.
+- `make_decoder(params) -> Box<dyn Decoder>` factory and the
+  `DtsDecoderHandle` it returns. `Decoder::send_packet` parses
+  the frame header eagerly through `detect_sync` and routes to
+  `parse_frame_header` (raw 16-bit syncs) or
+  `parse_frame_header_14bit` (14-bit packed syncs), surfacing
+  structural failures (`NoSync`, `BlockCountOutOfRange`,
+  `FrameSizeOutOfRange`) as `Error::InvalidData` and short
+  buffers as `Error::NeedMore`. `Decoder::receive_frame` returns
+  `Error::Unsupported` because PCM output is gated on the
+  SFREQ/RATE/AMODE value tables landing in `docs/` (see README
+  docs gaps #1-#3). `Decoder::reset` clears the cached header.
+- `register_codecs(reg)` / `register(ctx)` install a `CodecInfo`
+  for `CodecId::new("dts")` carrying the FourCC tags
+  `CodecTag::fourcc(b"dts ")` and `CodecTag::fourcc(b"dtsc")` so
+  the codec resolver routes both QuickTime sample-entry types to
+  the DTS decoder factory.
+- `probe_dts(&[u8]) -> Confidence` — standalone confidence helper:
+  `1.0` on a valid frame at offset 0, `0.5` on a truncated buffer
+  (sync detected but body short), `0.0` on unrelated input. The
+  registry's per-codec probe function (`probe_dts_tag`) wraps
+  this for the `ProbeContext`-driven path: when the demuxer
+  supplies a packet sample it forwards to `probe_dts`; when not,
+  it returns `1.0` so the FourCC claim is treated as unambiguous.
+- Inline `ci-standalone` job in `.github/workflows/ci.yml` running
+  `cargo build --no-default-features --lib` and
+  `cargo test --no-default-features --lib` on every push, beside
+  the existing `OxideAV/.github` reusable-workflow `ci` job that
+  exercises the default-feature (registry) path.
+- 14 new unit tests in `src/registry.rs` covering: `probe_dts`
+  return-value bands for valid / truncated / invalid input, FourCC
+  tag resolution for both `dts` and `dtsc`, the eager
+  header-parse path on `send_packet`, `Error::Unsupported` on
+  `receive_frame` after a parsed header, `Error::NeedMore` and
+  `Error::Eof` boundary cases, and `reset` clearing cached state.
 - Round 3 (2026-05-21) — trailing-13-bit field + optional
   16-bit header-CRC field surfaced through `DtsFrameHeader`.
   After RATE the parser now consumes (in MSB-first order, per

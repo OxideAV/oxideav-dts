@@ -14,4 +14,13 @@ keywords = ["multimedia", "audio", "dts", "dca", "codec"]
 categories = ["multimedia::encoding", "multimedia::audio"]
 
 [dependencies]
-oxideav-core = "0.1"
+oxideav-core = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+# Gate the oxideav-core dep + Decoder trait impl + register!() macro
+# behind this feature so the crate also builds with
+# `--no-default-features --lib` for standalone consumers (CLI tools,
+# stream-only parsers) that just want the structural frame-header
+# parser without the codec-registry surface.
+registry = ["dep:oxideav-core"]

@@ -3,9 +3,9 @@
 //! Pure-Rust DTS Coherent Acoustics decoder for the
 //! [oxideav](https://github.com/OxideAV/oxideav) framework.
 //!
-//! **Status:** clean-room rebuild round 3 (frame-header parser +
+//! **Status:** clean-room rebuild round 4 (frame-header parser +
 //! 14-bit sync unpacking + trailing-flag fields + optional
-//! 16-bit header CRC field).
+//! 16-bit header CRC field + `oxideav-core` `Decoder` integration).
 //!
 //! Round 1 (2026-05-21) landed a structural [`DtsFrameHeader`] parser
 //! for the DTS Core frame sync header (per the multimedia.cx wiki
@@ -22,7 +22,14 @@
 //! not yet documented in `docs/`, so
 //! [`DtsFrameHeader::verify_header_crc`] returns `None` for now;
 //! the raw 16-bit field is still surfaced for pass-through callers.
-//! Bitstream / subframe decoding is **not** part of this round.
+//! Round 4 (2026-05-22) wires the crate into `oxideav-core`'s
+//! [`oxideav_core::Decoder`] surface (behind a default-on `registry`
+//! cargo feature) plus a standalone [`probe_dts`] helper. The
+//! `DtsDecoderHandle` returned by the factory parses the frame
+//! header eagerly inside `send_packet`; `receive_frame` returns
+//! `Error::Unsupported` because PCM output is gated on the
+//! SFREQ/RATE/AMODE value tables landing in `docs/`. Bitstream /
+//! subframe decoding is **not** part of this round.
 //!
 //! The parser distinguishes the four documented bitstream encodings
 //! via the 32-bit (or 40-bit) syncword (see [`SyncWordEncoding`]) and
@@ -67,23 +74,50 @@
 //!   underlying 14→16-bit unpacker (added in round 2).
 //! - [`Error`] — crate-local error type.
 //!
+//! Behind the default-on `registry` cargo feature (round 4):
+//!
+//! - [`register`] / [`register_codecs`] — wire the DTS decoder factory
+//!   plus `dts` / `dtsc` FourCC tags into an
+//!   [`oxideav_core::RuntimeContext`] / [`oxideav_core::CodecRegistry`].
+//! - [`make_decoder`] — factory that builds a boxed
+//!   [`oxideav_core::Decoder`] (the [`DtsDecoderHandle`]).
+//! - [`DtsDecoderHandle`] — the decoder handle. `send_packet` eagerly
+//!   parses the frame header; `receive_frame` returns
+//!   `Error::Unsupported` because PCM output is still blocked on
+//!   docs gaps.
+//! - [`probe_dts`] — standalone confidence helper (1.0 / 0.5 / 0.0).
+//! - [`CODEC_ID_STR`] — canonical codec id `"dts"`.
+//!
 //! The crate `forbid`s `unsafe`.
 
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
 
-use oxideav_core::RuntimeContext;
-
 mod bitreader;
 mod header;
 mod unpack14;
+
+#[cfg(feature = "registry")]
+mod registry;
 
 pub use crate::header::{
     parse_frame_header, parse_frame_header_14bit, DtsFrameHeader, FrameType, LfeMode,
     SyncWordEncoding,
 };
 pub use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
+
+#[cfg(feature = "registry")]
+pub use crate::registry::{
+    make_decoder, probe_dts, register, register_codecs, DtsDecoderHandle, CODEC_ID_STR,
+};
+
+// `oxideav_core::register!("dts", register)` lives inside the
+// `registry` submodule; its `__oxideav_entry` wrapper needs to be
+// reachable at the crate root so `oxideav-meta`'s build-time
+// discovery (which calls `<crate>::__oxideav_entry(ctx)`) finds it.
+#[cfg(feature = "registry")]
+pub use crate::registry::__oxideav_entry;
 
 /// Crate-local error type. Round 1 surfaces only the parser-related
 /// variants; future rounds will extend this enum as decoding stages
@@ -149,11 +183,3 @@ impl std::error::Error for Error {}
 /// Convenience alias for [`Result`] specialised to this crate's
 /// [`Error`].
 pub type Result<T> = core::result::Result<T, Error>;
-
-/// No-op codec registration. Round 1 does not wire a
-/// [`oxideav_core::Decoder`] into the runtime yet — only the
-/// structural parser is exported as plain functions. Subsequent
-/// rounds will register a real decoder here.
-pub fn register(_ctx: &mut RuntimeContext) {}
-
-oxideav_core::register!("dts", register);
