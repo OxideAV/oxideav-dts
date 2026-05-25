@@ -5,7 +5,7 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
-**Round 6 — multi-frame iterator + resync helper.** Round 1 landed
+**Round 138 — header → SUBFRAMES boundary accessor.** Round 1 landed
 the structural frame-header parser; round 2 added the two 14-bit-packed
 sync encodings (`1F FF E8 00 07 Fx` BE and `FF 1F 00 E8 Fx 07` LE) via
 `unpack_14bit_to_16bit` plus the dedicated `parse_frame_header_14bit`
@@ -43,6 +43,14 @@ all five frames, and a truncated-tail variant surfaces
 the crate has no `oxideav-core` dep and surfaces only the
 structural parsers plus the round-6 iterator helpers; an inline
 `ci-standalone` CI job exercises that path on every push.
+Round 138 (2026-05-26) surfaces the header→SUBFRAMES boundary
+through three new accessors derived entirely from the wiki bit-table:
+`DtsFrameHeader::header_bit_length()` (104 when `crc_present == 0`,
+120 when `crc_present == 1`), `DtsFrameHeader::header_byte_length()`
+(13 or 15 — both totals are exact multiples of 8), and
+`FrameView::payload()` which slices off the SUBFRAMES region
+(`data[header_byte_length()..]`) for downstream re-muxers and the
+future subframe decoder.
 
 The parser surfaces a typed `DtsFrameHeader`:
 

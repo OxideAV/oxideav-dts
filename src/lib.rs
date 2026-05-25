@@ -65,6 +65,19 @@
 //! [`Error::UnsupportedFourteenBit`] and terminates if a 14-bit
 //! sync is encountered.
 //!
+//! Round 138 (2026-05-26) surfaces the header→SUBFRAMES boundary
+//! through two new accessors and one [`FrameView`] helper:
+//! [`DtsFrameHeader::header_bit_length`] returns the bit-count the
+//! parser consumed (104 or 120 depending on `crc_present`, both
+//! exact multiples of 8 by the wiki bit-table arithmetic);
+//! [`DtsFrameHeader::header_byte_length`] returns the byte-count
+//! (13 or 15); and [`FrameView::payload`] carves out the SUBFRAMES
+//! region (`data[header_byte_length()..]`) so downstream re-muxers
+//! and the future subframe decoder can address the payload window
+//! without recomputing the header boundary. The values are
+//! fully derived from the wiki bit-table in
+//! `docs/audio/dts/wiki/DTS.wiki`; no new doc dependency.
+//!
 //! The parser distinguishes the four documented bitstream encodings
 //! via the 32-bit (or 40-bit) syncword (see [`SyncWordEncoding`]) and
 //! decodes the structural fields whose semantics are spelled out

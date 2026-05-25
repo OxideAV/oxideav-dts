@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 138 (2026-05-26) — header → SUBFRAMES boundary accessors.
+  `DtsFrameHeader::header_bit_length()` returns the total bit-count
+  the frame-sync header window occupies (sync + base + trailing +
+  optional HEADER_CRC + post-CRC). The value is fully derived from
+  the wiki bit-table in `docs/audio/dts/wiki/DTS.wiki`: 32 + 43 + 13
+  + 16 + (16 iff `crc_present`) = 104 bits when CRC is absent, 120
+  bits when CRC is present. Both totals are exact multiples of 8 by
+  construction, so the corresponding
+  `DtsFrameHeader::header_byte_length()` is always 13 or 15 and the
+  SUBFRAMES region (the wiki's `'''TODO'''` cell) starts on a byte
+  boundary. `FrameView::payload()` returns
+  `&data[header.header_byte_length()..]` so downstream re-muxers,
+  payload-CRC validators, and the future subframe decoder can carve
+  out the SUBFRAMES region directly without recomputing the header
+  boundary.
+- Eight new tests covering the boundary accessor: 104-bit return
+  when `crc_present == 0`, 120-bit return when `crc_present == 1`,
+  manual wiki-table sum equivalence, exhaustive byte-alignment over
+  a grid of structural-field combinations, the 14-bit-packed entry
+  point agrees with the raw-BE entry point on the bit-length value,
+  and three `FrameView::payload()` integration cases (two synthetic
+  95-byte termination frames with crc absent / crc present, and the
+  real ffmpeg-generated 5-frame fixture).
 - Round 6 (2026-05-25) — multi-frame iterator + resync helper.
   New `iter` module exposes `find_next_sync(bytes, start) -> Option<SyncMatch>`
   and `iter_frames(bytes) -> FrameIterator<'_>` (plus the supporting

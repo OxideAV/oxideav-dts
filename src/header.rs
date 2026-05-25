@@ -345,6 +345,70 @@ impl DtsFrameHeader {
         let _ = self.header_crc?;
         None
     }
+
+    /// Total bit-length of the frame-sync header window, counted from
+    /// the first bit of the syncword to the first bit of the SUBFRAMES
+    /// region the wiki marks as `'''TODO'''`.
+    ///
+    /// The value is fully derived from the bit-table in the wiki
+    /// snapshot (`docs/audio/dts/wiki/DTS.wiki`):
+    ///
+    /// | Region                              | Bits                |
+    /// | ----------------------------------- | ------------------- |
+    /// | Sync (32-bit raw / 14-bit packed)   | 32                  |
+    /// | Base: FTYPE..RATE                   | 1+5+1+7+14+6+4+5=43 |
+    /// | Trailing flags: DOWNMIX..PRED_HIST  | 1+1+1+1+1+3+1+1+2+1=13 |
+    /// | Optional HEADER_CRC                 | 16 (iff `crc_present`) |
+    /// | Post-CRC: MULTIRATE_INTER..DIALNORM | 1+4+2+3+1+1+4=16    |
+    ///
+    /// Total: 32 + 43 + 13 + 16 + (16 if `crc_present`) =
+    /// `104` bits when `crc_present == 0`, `120` bits when
+    /// `crc_present == 1`. Both totals are exact multiples of 8, so
+    /// the SUBFRAMES region (the wiki's `'''TODO'''` cell) starts on
+    /// a byte boundary.
+    ///
+    /// The value is in **raw 16-bit-stream bits** for raw-BE / raw-LE
+    /// encodings. For the 14-bit-packed encodings the value still
+    /// reflects the unpacked-bitstream count (i.e. what the parser
+    /// consumed *after* [`crate::unpack_14bit_to_16bit`] has run); the
+    /// container-byte advance for 14-bit input is a separate quantity
+    /// (see `README.md`'s round-6 docs gap #7).
+    pub fn header_bit_length(&self) -> u32 {
+        // Sync(32) + base(43) + trailing(13) + post_crc(16) = 104.
+        // Plus optional HEADER_CRC(16) when crc_present == true.
+        const BASE_BITS: u32 = 32 + 43 + 13 + 16;
+        if self.crc_present {
+            BASE_BITS + 16
+        } else {
+            BASE_BITS
+        }
+    }
+
+    /// Total byte-length of the frame-sync header window — the
+    /// byte offset within the (raw-16-bit-equivalent) frame buffer at
+    /// which the SUBFRAMES region the wiki marks `'''TODO'''`
+    /// begins.
+    ///
+    /// Equivalent to `header_bit_length() / 8`. Always 13
+    /// (`crc_present == false`) or 15 (`crc_present == true`)
+    /// because both totals are exact multiples of 8 by construction.
+    ///
+    /// Useful for downstream subframe / payload decoders that need to
+    /// know where the header ends and the SUBFRAMES region begins
+    /// within a frame slice obtained from
+    /// [`crate::iter_frames`] or directly from
+    /// [`crate::parse_frame_header`].
+    ///
+    /// For 14-bit-packed input the value reflects the unpacked-stream
+    /// byte count, not the container-byte count.
+    pub fn header_byte_length(&self) -> usize {
+        // header_bit_length() is always a multiple of 8 by the
+        // arithmetic above; the assertion is for documentation /
+        // debug builds only.
+        let bits = self.header_bit_length();
+        debug_assert_eq!(bits % 8, 0, "DTS header window must be byte-aligned");
+        (bits / 8) as usize
+    }
 }
 
 /// Parse a single DTS Core frame-sync header from the start of
@@ -1490,6 +1554,123 @@ mod tests {
         assert_eq!(
             hdr_with.dialog_normalization,
             hdr_without.dialog_normalization
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Round 138 — header_bit_length() / header_byte_length()
+    //
+    // The wiki bit-table sums to 104 bits when `crc_present == 0` and
+    // 120 bits when `crc_present == 1`. Both totals are exact
+    // multiples of 8 by construction, so the SUBFRAMES region marked
+    // `'''TODO'''` in the wiki begins on a byte boundary either way.
+    // ---------------------------------------------------------------
+
+    /// `header_bit_length()` returns exactly 104 bits when the
+    /// optional HEADER_CRC slot is NOT present.
+    #[test]
+    fn header_bit_length_104_when_crc_absent() {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(!hdr.crc_present);
+        assert_eq!(hdr.header_bit_length(), 104);
+        assert_eq!(hdr.header_byte_length(), 13);
+    }
+
+    /// `header_bit_length()` returns exactly 120 bits when the
+    /// optional HEADER_CRC slot IS present.
+    #[test]
+    fn header_bit_length_120_when_crc_present() {
+        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xBEEF), 0);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(hdr.crc_present);
+        assert_eq!(hdr.header_bit_length(), 120);
+        assert_eq!(hdr.header_byte_length(), 15);
+    }
+
+    /// The header-length value matches the byte position the parser's
+    /// internal bit reader is left at after a full parse. We confirm
+    /// this by walking the same bit-table independently and observing
+    /// the sum agrees with the public accessor.
+    #[test]
+    fn header_bit_length_matches_manual_wiki_table_sum() {
+        // Wiki sub-totals from `docs/audio/dts/wiki/DTS.wiki`.
+        let sync = 32u32;
+        let base = 1 + 5 + 1 + 7 + 14 + 6 + 4 + 5; // 43
+        let trailing = 1 + 1 + 1 + 1 + 1 + 3 + 1 + 1 + 2 + 1; // 13
+        let post_crc = 1 + 4 + 2 + 3 + 1 + 1 + 4; // 16
+        let crc_slot = 16; // optional
+
+        let absent = build_be_header(1, 31, 0, 5, 94, 0, 0, 0, 0, None, 0);
+        let hdr_absent = parse_frame_header(&absent).unwrap();
+        assert_eq!(
+            hdr_absent.header_bit_length(),
+            sync + base + trailing + post_crc,
+        );
+
+        let present = build_be_header(1, 31, 1, 5, 94, 0, 0, 0, 0, Some(0), 0);
+        let hdr_present = parse_frame_header(&present).unwrap();
+        assert_eq!(
+            hdr_present.header_bit_length(),
+            sync + base + trailing + post_crc + crc_slot,
+        );
+    }
+
+    /// `header_byte_length()` is always a multiple of 8 bits (i.e.
+    /// the SUBFRAMES region starts on a byte boundary), for both
+    /// CRC-absent and CRC-present frames and for every combination of
+    /// the structural fields surfaced through `build_be_header`.
+    #[test]
+    fn header_byte_length_is_always_byte_aligned() {
+        for crc in [0, 1] {
+            for nblks in [5u32, 16, 127] {
+                for fsize_m1 in [94u32, 1023, 16383] {
+                    let crc_payload = if crc == 1 { Some(0) } else { None };
+                    let bytes =
+                        build_be_header(1, 31, crc, nblks, fsize_m1, 0, 0, 0, 0, crc_payload, 0);
+                    let hdr = parse_frame_header(&bytes).unwrap();
+                    assert_eq!(
+                        hdr.header_bit_length() % 8,
+                        0,
+                        "bit length must be byte-aligned (crc={crc} nblks={nblks} fsize_m1={fsize_m1})"
+                    );
+                    assert_eq!(
+                        hdr.header_byte_length() * 8,
+                        hdr.header_bit_length() as usize,
+                    );
+                }
+            }
+        }
+    }
+
+    /// The 14-bit-packed entry point exposes the same
+    /// `header_bit_length()` value as the equivalent raw-BE frame:
+    /// the byte-length is in unpacked-bitstream bits per the doc
+    /// comment, not in 14-bit container bits.
+    #[test]
+    fn header_bit_length_14bit_matches_raw_be() {
+        let raw = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xC0DE), 0);
+        let packed = build_14bit_packed_header(
+            FourteenBitByteOrder::BigEndian,
+            1,
+            31,
+            1,
+            16,
+            1023,
+            9,
+            13,
+            25,
+            0,
+            Some(0xC0DE),
+            0,
+        );
+        let hdr_raw = parse_frame_header(&raw).unwrap();
+        let hdr_packed = parse_frame_header_14bit(&packed).unwrap();
+        assert_eq!(hdr_raw.header_bit_length(), 120);
+        assert_eq!(hdr_packed.header_bit_length(), 120);
+        assert_eq!(
+            hdr_raw.header_byte_length(),
+            hdr_packed.header_byte_length()
         );
     }
 }

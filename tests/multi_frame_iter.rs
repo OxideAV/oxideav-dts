@@ -127,3 +127,32 @@ fn iter_frames_yields_truncation_error_when_last_frame_overruns() {
     // past end-of-buffer.
     assert!(last_err.is_some());
 }
+
+/// Round 138 — `FrameView::payload()` against the real ffmpeg
+/// 5-frame fixture. The fixture's frames have `crc_present == false`
+/// (verified by the round-3 black-box test), so the SUBFRAMES region
+/// starts 13 bytes into each frame.
+#[test]
+fn frame_view_payload_matches_header_boundary_on_ffmpeg_fixture() {
+    let frames: Vec<_> = iter_frames(FIVE_FRAME_STREAM)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(frames.len(), 5);
+    for (i, frame) in frames.iter().enumerate() {
+        // The ffmpeg fixture has CRC absent on every frame, so the
+        // header window is exactly 13 bytes (104 bits) wide.
+        assert!(!frame.header.crc_present, "frame {i}");
+        assert_eq!(frame.header.header_byte_length(), 13);
+        assert_eq!(frame.header.header_bit_length(), 104);
+
+        let payload = frame.payload();
+        // Frame size is 1024 B and the header window is 13 B, so the
+        // SUBFRAMES region is exactly 1011 B.
+        assert_eq!(payload.len(), 1024 - 13);
+        // Payload must be the tail of the frame's data slice.
+        assert_eq!(payload.as_ptr(), frame.data[13..].as_ptr());
+        // First byte of payload is `data[13]` (the byte immediately
+        // following the parsed header window).
+        assert_eq!(payload[0], frame.data[13]);
+    }
+}

@@ -115,6 +115,28 @@ pub struct FrameView<'a> {
     pub data: &'a [u8],
 }
 
+impl<'a> FrameView<'a> {
+    /// SUBFRAMES region of the frame: the bytes that follow the
+    /// fully-decoded frame-sync header.
+    ///
+    /// Equivalent to `&self.data[self.header.header_byte_length()..]`.
+    /// The wiki snapshot (`docs/audio/dts/wiki/DTS.wiki`) marks this
+    /// region as `'''TODO'''`; subband / QMF / Huffman / VQ decoding
+    /// remains gated on the §5.3.1 value tables and the §5.4 polyphase
+    /// filterbank landing in `docs/`. The helper is exposed so
+    /// downstream code (re-muxers, payload-CRC validators, future
+    /// subframe decoders) can carve out the region without recomputing
+    /// the header boundary.
+    ///
+    /// Always non-empty for well-formed frames: the smallest documented
+    /// frame size is 95 B and the largest header window is 15 B
+    /// (`crc_present == true`), so at least 80 B of SUBFRAMES region
+    /// is guaranteed.
+    pub fn payload(&self) -> &'a [u8] {
+        &self.data[self.header.header_byte_length()..]
+    }
+}
+
 /// Iterator that walks a raw-16-bit DTS Core byte buffer frame by
 /// frame.
 ///
@@ -304,5 +326,138 @@ mod tests {
         let mut buf = vec![0xAAu8; 8];
         buf[5..8].copy_from_slice(&[0x7F, 0xFE, 0x80]);
         assert_eq!(find_next_sync(&buf, 0), None);
+    }
+
+    // ---------------------------------------------------------------
+    // Round 138 — FrameView::payload()
+    // ---------------------------------------------------------------
+
+    /// Hand-build a 95-byte raw-BE termination frame (NBLKS=5,
+    /// FSIZE=95, crc_present=0) padded with zeros for the SUBFRAMES
+    /// region; then confirm `FrameView::payload()` returns exactly
+    /// `frame.len - header_byte_length()` bytes (= 95 - 13 = 82).
+    #[test]
+    fn frame_view_payload_slice_length_matches_header_boundary_no_crc() {
+        // The base 13-byte header window is followed by 82 bytes of
+        // SUBFRAMES region we fill with a distinctive 0xCD pattern
+        // so the slice content can be checked too.
+        let mut buf = vec![0u8; 95];
+        // Sync.
+        buf[0..4].copy_from_slice(&[0x7F, 0xFE, 0x80, 0x01]);
+        // FTYPE=0 (termination, MSB), SHORT=0, CRC_PRESENT=0,
+        // NBLKS=5 (7 bits), FSIZE-1=94 (14 bits = frame_size 95),
+        // AMODE=0 (6 bits), SFREQ=0 (4 bits), RATE=0 (5 bits) +
+        // 13 zero trailing bits + 16 zero post-CRC bits = 75 bits
+        // after the sync = 13 bytes total.
+        // Easier: just call build_be_header equivalent through
+        // parse_frame_header on a synthesised buffer.
+        // Bytes layout (after sync):
+        //  byte 4: FTYPE(1)=0 SHORT(5)=0 CRC_PRESENT(1)=0 NBLKS_hi(1)=0 -> 0b00000000 = 0x00
+        //  byte 5: NBLKS_lo(6)=000101 FSIZE_hi(2)=00 -> 0b00010100 = 0x14
+        //  byte 6: FSIZE_mid(8)=00010111 -> 0x17  (FSIZE-1 = 94 = 0b00_00000101_1110, hi 2 bits=00, mid 8=00010111? — recompute below)
+        // Rather than hand-bit-fiddle, sidestep the layout: use
+        // `parse_frame_header` on a 95-byte buffer we synthesise via
+        // the header.rs test helper indirectly by re-deriving the
+        // bit layout here. Simpler: directly construct via a tiny
+        // local builder.
+        fn push(bv: &mut Vec<bool>, value: u32, width: u32) {
+            for i in (0..width).rev() {
+                bv.push(((value >> i) & 1) == 1);
+            }
+        }
+        let mut bv: Vec<bool> = Vec::new();
+        push(&mut bv, 0x7FFE_8001, 32);
+        push(&mut bv, 0, 1); // ftype = termination
+        push(&mut bv, 0, 5); // sample_count_m1
+        push(&mut bv, 0, 1); // crc_present
+        push(&mut bv, 5, 7); // nblks
+        push(&mut bv, 94, 14); // fsize-1 = 94 -> frame_size = 95
+        push(&mut bv, 0, 6); // amode
+        push(&mut bv, 0, 4); // sfreq
+        push(&mut bv, 0, 5); // rate
+        push(&mut bv, 0, 13); // trailing flags
+        push(&mut bv, 0, 16); // post-CRC window
+        while bv.len() % 8 != 0 {
+            bv.push(false);
+        }
+        // Convert bit-vector to bytes (MSB-first).
+        for (i, chunk) in bv.chunks(8).enumerate() {
+            let mut b: u8 = 0;
+            for (k, bit) in chunk.iter().enumerate() {
+                if *bit {
+                    b |= 1 << (7 - k);
+                }
+            }
+            buf[i] = b;
+        }
+        // Fill the SUBFRAMES region (bytes 13..95) with a pattern so
+        // the payload-slice contents can be verified.
+        for byte in buf.iter_mut().skip(13) {
+            *byte = 0xCD;
+        }
+
+        let mut it = iter_frames(&buf);
+        let view = it.next().expect("frame must yield").expect("must parse");
+        assert_eq!(view.offset, 0);
+        assert_eq!(view.len, 95);
+        assert_eq!(view.header.frame_size_bytes, 95);
+        assert!(!view.header.crc_present);
+        assert_eq!(view.header.header_byte_length(), 13);
+
+        let payload = view.payload();
+        assert_eq!(payload.len(), 95 - 13);
+        assert!(payload.iter().all(|&b| b == 0xCD));
+        // No more frames in the buffer.
+        assert!(it.next().is_none());
+    }
+
+    /// `FrameView::payload()` shifts by 2 bytes (15 vs 13) when
+    /// `crc_present == 1` because the optional HEADER_CRC slot
+    /// extends the header window from 104 to 120 bits.
+    #[test]
+    fn frame_view_payload_offset_shifts_when_crc_present() {
+        // Build a 95-byte crc-present termination frame.
+        let mut buf = vec![0u8; 95];
+        fn push(bv: &mut Vec<bool>, value: u32, width: u32) {
+            for i in (0..width).rev() {
+                bv.push(((value >> i) & 1) == 1);
+            }
+        }
+        let mut bv: Vec<bool> = Vec::new();
+        push(&mut bv, 0x7FFE_8001, 32);
+        push(&mut bv, 0, 1);
+        push(&mut bv, 0, 5);
+        push(&mut bv, 1, 1); // crc_present = true
+        push(&mut bv, 5, 7);
+        push(&mut bv, 94, 14);
+        push(&mut bv, 0, 6);
+        push(&mut bv, 0, 4);
+        push(&mut bv, 0, 5);
+        push(&mut bv, 0, 13);
+        push(&mut bv, 0xABCD, 16); // header_crc
+        push(&mut bv, 0, 16); // post-CRC window
+        while bv.len() % 8 != 0 {
+            bv.push(false);
+        }
+        for (i, chunk) in bv.chunks(8).enumerate() {
+            let mut b: u8 = 0;
+            for (k, bit) in chunk.iter().enumerate() {
+                if *bit {
+                    b |= 1 << (7 - k);
+                }
+            }
+            buf[i] = b;
+        }
+        // Fill bytes 15..95 with a distinct pattern.
+        for byte in buf.iter_mut().skip(15) {
+            *byte = 0xEF;
+        }
+
+        let view = iter_frames(&buf).next().unwrap().unwrap();
+        assert!(view.header.crc_present);
+        assert_eq!(view.header.header_byte_length(), 15);
+        let payload = view.payload();
+        assert_eq!(payload.len(), 95 - 15);
+        assert!(payload.iter().all(|&b| b == 0xEF));
     }
 }
