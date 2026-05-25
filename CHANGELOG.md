@@ -8,6 +8,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 5 (2026-05-25) — 16-bit post-CRC trailing window surfaced
+  through `DtsFrameHeader`. After the optional 16-bit `HEADER_CRC`
+  slot (or after the predictor-history bit when `crc_present == 0`),
+  the parser now consumes seven additional fields the wiki
+  snapshot enumerates: `multirate_inter` (1 bit), `version` (4
+  bits, raw 0..=15), `copy_history` (2 bits, raw 0..=3),
+  `source_pcm_resolution_index` (3 bits, raw 0..=7), `front_sum`
+  (1 bit), `surround_sum` (1 bit), and `dialog_normalization` (4
+  bits, raw 0..=15). The window is consumed unconditionally
+  regardless of `crc_present` because the wiki lists it after
+  the HEADER_CRC slot in both code paths. Two new resolver
+  stubs (`DtsFrameHeader::source_pcm_bits_per_sample` and
+  `DtsFrameHeader::dialog_normalization_db`) return `None`
+  pending the index → value tables landing in `docs/` (filed as
+  round-5 docs gaps #5 and #6 in `README.md`).
+- Twelve new unit tests covering: full post-CRC window
+  decomposition for a non-trivial bit pattern (`0xD2EC`),
+  all-zero and all-one post-CRC windows, exhaustive round-trip
+  for every PCMR / DIALNORM / VERSION / COPY_HISTORY code, the
+  `crc_present == 0` vs `crc_present == 1` equivalence of
+  post-CRC sub-fields, and updated assertions on every
+  pre-existing parser test (raw-BE, raw-LE, 14-bit-BE,
+  14-bit-LE, value-resolver, NBLKS-bounds, FSIZE-bounds,
+  short-buffer EOF, trailing-bit edge cases) to also verify the
+  new fields.
+- Black-box ffmpeg fixture asserts (raw-BE + both 14-bit
+  variants + cross-encoding equivalence) extended to verify the
+  post-CRC fields recovered from the real `ffmpeg -c:a dca`
+  frame: `multirate_inter == false`, `version == 7`,
+  `copy_history == 0`, `source_pcm_resolution_index == 0`,
+  `front_sum == false`, `surround_sum == false`,
+  `dialog_normalization == 0`. The same values must come out
+  through all three sync encodings. Registry's
+  `send_packet_eagerly_parses_header` test additionally checks
+  the cached header carries the post-CRC fields after the
+  decoder handle's `send_packet` call.
 - Round 4 (2026-05-22) — `oxideav-core` framework integration. A
   new default-on `registry` cargo feature gates the
   `oxideav-core` dep, the `Decoder` trait impl, and the

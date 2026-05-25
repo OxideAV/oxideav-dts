@@ -5,7 +5,7 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
-**Round 4 — `oxideav-core` framework integration.** Round 1 landed
+**Round 5 — post-CRC 16-bit trailing window.** Round 1 landed
 the structural frame-header parser; round 2 added the two 14-bit-packed
 sync encodings (`1F FF E8 00 07 Fx` BE and `FF 1F 00 E8 Fx 07` LE) via
 `unpack_14bit_to_16bit` plus the dedicated `parse_frame_header_14bit`
@@ -14,11 +14,20 @@ the 13 single-bit and small-field flags that follow RATE in the wiki
 layout (downmix, dynamic-range, time-stamp, aux-data, HDCD, 3-bit
 extension-audio descriptor, extension-audio coding, ASPF, 2-bit LFE
 mode, predictor-history) plus the optional 16-bit `HEADER_CRC` field
-that is emitted iff `crc_present` is set. Round 4 (2026-05-22) wires
+that is emitted iff `crc_present` is set. Round 4 (2026-05-22) wired
 the crate into `oxideav-core`'s `Decoder` trait surface behind a
-default-on `registry` cargo feature, claims the `dts` and `dtsc`
-FourCC tags in the codec registry, and exposes a standalone
-`probe_dts` confidence helper. With `--no-default-features` the
+default-on `registry` cargo feature, claimed the `dts` and `dtsc`
+FourCC tags in the codec registry, and exposed a standalone
+`probe_dts` confidence helper. Round 5 (2026-05-25) extends
+`DtsFrameHeader` through the 16-bit post-CRC trailing window the
+wiki snapshot enumerates after `HEADER_CRC`: `multirate_inter` (1
+bit), `version` (4 bits), `copy_history` (2 bits),
+`source_pcm_resolution_index` (3 bits), `front_sum` (1 bit),
+`surround_sum` (1 bit), and `dialog_normalization` (4 bits). The
+parser consumes these bits unconditionally — the wiki shows them
+following the HEADER_CRC slot whether or not CRC was emitted —
+so they are recovered for `crc_present == 0` frames as well as
+`crc_present == 1` frames. With `--no-default-features` the
 crate has no `oxideav-core` dep and surfaces only the structural
 parsers; an inline `ci-standalone` CI job exercises that path on
 every push.
@@ -47,6 +56,13 @@ The parser surfaces a typed `DtsFrameHeader`:
 | `lfe`                     | LFE (2 bits) → `LfeMode` enum       |
 | `predictor_history`       | PRED_HISTORY (1 bit)                |
 | `header_crc`              | `Option<u16>` — `Some` iff `crc_present` |
+| `multirate_inter`         | MULTIRATE_INTER (1 bit)             |
+| `version`                 | VERSION (4 bits, 0..=15)            |
+| `copy_history`            | COPY_HISTORY (2 bits, 0..=3)        |
+| `source_pcm_resolution_index` | PCMR (3 bits, 0..=7)            |
+| `front_sum`               | FRONT_SUM (1 bit)                   |
+| `surround_sum`            | SURROUND_SUM (1 bit)                |
+| `dialog_normalization`    | DIALNORM (4 bits, 0..=15)           |
 
 `DtsFrameHeader::verify_header_crc()` currently returns `None`:
 the wiki snapshot names the 16-bit `HEADER_CRC` field but does
@@ -130,6 +146,22 @@ ETSI portal) and mirror them into `docs/audio/dts/spec/`.
    TS 102 114 main spec is the same external clean-room source
    recommended for gaps 1–3 above — it documents the CRC
    contract in §5.3.
+
+### Round-5 docs gaps
+
+5. **PCMR (source-PCM-resolution) index → bits-per-sample**: the
+   wiki snapshot enumerates the field as 3 bits ("Source PCM
+   resolution") without listing the eight code values. ETSI TS
+   102 114 §5.3.1 documents this as (typically) a 3-bit width
+   plus a top "ES" flag mapping to 16 / 20 / 24 bps with
+   optional encoder-side ES indication. `DtsFrameHeader::source_pcm_bits_per_sample`
+   returns `None` until the table lands.
+6. **DIALNORM (dialog-normalization) code → dB**: the wiki
+   describes the 4-bit field as "dB of recovery" without
+   enumerating the code → dB mapping (the spec also documents a
+   version-dependent sign convention).
+   `DtsFrameHeader::dialog_normalization_db` returns `None`
+   until the table lands.
 
 ## License
 

@@ -43,12 +43,26 @@
 //! | 2    | LFE                   | LFE channel mode (0..=3)           |
 //! | 1    | PRED_HISTORY          | predictor-history-enabled flag     |
 //! | 16   | HEADER_CRC            | only present when CRC_PRESENT == 1 |
+//! | 1    | MULTIRATE_INTER       | multirate-interpolation-filter selector |
+//! | 4    | VERSION               | encoder version (raw 0..=15)       |
+//! | 2    | COPY_HISTORY          | copy-history code (0..=3)          |
+//! | 3    | PCMR                  | source-PCM-resolution index (0..=7) |
+//! | 1    | FRONT_SUM             | front-channel sum/difference flag  |
+//! | 1    | SURROUND_SUM          | surround-channel sum/difference flag |
+//! | 4    | DIALNORM              | dialog normalization (dB of recovery) |
 //!
-//! Round 3 (2026-05-21) surfaces every field in the table above
-//! through [`DtsFrameHeader`]; the remaining wiki entries
-//! (multirate-inter, version, copy-history, source-PCM-resolution,
-//! front-sum, surround-sum, dialog-normalization) are deferred
-//! to a future round.
+//! Round 3 (2026-05-21) surfaced the first batch through
+//! [`DtsFrameHeader`]. Round 5 (2026-05-25) extends the typed
+//! header through the seven additional post-CRC fields the wiki
+//! enumerates (MULTIRATE_INTER, VERSION, COPY_HISTORY, PCMR,
+//! FRONT_SUM, SURROUND_SUM, DIALNORM). These 16 bits always
+//! follow the HEADER_CRC slot (or the predictor-history bit when
+//! `crc_present == 0`), so the parser consumes them
+//! unconditionally. The value-table fields (DIALNORM dB, COPY_HISTORY
+//! provenance, PCMR resolution mapping) are surfaced as raw indices
+//! because the wiki snapshot enumerates the bit widths but not the
+//! per-code semantic mapping — those tables remain a `docs/`
+//! follow-up.
 
 use crate::bitreader::BitReader;
 use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
@@ -207,6 +221,45 @@ pub struct DtsFrameHeader {
     /// that want to forward the raw value, but verification waits
     /// for the polynomial to land in `docs/`.
     pub header_crc: Option<u16>,
+    /// Multirate-interpolation-filter selector (`MULTIRATE_INTER`,
+    /// 1 bit). The wiki snapshot names the bit but does not
+    /// enumerate the two filter modes — round 5 preserves the raw
+    /// boolean. Per ETSI TS 102 114 §5.3 (cited in the wiki link)
+    /// this bit selects between non-perfect-reconstruction and
+    /// perfect-reconstruction QMF interpolation filters; the
+    /// semantic mapping waits on the §5.4 polyphase-filterbank doc.
+    pub multirate_inter: bool,
+    /// Encoder version code (`VERSION`, 4 bits, 0..=15). The wiki
+    /// snapshot does not enumerate which integer values correspond
+    /// to which encoder revisions; round 5 surfaces the raw 4-bit
+    /// code for pass-through callers.
+    pub version: u8,
+    /// Copy-history code (`COPY_HISTORY`, 2 bits, 0..=3). The wiki
+    /// snapshot does not document the per-code semantics; raw value
+    /// preserved.
+    pub copy_history: u8,
+    /// Source-PCM-resolution index (`PCMR`, 3 bits, 0..=7). The
+    /// resolution-bits-per-sample mapping (typically 16 / 20 / 24
+    /// per ETSI TS 102 114 §5.3) is not in the wiki snapshot, so
+    /// [`Self::source_pcm_bits_per_sample`] returns `None` until the
+    /// table lands in `docs/`.
+    pub source_pcm_resolution_index: u8,
+    /// Front-channel sum/difference flag (`FRONT_SUM`, 1 bit). For
+    /// stereo encodings, signals that the front L/R channels were
+    /// transmitted as a sum/difference pair rather than discrete
+    /// channels. The semantic interpretation is documented in the
+    /// spec; the bit itself is surfaced verbatim.
+    pub front_sum: bool,
+    /// Surround-channel sum/difference flag (`SURROUND_SUM`, 1 bit).
+    /// Same convention as [`Self::front_sum`] but for the surround
+    /// channel pair.
+    pub surround_sum: bool,
+    /// Dialog-normalization code (`DIALNORM`, 4 bits, 0..=15). The
+    /// wiki snapshot describes this as "dB of recovery"; the exact
+    /// code→dB mapping (and the version-dependent sign convention)
+    /// are not enumerated, so [`Self::dialog_normalization_db`]
+    /// returns `None` until the table lands in `docs/`.
+    pub dialog_normalization: u8,
 }
 
 impl DtsFrameHeader {
@@ -245,6 +298,31 @@ impl DtsFrameHeader {
         None
     }
 
+    /// Resolve [`Self::source_pcm_resolution_index`] to the source
+    /// PCM bits-per-sample value the encoder declared.
+    ///
+    /// Returns `None` for now: the PCMR-index→bits table is missing
+    /// from `docs/audio/dts/`. The wiki snapshot names the field as
+    /// "Source PCM resolution" (3 bits) without enumerating the
+    /// per-code mapping; ETSI TS 102 114 §5.3.1 documents it
+    /// (and the most-significant-bit "ES" flag the spec adds on
+    /// top of the 3-bit width).
+    pub fn source_pcm_bits_per_sample(&self) -> Option<u8> {
+        let _ = self.source_pcm_resolution_index;
+        None
+    }
+
+    /// Resolve [`Self::dialog_normalization`] to a dB value.
+    ///
+    /// Returns `None` for now: the DIALNORM-code→dB table is missing
+    /// from `docs/audio/dts/`. The wiki snapshot calls the field "dB
+    /// of recovery" without enumerating the per-code mapping or the
+    /// version-dependent sign convention.
+    pub fn dialog_normalization_db(&self) -> Option<i8> {
+        let _ = self.dialog_normalization;
+        None
+    }
+
     /// Verify the 16-bit [`Self::header_crc`] against the bits
     /// covered by the DTS Core header-CRC contract.
     ///
@@ -274,8 +352,10 @@ impl DtsFrameHeader {
 ///
 /// The buffer must begin with one of the two **raw 16-bit** sync
 /// sequences (`7F FE 80 01` or its byte-swapped form
-/// `FE 7F 01 80`) and contain ~15 bytes total (4-byte sync + 82
-/// header bits). Returns:
+/// `FE 7F 01 80`) and contain at least 15 bytes total: a 4-byte
+/// sync plus the worst-case 88-bit header (= 11 bytes), which
+/// applies when `CRC_PRESENT == 1` and the 16 round-5 post-CRC
+/// bits are included. Returns:
 /// - [`Error::UnexpectedEof`] on a short buffer.
 /// - [`Error::NoSync`] if no documented sync sequence matches at
 ///   offset zero.
@@ -324,7 +404,10 @@ pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
     };
 
     // Need at least 4 sync + 11 header bytes = 15 bytes to read the
-    // 82 header bits this round consumes. We accept 15.
+    // worst-case header bits the round-5 parser consumes
+    // (32 sync + 43 base + 13 trailing + 16 optional CRC + 16
+    // post-CRC = 120 bits = exactly 15 bytes when CRC_PRESENT == 1;
+    // 104 bits = 13 bytes otherwise). We accept 15.
     if header_bytes.len() < 15 {
         return Err(Error::UnexpectedEof);
     }
@@ -379,6 +462,21 @@ pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
         None
     };
 
+    // Round 5: 16 bits of post-CRC trailing fields. Per the wiki,
+    // in MSB-first order:
+    //   1 MULTIRATE_INTER, 4 VERSION, 2 COPY_HISTORY,
+    //   3 PCMR, 1 FRONT_SUM, 1 SURROUND_SUM, 4 DIALNORM.
+    // These bits always follow the predictor-history (when
+    // crc_present == 0) or the HEADER_CRC field (when set), so they
+    // are consumed unconditionally.
+    let multirate_inter = br.read_bit()?;
+    let version = br.read_bits(4)? as u8;
+    let copy_history = br.read_bits(2)? as u8;
+    let source_pcm_resolution_index = br.read_bits(3)? as u8;
+    let front_sum = br.read_bit()?;
+    let surround_sum = br.read_bit()?;
+    let dialog_normalization = br.read_bits(4)? as u8;
+
     Ok(DtsFrameHeader {
         sync_word_encoding: sync,
         frame_type,
@@ -400,6 +498,13 @@ pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
         lfe,
         predictor_history,
         header_crc,
+        multirate_inter,
+        version,
+        copy_history,
+        source_pcm_resolution_index,
+        front_sum,
+        surround_sum,
+        dialog_normalization,
     })
 }
 
@@ -536,7 +641,10 @@ mod tests {
     /// passed as a `u32` (only the bottom 13 bits used) so callers
     /// can spell the bit-pattern out literally. If
     /// `header_crc` is `Some`, the 16-bit CRC is emitted after the
-    /// 13 trailing bits and `crc_present` should be `1`.
+    /// 13 trailing bits and `crc_present` should be `1`. `post_crc`
+    /// (round 5) carries the 16 bits the wiki documents after the
+    /// optional CRC field (multirate_inter, version, copy_history,
+    /// PCMR, front_sum, surround_sum, dialnorm) MSB-first.
     #[allow(clippy::too_many_arguments)]
     fn build_be_header(
         ftype: u32,
@@ -549,6 +657,7 @@ mod tests {
         rate: u32,               // 5 bits
         extra_bits: u32,         // 13 bits (downmix..predictor)
         header_crc: Option<u32>, // 16 bits, only when crc_present == 1
+        post_crc: u32,           // 16 bits (round-5 trailing window)
     ) -> Vec<u8> {
         // We will accumulate a bit-vector MSB-first and then chunk to
         // bytes.
@@ -574,6 +683,10 @@ mod tests {
         if let Some(crc) = header_crc {
             push(&mut bv, crc, 16);
         }
+        // Round 5: 16 post-CRC bits always emitted (the wiki shows
+        // them following the HEADER_CRC slot whether or not CRC is
+        // present).
+        push(&mut bv, post_crc, 16);
         // pad to whole bytes
         while bv.len() % 8 != 0 {
             bv.push(false);
@@ -662,6 +775,7 @@ mod tests {
             25,                 // RATE = 25
             0b1_0100_1010_0011, // extra trailing 13 bits
             Some(0xC0DE),       // CRC field present
+            0,                  // round-5 post-CRC bits (all zero)
         );
 
         let hdr = parse_frame_header(&bytes).unwrap();
@@ -690,11 +804,19 @@ mod tests {
         assert!(hdr.predictor_history);
         // CRC field present.
         assert_eq!(hdr.header_crc, Some(0xC0DE));
+        // Round 5: post-CRC window all zeros.
+        assert!(!hdr.multirate_inter);
+        assert_eq!(hdr.version, 0);
+        assert_eq!(hdr.copy_history, 0);
+        assert_eq!(hdr.source_pcm_resolution_index, 0);
+        assert!(!hdr.front_sum);
+        assert!(!hdr.surround_sum);
+        assert_eq!(hdr.dialog_normalization, 0);
     }
 
     #[test]
     fn parse_termination_frame_be() {
-        let bytes = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0, None);
+        let bytes = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0, None, 0);
         let hdr = parse_frame_header(&bytes).unwrap();
         assert_eq!(hdr.frame_type, FrameType::Termination);
         assert_eq!(hdr.sample_count_per_block, 1);
@@ -714,11 +836,19 @@ mod tests {
         assert!(!hdr.predictor_history);
         // crc_present == 0 means no CRC field follows.
         assert_eq!(hdr.header_crc, None);
+        // Round 5: post-CRC window all zeros.
+        assert!(!hdr.multirate_inter);
+        assert_eq!(hdr.version, 0);
+        assert_eq!(hdr.copy_history, 0);
+        assert_eq!(hdr.source_pcm_resolution_index, 0);
+        assert!(!hdr.front_sum);
+        assert!(!hdr.surround_sum);
+        assert_eq!(hdr.dialog_normalization, 0);
     }
 
     #[test]
     fn parse_rejects_nblks_below_5() {
-        let bytes = build_be_header(1, 31, 1, 4, 1023, 0, 0, 0, 0, Some(0));
+        let bytes = build_be_header(1, 31, 1, 4, 1023, 0, 0, 0, 0, Some(0), 0);
         assert_eq!(
             parse_frame_header(&bytes).unwrap_err(),
             Error::BlockCountOutOfRange { blocks: 4 }
@@ -727,7 +857,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_frame_size_below_95() {
-        let bytes = build_be_header(1, 31, 1, 16, 93, 0, 0, 0, 0, Some(0));
+        let bytes = build_be_header(1, 31, 1, 16, 93, 0, 0, 0, 0, Some(0), 0);
         assert_eq!(
             parse_frame_header(&bytes).unwrap_err(),
             Error::FrameSizeOutOfRange { frame_size: 94 }
@@ -752,6 +882,7 @@ mod tests {
             31,
             0b1_1111_1111_1111,
             Some(0xFFFF),
+            0xFFFF,
         );
         let hdr = parse_frame_header(&bytes).unwrap();
         assert_eq!(hdr.blocks_per_frame, 127);
@@ -770,11 +901,20 @@ mod tests {
         assert_eq!(hdr.lfe, LfeMode::Mode3);
         assert!(hdr.predictor_history);
         assert_eq!(hdr.header_crc, Some(0xFFFF));
+        // Round 5: max-value post-CRC window decodes to ext fields
+        // at their max codes.
+        assert!(hdr.multirate_inter);
+        assert_eq!(hdr.version, 0b1111);
+        assert_eq!(hdr.copy_history, 0b11);
+        assert_eq!(hdr.source_pcm_resolution_index, 0b111);
+        assert!(hdr.front_sum);
+        assert!(hdr.surround_sum);
+        assert_eq!(hdr.dialog_normalization, 0b1111);
     }
 
     #[test]
     fn parse_short_buffer_returns_eof() {
-        let mut bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0));
+        let mut bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0), 0);
         bytes.truncate(8);
         assert_eq!(
             parse_frame_header(&bytes).unwrap_err(),
@@ -798,6 +938,7 @@ mod tests {
             25,
             0b1_0100_1010_0011,
             Some(0xBEEF),
+            0xCAFE,
         );
         let mut le = Vec::with_capacity(be.len());
         for chunk in be.chunks_exact(2) {
@@ -830,6 +971,18 @@ mod tests {
         assert_eq!(hdr_le.lfe, hdr_be.lfe);
         assert_eq!(hdr_le.predictor_history, hdr_be.predictor_history);
         assert_eq!(hdr_le.header_crc, hdr_be.header_crc);
+        // Round 5: post-CRC fields must also round-trip identically
+        // through the LE byte-swap path.
+        assert_eq!(hdr_le.multirate_inter, hdr_be.multirate_inter);
+        assert_eq!(hdr_le.version, hdr_be.version);
+        assert_eq!(hdr_le.copy_history, hdr_be.copy_history);
+        assert_eq!(
+            hdr_le.source_pcm_resolution_index,
+            hdr_be.source_pcm_resolution_index
+        );
+        assert_eq!(hdr_le.front_sum, hdr_be.front_sum);
+        assert_eq!(hdr_le.surround_sum, hdr_be.surround_sum);
+        assert_eq!(hdr_le.dialog_normalization, hdr_be.dialog_normalization);
     }
 
     #[test]
@@ -867,6 +1020,7 @@ mod tests {
         rate: u32,
         extra_bits: u32,
         header_crc: Option<u32>,
+        post_crc: u32,
     ) -> Vec<u8> {
         // Step 1: build the equivalent raw-BE byte buffer using the
         // existing helper.
@@ -881,6 +1035,7 @@ mod tests {
             rate,
             extra_bits,
             header_crc,
+            post_crc,
         );
         // Step 2: walk the raw bit stream MSB-first, emitting 14-bit
         // payloads packed into 16-bit containers in the requested
@@ -925,6 +1080,7 @@ mod tests {
             25,
             0b1_0100_1010_0011,
             Some(0xC0DE),
+            0x9876,
         );
         let packed = build_14bit_packed_header(
             FourteenBitByteOrder::BigEndian,
@@ -938,6 +1094,7 @@ mod tests {
             25,
             0b1_0100_1010_0011,
             Some(0xC0DE),
+            0x9876,
         );
         let hdr_raw = parse_frame_header(&raw).unwrap();
         let hdr_packed = parse_frame_header_14bit(&packed).unwrap();
@@ -970,11 +1127,26 @@ mod tests {
         assert_eq!(hdr_packed.lfe, hdr_raw.lfe);
         assert_eq!(hdr_packed.predictor_history, hdr_raw.predictor_history);
         assert_eq!(hdr_packed.header_crc, hdr_raw.header_crc);
+        // Round 5: post-CRC fields equivalent through 14-bit
+        // packing too.
+        assert_eq!(hdr_packed.multirate_inter, hdr_raw.multirate_inter);
+        assert_eq!(hdr_packed.version, hdr_raw.version);
+        assert_eq!(hdr_packed.copy_history, hdr_raw.copy_history);
+        assert_eq!(
+            hdr_packed.source_pcm_resolution_index,
+            hdr_raw.source_pcm_resolution_index
+        );
+        assert_eq!(hdr_packed.front_sum, hdr_raw.front_sum);
+        assert_eq!(hdr_packed.surround_sum, hdr_raw.surround_sum);
+        assert_eq!(
+            hdr_packed.dialog_normalization,
+            hdr_raw.dialog_normalization
+        );
     }
 
     #[test]
     fn parse_frame_header_14bit_le_matches_raw_be() {
-        let raw = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0, None);
+        let raw = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0, None, 0);
         let packed = build_14bit_packed_header(
             FourteenBitByteOrder::LittleEndian,
             0,
@@ -987,6 +1159,7 @@ mod tests {
             0,
             0,
             None,
+            0,
         );
         let hdr_raw = parse_frame_header(&raw).unwrap();
         let hdr_packed = parse_frame_header_14bit(&packed).unwrap();
@@ -1000,13 +1173,17 @@ mod tests {
         assert_eq!(hdr_packed.frame_size_bytes, hdr_raw.frame_size_bytes);
         // No CRC when crc_present == 0.
         assert_eq!(hdr_packed.header_crc, None);
+        // Round 5: post-CRC bits all zero by construction.
+        assert!(!hdr_packed.multirate_inter);
+        assert_eq!(hdr_packed.version, 0);
+        assert_eq!(hdr_packed.dialog_normalization, 0);
     }
 
     /// `parse_frame_header_14bit` must reject a raw-16-bit buffer
     /// with `NoSync` so the two entry points stay disjoint.
     #[test]
     fn parse_frame_header_14bit_rejects_raw_be_input() {
-        let raw = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, None);
+        let raw = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, None, 0);
         assert_eq!(parse_frame_header_14bit(&raw).unwrap_err(), Error::NoSync,);
     }
 
@@ -1034,6 +1211,7 @@ mod tests {
             25,
             0,
             Some(0),
+            0,
         );
         let hdr = parse_frame_header_14bit(&packed).unwrap();
         // The SFREQ/RATE/AMODE tables remain missing from docs/; the
@@ -1041,6 +1219,10 @@ mod tests {
         assert_eq!(hdr.sample_rate_hz(), None);
         assert_eq!(hdr.bit_rate_bps(), None);
         assert_eq!(hdr.channel_count(), None);
+        // Round 5: the PCMR and DIALNORM resolvers also remain
+        // None until the docs tables land.
+        assert_eq!(hdr.source_pcm_bits_per_sample(), None);
+        assert_eq!(hdr.dialog_normalization_db(), None);
     }
 
     #[test]
@@ -1051,11 +1233,14 @@ mod tests {
 
     #[test]
     fn value_resolvers_return_none_until_tables_land() {
-        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0));
+        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0), 0);
         let hdr = parse_frame_header(&bytes).unwrap();
         assert_eq!(hdr.sample_rate_hz(), None);
         assert_eq!(hdr.bit_rate_bps(), None);
         assert_eq!(hdr.channel_count(), None);
+        // Round 5 resolvers wait on their own docs gaps too.
+        assert_eq!(hdr.source_pcm_bits_per_sample(), None);
+        assert_eq!(hdr.dialog_normalization_db(), None);
     }
 
     // ---------------------------------------------------------------
@@ -1073,7 +1258,7 @@ mod tests {
             //   bits 11..12 = lfe code (we shift left 1 so
             //                 predictor bit stays 0)
             let extra = (code & 0b11) << 1;
-            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, extra, None);
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, extra, None, 0);
             let hdr = parse_frame_header(&bytes).unwrap();
             assert_eq!(hdr.lfe.code(), code as u8, "code {code}");
             assert_eq!(hdr.lfe.is_present(), code != 0, "is_present({code})");
@@ -1092,7 +1277,7 @@ mod tests {
     /// optional 16-bit CRC field; `header_crc` must be `None`.
     #[test]
     fn header_crc_absent_when_crc_present_bit_is_zero() {
-        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None);
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
         let hdr = parse_frame_header(&bytes).unwrap();
         assert!(!hdr.crc_present);
         assert_eq!(hdr.header_crc, None);
@@ -1106,7 +1291,7 @@ mod tests {
     /// polynomial is undocumented.
     #[test]
     fn header_crc_present_returns_raw_field_and_unverified() {
-        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0x1234));
+        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0x1234), 0);
         let hdr = parse_frame_header(&bytes).unwrap();
         assert!(hdr.crc_present);
         assert_eq!(hdr.header_crc, Some(0x1234));
@@ -1118,7 +1303,7 @@ mod tests {
     /// `ext_descr == 0`, and `LfeMode::None`.
     #[test]
     fn trailing_bits_all_zero_decodes_clean() {
-        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None);
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
         let hdr = parse_frame_header(&bytes).unwrap();
         assert!(!hdr.downmix);
         assert!(!hdr.dynamic_range);
@@ -1136,7 +1321,7 @@ mod tests {
     /// `ext_descr == 7`, and `LfeMode::Mode3`.
     #[test]
     fn trailing_bits_all_one_decodes_max() {
-        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0b1_1111_1111_1111, None);
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0b1_1111_1111_1111, None, 0);
         let hdr = parse_frame_header(&bytes).unwrap();
         assert!(hdr.downmix);
         assert!(hdr.dynamic_range);
@@ -1148,5 +1333,163 @@ mod tests {
         assert!(hdr.aspf);
         assert_eq!(hdr.lfe, LfeMode::Mode3);
         assert!(hdr.predictor_history);
+    }
+
+    // ---------------------------------------------------------------
+    // Round 5 — post-CRC 16-bit trailing field window:
+    // MULTIRATE_INTER + VERSION + COPY_HISTORY + PCMR + FRONT_SUM
+    // + SURROUND_SUM + DIALNORM.
+    // ---------------------------------------------------------------
+
+    /// The bit packing of the post-CRC window is (MSB-first):
+    ///   bit 15 = MULTIRATE_INTER, bits 14..11 = VERSION,
+    ///   bits 10..9 = COPY_HISTORY, bits 8..6 = PCMR,
+    ///   bit 5 = FRONT_SUM, bit 4 = SURROUND_SUM,
+    ///   bits 3..0 = DIALNORM.
+    ///
+    /// Pick a value that exercises every sub-field at a non-extreme
+    /// code and confirm the parser decomposes it correctly:
+    /// MULTIRATE_INTER = 1, VERSION = 0b1010 = 10,
+    /// COPY_HISTORY = 0b01 = 1, PCMR = 0b011 = 3, FRONT_SUM = 1,
+    /// SURROUND_SUM = 0, DIALNORM = 0b1100 = 12.
+    /// Packed: 1 1010 01 011 1 0 1100 = 0b1101001011101100 = 0xD2EC.
+    #[test]
+    fn post_crc_window_decomposes_into_individual_fields() {
+        let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0), 0xD2EC);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(hdr.multirate_inter);
+        assert_eq!(hdr.version, 0b1010);
+        assert_eq!(hdr.copy_history, 0b01);
+        assert_eq!(hdr.source_pcm_resolution_index, 0b011);
+        assert!(hdr.front_sum);
+        assert!(!hdr.surround_sum);
+        assert_eq!(hdr.dialog_normalization, 0b1100);
+    }
+
+    /// All-zero post-CRC window decodes to all-zero / all-false
+    /// across every sub-field.
+    #[test]
+    fn post_crc_window_all_zero_decodes_to_zero_fields() {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(!hdr.multirate_inter);
+        assert_eq!(hdr.version, 0);
+        assert_eq!(hdr.copy_history, 0);
+        assert_eq!(hdr.source_pcm_resolution_index, 0);
+        assert!(!hdr.front_sum);
+        assert!(!hdr.surround_sum);
+        assert_eq!(hdr.dialog_normalization, 0);
+    }
+
+    /// All-ones post-CRC window decodes to every sub-field at its
+    /// maximum code.
+    #[test]
+    fn post_crc_window_all_one_decodes_to_max_fields() {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0xFFFF);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert!(hdr.multirate_inter);
+        assert_eq!(hdr.version, 0b1111);
+        assert_eq!(hdr.copy_history, 0b11);
+        assert_eq!(hdr.source_pcm_resolution_index, 0b111);
+        assert!(hdr.front_sum);
+        assert!(hdr.surround_sum);
+        assert_eq!(hdr.dialog_normalization, 0b1111);
+    }
+
+    /// Walk every 3-bit PCMR code (0..=7) and confirm the parser
+    /// preserves the raw index. The resolver
+    /// `source_pcm_bits_per_sample()` is still `None` because the
+    /// code→bits-per-sample table is missing from `docs/`.
+    #[test]
+    fn pcmr_index_round_trips_for_every_3bit_code() {
+        for code in 0..=7u32 {
+            // Pack PCMR into the post-CRC window with every other
+            // bit cleared so we isolate the field under test.
+            let post_crc = (code & 0b111) << 6;
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, post_crc);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(
+                hdr.source_pcm_resolution_index, code as u8,
+                "PCMR code {code}"
+            );
+            assert_eq!(
+                hdr.source_pcm_bits_per_sample(),
+                None,
+                "PCMR resolver must remain None until docs land",
+            );
+        }
+    }
+
+    /// Walk every 4-bit DIALNORM code (0..=15) and confirm the
+    /// parser preserves the raw index. The resolver
+    /// `dialog_normalization_db()` is still `None` because the
+    /// code→dB table is missing from `docs/`.
+    #[test]
+    fn dialnorm_code_round_trips_for_every_4bit_value() {
+        for code in 0..=15u32 {
+            let post_crc = code & 0b1111;
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, post_crc);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(hdr.dialog_normalization, code as u8, "DIALNORM code {code}");
+            assert_eq!(
+                hdr.dialog_normalization_db(),
+                None,
+                "DIALNORM resolver must remain None until docs land",
+            );
+        }
+    }
+
+    /// Walk every 4-bit VERSION code (0..=15) and confirm the parser
+    /// preserves the raw index.
+    #[test]
+    fn version_code_round_trips_for_every_4bit_value() {
+        for code in 0..=15u32 {
+            let post_crc = (code & 0b1111) << 11;
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, post_crc);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(hdr.version, code as u8, "VERSION code {code}");
+        }
+    }
+
+    /// Walk every 2-bit COPY_HISTORY code (0..=3) and confirm the
+    /// parser preserves the raw index.
+    #[test]
+    fn copy_history_code_round_trips_for_every_2bit_value() {
+        for code in 0..=3u32 {
+            let post_crc = (code & 0b11) << 9;
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, post_crc);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(hdr.copy_history, code as u8, "COPY_HISTORY code {code}");
+        }
+    }
+
+    /// The post-CRC bits are consumed unconditionally — both when
+    /// the optional HEADER_CRC slot is emitted (`crc_present == 1`)
+    /// and when it is skipped (`crc_present == 0`). Build the same
+    /// post-CRC payload twice with crc_present flipped and confirm
+    /// every post-CRC field matches.
+    #[test]
+    fn post_crc_window_decodes_regardless_of_crc_present_flag() {
+        let payload = 0xD2EC;
+        let with_crc = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xBEEF), payload);
+        let without_crc = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, payload);
+        let hdr_with = parse_frame_header(&with_crc).unwrap();
+        let hdr_without = parse_frame_header(&without_crc).unwrap();
+        assert_eq!(hdr_with.header_crc, Some(0xBEEF));
+        assert_eq!(hdr_without.header_crc, None);
+        // Post-CRC sub-fields must agree.
+        assert_eq!(hdr_with.multirate_inter, hdr_without.multirate_inter);
+        assert_eq!(hdr_with.version, hdr_without.version);
+        assert_eq!(hdr_with.copy_history, hdr_without.copy_history);
+        assert_eq!(
+            hdr_with.source_pcm_resolution_index,
+            hdr_without.source_pcm_resolution_index
+        );
+        assert_eq!(hdr_with.front_sum, hdr_without.front_sum);
+        assert_eq!(hdr_with.surround_sum, hdr_without.surround_sum);
+        assert_eq!(
+            hdr_with.dialog_normalization,
+            hdr_without.dialog_normalization
+        );
     }
 }

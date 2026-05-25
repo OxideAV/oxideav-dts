@@ -297,6 +297,12 @@ mod tests {
         assert_eq!(hdr.frame_size_bytes, 1024);
         assert_eq!(hdr.sfreq_index, 13);
         assert_eq!(hdr.rate_index, 15);
+        // Round 5: the post-CRC window is captured on the same eager
+        // send_packet pass. The ffmpeg fixture encodes VERSION = 7
+        // with every other post-CRC sub-field zeroed.
+        assert_eq!(hdr.version, 7);
+        assert_eq!(hdr.dialog_normalization, 0);
+        assert_eq!(hdr.source_pcm_resolution_index, 0);
     }
 
     #[test]

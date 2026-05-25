@@ -83,6 +83,28 @@ fn parses_real_ffmpeg_frame_header() {
     // is absent and `verify_header_crc` has nothing to verify.
     assert_eq!(hdr.header_crc, None);
     assert_eq!(hdr.verify_header_crc(), None);
+
+    // Round 5: the 16 post-CRC bits in this fixture come from bytes
+    // 11..12 = 0x38 0x00 = 0b0011_1000_0000_0000 = 0x3800. Decomposed
+    // MSB-first per the wiki:
+    //   bit 15 (multirate_inter) = 0
+    //   bits 14..11 (version)    = 0b0111 = 7
+    //   bits 10..9 (copy_history)= 0b00   = 0
+    //   bits 8..6  (pcmr)        = 0b000  = 0
+    //   bit 5  (front_sum)       = 0
+    //   bit 4  (surround_sum)    = 0
+    //   bits 3..0 (dialnorm)     = 0b0000 = 0
+    assert!(!hdr.multirate_inter);
+    assert_eq!(hdr.version, 7);
+    assert_eq!(hdr.copy_history, 0);
+    assert_eq!(hdr.source_pcm_resolution_index, 0);
+    assert!(!hdr.front_sum);
+    assert!(!hdr.surround_sum);
+    assert_eq!(hdr.dialog_normalization, 0);
+    // The PCMR-bits-per-sample and DIALNORM-dB resolvers wait on
+    // the docs tables landing.
+    assert_eq!(hdr.source_pcm_bits_per_sample(), None);
+    assert_eq!(hdr.dialog_normalization_db(), None);
 }
 
 /// The same `ffmpeg` frame as above, repacked into the 14-bit BE
@@ -127,6 +149,15 @@ fn parses_14bit_be_repacked_ffmpeg_frame_header() {
     assert_eq!(hdr.lfe, LfeMode::None);
     assert!(hdr.predictor_history);
     assert_eq!(hdr.header_crc, None);
+    // Round 5: post-CRC fields recovered identically through the
+    // 14-bit-BE container path.
+    assert!(!hdr.multirate_inter);
+    assert_eq!(hdr.version, 7);
+    assert_eq!(hdr.copy_history, 0);
+    assert_eq!(hdr.source_pcm_resolution_index, 0);
+    assert!(!hdr.front_sum);
+    assert!(!hdr.surround_sum);
+    assert_eq!(hdr.dialog_normalization, 0);
 }
 
 #[test]
@@ -149,6 +180,15 @@ fn parses_14bit_le_repacked_ffmpeg_frame_header() {
     assert_eq!(hdr.lfe, LfeMode::None);
     assert!(hdr.predictor_history);
     assert_eq!(hdr.header_crc, None);
+    // Round 5: post-CRC fields recovered identically through the
+    // 14-bit-LE container path.
+    assert!(!hdr.multirate_inter);
+    assert_eq!(hdr.version, 7);
+    assert_eq!(hdr.copy_history, 0);
+    assert_eq!(hdr.source_pcm_resolution_index, 0);
+    assert!(!hdr.front_sum);
+    assert!(!hdr.surround_sum);
+    assert_eq!(hdr.dialog_normalization, 0);
 }
 
 /// Both 14-bit forms decode to the same logical frame as the
@@ -183,6 +223,14 @@ fn three_input_encodings_decode_to_identical_header_fields() {
         assert_eq!(a.lfe, b.lfe);
         assert_eq!(a.predictor_history, b.predictor_history);
         assert_eq!(a.header_crc, b.header_crc);
+        // Round 5: post-CRC fields too.
+        assert_eq!(a.multirate_inter, b.multirate_inter);
+        assert_eq!(a.version, b.version);
+        assert_eq!(a.copy_history, b.copy_history);
+        assert_eq!(a.source_pcm_resolution_index, b.source_pcm_resolution_index);
+        assert_eq!(a.front_sum, b.front_sum);
+        assert_eq!(a.surround_sum, b.surround_sum);
+        assert_eq!(a.dialog_normalization, b.dialog_normalization);
     }
 }
 

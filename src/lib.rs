@@ -3,9 +3,12 @@
 //! Pure-Rust DTS Coherent Acoustics decoder for the
 //! [oxideav](https://github.com/OxideAV/oxideav) framework.
 //!
-//! **Status:** clean-room rebuild round 4 (frame-header parser +
+//! **Status:** clean-room rebuild round 5 (frame-header parser +
 //! 14-bit sync unpacking + trailing-flag fields + optional
-//! 16-bit header CRC field + `oxideav-core` `Decoder` integration).
+//! 16-bit header CRC field + 16-bit post-CRC trailing window
+//! [multirate-inter / version / copy-history / PCMR / front-sum /
+//! surround-sum / dialnorm] + `oxideav-core` `Decoder`
+//! integration).
 //!
 //! Round 1 (2026-05-21) landed a structural [`DtsFrameHeader`] parser
 //! for the DTS Core frame sync header (per the multimedia.cx wiki
@@ -31,6 +34,20 @@
 //! SFREQ/RATE/AMODE value tables landing in `docs/`. Bitstream /
 //! subframe decoding is **not** part of this round.
 //!
+//! Round 5 (2026-05-25) extends [`DtsFrameHeader`] through the
+//! 16-bit post-CRC trailing window the wiki snapshot enumerates
+//! after `HEADER_CRC`: `multirate_inter` (1), `version` (4),
+//! `copy_history` (2), `source_pcm_resolution_index` (3),
+//! `front_sum` (1), `surround_sum` (1), `dialog_normalization`
+//! (4). These bits are consumed unconditionally (the wiki shows
+//! them following the HEADER_CRC slot whether or not CRC was
+//! emitted). The PCMR→bits-per-sample and DIALNORM→dB mappings
+//! are still missing from `docs/`, so
+//! [`DtsFrameHeader::source_pcm_bits_per_sample`] and
+//! [`DtsFrameHeader::dialog_normalization_db`] return `None`
+//! until those tables land. Bitstream / subframe decoding is
+//! still **not** part of this round.
+//!
 //! The parser distinguishes the four documented bitstream encodings
 //! via the 32-bit (or 40-bit) syncword (see [`SyncWordEncoding`]) and
 //! decodes the structural fields whose semantics are spelled out
@@ -47,12 +64,16 @@
 //! - transmission-bitrate index (5 bits).
 //!
 //! The wiki snapshot does **not** mirror the *value* tables for
-//! sample frequency / bitrate / channel-configuration; the structural
-//! parser therefore returns the raw indices and exposes
-//! `Option<u32>` resolvers ([`DtsFrameHeader::sample_rate_hz`],
+//! sample frequency / bitrate / channel-configuration / source
+//! PCM resolution / dialog normalization; the structural parser
+//! therefore returns the raw indices and exposes `Option`
+//! resolvers ([`DtsFrameHeader::sample_rate_hz`],
 //! [`DtsFrameHeader::bit_rate_bps`],
-//! [`DtsFrameHeader::channel_count`]) that return `None` until the
-//! tables land in `docs/`. See `README.md`'s "Docs gaps" section.
+//! [`DtsFrameHeader::channel_count`],
+//! [`DtsFrameHeader::source_pcm_bits_per_sample`],
+//! [`DtsFrameHeader::dialog_normalization_db`]) that return
+//! `None` until the tables land in `docs/`. See `README.md`'s
+//! "Docs gaps" section.
 //!
 //! ## What does *not* belong here
 //!
