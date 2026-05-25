@@ -5,7 +5,7 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
-**Round 5 — post-CRC 16-bit trailing window.** Round 1 landed
+**Round 6 — multi-frame iterator + resync helper.** Round 1 landed
 the structural frame-header parser; round 2 added the two 14-bit-packed
 sync encodings (`1F FF E8 00 07 Fx` BE and `FF 1F 00 E8 Fx 07` LE) via
 `unpack_14bit_to_16bit` plus the dedicated `parse_frame_header_14bit`
@@ -27,10 +27,22 @@ bit), `version` (4 bits), `copy_history` (2 bits),
 parser consumes these bits unconditionally — the wiki shows them
 following the HEADER_CRC slot whether or not CRC was emitted —
 so they are recovered for `crc_present == 0` frames as well as
-`crc_present == 1` frames. With `--no-default-features` the
-crate has no `oxideav-core` dep and surfaces only the structural
-parsers; an inline `ci-standalone` CI job exercises that path on
-every push.
+`crc_present == 1` frames. Round 6 (2026-05-25) adds the
+multi-frame iterator helpers built on top of the existing
+single-frame parsers: `find_next_sync(bytes, start)` scans for the
+next DTS sync sequence (all four documented encodings) at or after
+an arbitrary offset, and `iter_frames(bytes)` walks a raw-16-bit
+DTS Core byte buffer frame by frame, using each frame's
+`frame_size_bytes` to advance to the next sync. A new
+ffmpeg-generated 5-frame fixture
+(`tests/fixtures/dts_5_frames.bin`, 5 120 bytes) exercises the
+iterator end-to-end: every frame parses, the iterator handles
+leading garbage via resync, the cursor advances correctly across
+all five frames, and a truncated-tail variant surfaces
+`Error::UnexpectedEof` at the boundary. With `--no-default-features`
+the crate has no `oxideav-core` dep and surfaces only the
+structural parsers plus the round-6 iterator helpers; an inline
+`ci-standalone` CI job exercises that path on every push.
 
 The parser surfaces a typed `DtsFrameHeader`:
 
@@ -81,6 +93,36 @@ trailing-flag fields.
 
 Subband, QMF, Huffman, vector-quantisation, DTS-HD / EXSS / XLL /
 X96 / XCH all remain out of scope.
+
+## Multi-frame iteration (round 6)
+
+```rust
+use oxideav_dts::{iter_frames, find_next_sync};
+
+let bytes: &[u8] = /* raw .dts stream */ &[];
+for frame in iter_frames(bytes) {
+    let view = frame?;
+    println!(
+        "frame at {} ({} B): SFREQ={} RATE={} AMODE={}",
+        view.offset, view.len,
+        view.header.sfreq_index, view.header.rate_index, view.header.amode,
+    );
+}
+
+// Resync after lost bytes:
+if let Some(m) = find_next_sync(bytes, /*start=*/ 1234) {
+    // m.offset, m.encoding — proceed with `iter_frames(&bytes[m.offset..])`.
+}
+```
+
+The iterator only walks raw-16-bit encodings (`RawBigEndian` /
+`RawLittleEndian`) because the wiki snapshot does not enumerate
+the byte-advance rule for 14-bit-packed containers; a 14-bit sync
+at the iterator's current position yields
+`Error::UnsupportedFourteenBit` and the iterator terminates. The
+single-frame `parse_frame_header_14bit` entry point remains for
+callers that have already partitioned 14-bit input into
+frame-sized slices.
 
 ## Framework integration (round 4, default-on `registry` feature)
 
@@ -162,6 +204,22 @@ ETSI portal) and mirror them into `docs/audio/dts/spec/`.
    version-dependent sign convention).
    `DtsFrameHeader::dialog_normalization_db` returns `None`
    until the table lands.
+
+### Round-6 docs gaps
+
+7. **14-bit container-byte advance rule**: the wiki snapshot
+   documents `frame_size_bytes` as the byte length of the unpacked
+   raw-16-bit stream; the corresponding container-byte advance for
+   the 14-bit-packed encodings (the byte distance from one
+   14-bit-packed sync to the next) is not enumerated. The natural
+   `frame_size_bytes * 8 / 14` (rounded up to the next even byte)
+   estimate is plausible but unverified, so the round-6
+   `iter_frames` helper refuses to walk 14-bit container streams
+   and yields `Error::UnsupportedFourteenBit` for them. Once ETSI
+   TS 102 114 §5.3 / §6 documents the rule it can be wired into
+   `iter_frames` and the gap closes. The single-frame
+   `parse_frame_header_14bit` entry point is unaffected — it
+   parses one already-sliced 14-bit frame at a time.
 
 ## License
 

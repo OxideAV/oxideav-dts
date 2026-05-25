@@ -8,6 +8,46 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 6 (2026-05-25) — multi-frame iterator + resync helper.
+  New `iter` module exposes `find_next_sync(bytes, start) -> Option<SyncMatch>`
+  and `iter_frames(bytes) -> FrameIterator<'_>` (plus the supporting
+  `FrameView<'_>` / `SyncMatch` types) on top of the existing
+  single-frame parsers. `find_next_sync` scans for any of the four
+  documented DTS sync sequences (raw 16-bit BE / LE, 14-bit packed
+  BE / LE) at or after an arbitrary offset, returning the offset
+  and matched `SyncWordEncoding`. `iter_frames` walks a raw-16-bit
+  DTS Core byte stream frame by frame, using each frame's
+  `DtsFrameHeader::frame_size_bytes` to advance to the next sync;
+  it tolerates leading garbage by resyncing through
+  `find_next_sync`, surfaces parse failures as the next item's
+  `Err`, and terminates cleanly after the last frame. The
+  iterator refuses 14-bit container streams (yields
+  `Error::UnsupportedFourteenBit` and terminates) because the
+  container-byte advance rule for 14-bit-packed frames is not
+  enumerated in the wiki snapshot (filed as round-6 docs gap #7
+  in `README.md`).
+- New bundled fixture `tests/fixtures/dts_5_frames.bin` (5 120
+  bytes, 5 back-to-back DTS frames at 1 024 B each) generated as
+  `ffmpeg -f lavfi -i "sine=frequency=440:duration=0.05" -ac 2
+  -ar 48000 -c:a dca -strict experimental -b:a 768k -f dts ...`.
+  Used by the new `tests/multi_frame_iter.rs` integration test
+  (`include_bytes!` from the fixture path) to exercise the
+  iterator end-to-end.
+- Seven new tests in `tests/multi_frame_iter.rs` covering:
+  iteration over all five fixture frames with per-frame field
+  assertions, fixture-size sanity check, `find_next_sync`
+  enumeration of every sync offset in the fixture, iteration
+  through a stream with 13 bytes of leading garbage,
+  iterator-vs-direct `parse_frame_header` equivalence at each
+  offset, clean termination after the last frame, and a
+  truncated-tail variant that surfaces `Error::UnexpectedEof` at
+  the boundary.
+- Nine new unit tests in `src/iter.rs` covering `find_next_sync`:
+  sync at offset zero, sync after leading garbage, every documented
+  sync encoding (raw BE / raw LE / 14-bit BE / 14-bit LE),
+  `start` honoured past a prior sync, `None` when no sync exists,
+  `None` when `start >= bytes.len()`, and `None` when only a
+  partial sync sits at the buffer tail.
 - Round 5 (2026-05-25) — 16-bit post-CRC trailing window surfaced
   through `DtsFrameHeader`. After the optional 16-bit `HEADER_CRC`
   slot (or after the predictor-history bit when `crc_present == 0`),

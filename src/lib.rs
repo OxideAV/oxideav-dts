@@ -3,12 +3,12 @@
 //! Pure-Rust DTS Coherent Acoustics decoder for the
 //! [oxideav](https://github.com/OxideAV/oxideav) framework.
 //!
-//! **Status:** clean-room rebuild round 5 (frame-header parser +
+//! **Status:** clean-room rebuild round 6 (frame-header parser +
 //! 14-bit sync unpacking + trailing-flag fields + optional
 //! 16-bit header CRC field + 16-bit post-CRC trailing window
 //! [multirate-inter / version / copy-history / PCMR / front-sum /
 //! surround-sum / dialnorm] + `oxideav-core` `Decoder`
-//! integration).
+//! integration + multi-frame iterator / resync helper).
 //!
 //! Round 1 (2026-05-21) landed a structural [`DtsFrameHeader`] parser
 //! for the DTS Core frame sync header (per the multimedia.cx wiki
@@ -47,6 +47,23 @@
 //! [`DtsFrameHeader::dialog_normalization_db`] return `None`
 //! until those tables land. Bitstream / subframe decoding is
 //! still **not** part of this round.
+//!
+//! Round 6 (2026-05-25) adds a multi-frame iterator and a resync
+//! helper on top of the existing single-frame parsers:
+//! [`find_next_sync`] scans a byte buffer for the next DTS sync
+//! sequence at or after a given offset (all four documented
+//! encodings); [`iter_frames`] walks a raw-16-bit DTS Core byte
+//! stream frame by frame, using each frame's
+//! [`DtsFrameHeader::frame_size_bytes`] to advance to the next
+//! sync. A new 5-frame ffmpeg-generated fixture
+//! (`tests/fixtures/dts_5_frames.bin`, 5 120 bytes) exercises the
+//! iterator end-to-end and confirms every frame's header decodes
+//! identically. The iterator is documented as raw-16-bit-only
+//! because the wiki snapshot does not enumerate the 14-bit
+//! container-byte advance rule (see `README.md`'s round-6 docs
+//! gap #7); the iterator therefore yields
+//! [`Error::UnsupportedFourteenBit`] and terminates if a 14-bit
+//! sync is encountered.
 //!
 //! The parser distinguishes the four documented bitstream encodings
 //! via the 32-bit (or 40-bit) syncword (see [`SyncWordEncoding`]) and
@@ -117,6 +134,7 @@
 
 mod bitreader;
 mod header;
+mod iter;
 mod unpack14;
 
 #[cfg(feature = "registry")]
@@ -126,6 +144,7 @@ pub use crate::header::{
     parse_frame_header, parse_frame_header_14bit, DtsFrameHeader, FrameType, LfeMode,
     SyncWordEncoding,
 };
+pub use crate::iter::{find_next_sync, iter_frames, FrameIterator, FrameView, SyncMatch};
 pub use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
 
 #[cfg(feature = "registry")]
