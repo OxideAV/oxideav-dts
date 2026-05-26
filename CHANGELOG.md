@@ -8,6 +8,45 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 145 (2026-05-26) — raw-LE encoder + bidirectional 14↔16-bit
+  container pack/unpack. Two new primitives:
+  - `encode_frame_header_le(&DtsFrameHeader) -> Result<Vec<u8>>`
+    serialises a parsed header into the raw-LE on-wire byte form
+    (canonical sync `FE 7F 01 80`); the output is exactly 16 bytes
+    long regardless of `crc_present` (the parser's raw-LE branch
+    requires a 16-byte word-swap window). Implemented as
+    `encode_frame_header_be` + zero-pad to 16 + 16-bit-word-swap.
+    The `parse_frame_header(encode_frame_header_le(hdr))` round-trip
+    recovers `hdr` on every field; the parser reports
+    `SyncWordEncoding::RawLittleEndian` because that's the sync it
+    detected at the input.
+  - `pack_16bit_to_14bit(input, order) -> (Vec<u8>, usize)` is the
+    inverse of `unpack_14bit_to_16bit`. The input is read as an
+    MSB-first bit stream; successive 14-bit chunks are written into
+    the lower 14 bits of 16-bit containers, with the upper 2 bits
+    filled by a sign-extension of payload bit 13 (per the wiki's
+    "sign bit extension" rule). The returned `payload_bit_count`
+    lets callers recover the exact pre-pack bit length when the
+    input does not divide evenly into 14-bit chunks. Feeding the
+    32-bit raw-BE syncword `7F FE 80 01` reproduces the wiki's first
+    two 14-bit sync containers byte-for-byte (`1F FF E8 00` BE and
+    `FF 1F 00 E8` LE) and the third container's top 12 bits
+    (`0x07F`); the lower 4 bits of the third container hold 4 bits
+    of the following field rather than the syncword, matching the
+    wiki's `07 Fx` notation.
+  - Seventeen new unit tests covering: `encode_frame_header_le`
+    canonical sync emission, fixed-16-byte output length for both
+    `crc_present` states, equivalence with manual
+    `swap16(BE.padded_to_16())`, round-trip through the parser with
+    and without CRC, NBLKS / CRC-payload bound rejection inheritance,
+    an exhaustive {LFE × CRC × {NBLKS, FSIZE}} grid (24 cases), and
+    byte-swap reproduction of the real ffmpeg fixture; plus
+    `pack_16bit_to_14bit` wiki-sync-prefix reproduction (BE + LE),
+    sync-pattern-with-following-bits reproduction of the wiki's
+    `0x07 F<x>` third container, round-trip across multiple input
+    lengths (BE + LE), the byte-swap equivalence of BE vs LE pack
+    output, empty-input contract, and the sign-extension contract
+    for positive and negative payloads.
 - Round 141 (2026-05-26) — `encode_frame_header_be(&DtsFrameHeader)
   -> Result<Vec<u8>>` serialises a parsed [`DtsFrameHeader`] back
   into the raw-BE on-wire bytes of the frame-sync header window

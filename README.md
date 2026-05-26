@@ -5,7 +5,8 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
-**Round 138 — header → SUBFRAMES boundary accessor.** Round 1 landed
+**Round 145 — raw-LE encoder + bidirectional 14↔16-bit pack/unpack.**
+Round 1 landed
 the structural frame-header parser; round 2 added the two 14-bit-packed
 sync encodings (`1F FF E8 00 07 Fx` BE and `FF 1F 00 E8 Fx 07` LE) via
 `unpack_14bit_to_16bit` plus the dedicated `parse_frame_header_14bit`
@@ -66,6 +67,23 @@ the next field. The round-trip property
 every field except `sync_word_encoding` (the parser tags the
 output as `RawBigEndian` by construction); a real ffmpeg fixture's
 13-byte header window is reproduced byte-for-byte.
+Round 145 (2026-05-26) extends the encoder side with two new
+primitives: `encode_frame_header_le(&DtsFrameHeader)` emits the
+raw-LE on-wire header window (canonical sync `FE 7F 01 80`, always
+16 bytes long — the parser's minimum raw-LE input length, i.e.
+`encode_frame_header_be` zero-padded to 16 and 16-bit-word-swapped);
+and `pack_16bit_to_14bit(input, order) -> (Vec<u8>, usize)` is the
+inverse of the existing `unpack_14bit_to_16bit`, packing an
+MSB-first 16-bit-equivalent byte stream into 14-bit-payload
+containers with the wiki's "sign bit extension" rule applied to the
+upper 2 bits of each container. The returned `payload_bit_count`
+lets callers recover the exact pre-pack bit length when the input
+does not divide evenly into 14-bit chunks. Together with the
+existing `unpack_14bit_to_16bit` it completes the bidirectional
+14↔16-bit container conversion the wiki snapshot prescribes; the
+two encoder variants plus the 14↔16-bit primitives put all four
+documented sync encodings within reach of a future
+`encode_frame_header_14bit_{be,le}` round.
 
 The parser surfaces a typed `DtsFrameHeader`:
 

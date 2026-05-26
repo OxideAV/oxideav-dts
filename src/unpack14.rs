@@ -88,6 +88,89 @@ impl FourteenBitByteOrder {
     }
 }
 
+/// Pack a 16-bit-equivalent (raw big-endian) DTS byte buffer back into
+/// the 14-bit-packed container form.
+///
+/// This is the inverse of [`unpack_14bit_to_16bit`]. The input is read
+/// as an MSB-first bit stream; successive 14-bit chunks are written
+/// into the **lower** 14 bits of 16-bit containers, with the upper 2
+/// bits filled by a copy of payload bit 13 (so the resulting container
+/// represents the 14-bit payload as a two's-complement value as the
+/// wiki snapshot prescribes — "The upper two bits are basically sign
+/// bit extension"). Each container is then emitted as two bytes in the
+/// requested [`FourteenBitByteOrder`].
+///
+/// The input is treated as an opaque bit stream — there is no DTS
+/// header awareness here. The number of payload bits packed is exactly
+/// `input.len() * 8`; if that count is not a multiple of 14 the final
+/// container is zero-padded on the right (least-significant bits of the
+/// payload) and a documented `payload_bit_count` is returned alongside
+/// the byte buffer so callers can recover the exact pre-pack bit
+/// length on the receiving end if needed.
+///
+/// The output length is exactly `ceil(input.len() * 8 / 14) * 2` bytes
+/// — two bytes per container. For the four-byte raw-BE sync
+/// `7F FE 80 01` (32 bits) this gives `ceil(32 / 14) = 3` containers =
+/// 6 bytes, which matches the wiki's `1F FF E8 00 07 Fx` (BE) and
+/// `FF 1F 00 E8 Fx 07` (LE) six-byte sync prefixes.
+///
+/// ## Round-trip
+///
+/// `unpack_14bit_to_16bit(pack_16bit_to_14bit(b, o).0, o)` returns a
+/// buffer whose first `b.len()` bytes equal `b` (any trailing fractional
+/// padding emitted by the pack step is consumed by the unpacker's
+/// `bits_in_buf > 0` flush as the final padding byte). The empty input
+/// yields the empty output and `payload_bit_count = 0`.
+///
+/// The function is pure / side-effect free and allocates exactly one
+/// `Vec<u8>`.
+pub fn pack_16bit_to_14bit(input: &[u8], order: FourteenBitByteOrder) -> (Vec<u8>, usize) {
+    let payload_bits = input.len() * 8;
+    if payload_bits == 0 {
+        return (Vec::new(), 0);
+    }
+    let containers = payload_bits.div_ceil(14);
+    let mut out = Vec::with_capacity(containers * 2);
+
+    // Walk the input as an MSB-first bit stream, emitting one
+    // 14-bit-payload container per iteration. `cursor` is the absolute
+    // bit offset into `input` of the next payload bit to consume.
+    let mut cursor: usize = 0;
+    for _ in 0..containers {
+        let mut payload: u16 = 0;
+        for bit_index in 0..14 {
+            let abs = cursor + bit_index;
+            let bit = if abs < payload_bits {
+                let byte = input[abs / 8];
+                (byte >> (7 - (abs % 8))) & 1
+            } else {
+                // Past the end — zero-pad the last container on the
+                // right (least-significant payload bits).
+                0
+            };
+            payload = (payload << 1) | bit as u16;
+        }
+        cursor += 14;
+
+        // Sign-extend bit 13 (the MSB of the 14-bit payload) into the
+        // upper 2 bits to satisfy the wiki's "sign bit extension"
+        // contract. `payload & 0x2000` is the sign bit; if set, set
+        // both bits 14 and 15; otherwise leave them clear.
+        let container: u16 = if payload & 0x2000 != 0 {
+            payload | 0xC000
+        } else {
+            payload & 0x3FFF
+        };
+        let bytes = match order {
+            FourteenBitByteOrder::BigEndian => container.to_be_bytes(),
+            FourteenBitByteOrder::LittleEndian => container.to_le_bytes(),
+        };
+        out.extend_from_slice(&bytes);
+    }
+
+    (out, payload_bits)
+}
+
 /// Unpack a 14-bit-packed DTS byte buffer into the equivalent
 /// 16-bit-packed (raw big-endian) byte buffer.
 ///
@@ -327,6 +410,182 @@ mod tests {
             FourteenBitByteOrder::from_sync(SyncWordEncoding::RawLittleEndian),
             None,
         );
+    }
+
+    // -------- pack_16bit_to_14bit tests (round 145) --------
+
+    /// The raw-BE syncword `7F FE 80 01` packed BE must reproduce the
+    /// first two containers of the wiki's 14-bit BE sync prefix bytes
+    /// `1F FF E8 00 07 Fx` — i.e. `1F FF E8 00`. The third container
+    /// `07 Fx` in the wiki notation includes 10 bits of the *next*
+    /// field after the 32-bit syncword (FTYPE / SHORT / CRC_PRESENT /
+    /// NBLKS_high), where the wiki example happens to have those 10
+    /// bits start with `1_1111_1xxxx`. For a bare 32-bit syncword with
+    /// zero padding (no following header bits), container 3 is
+    /// `0001 0000 0000 00` = `0x0400`, BE = `04 00`. Together the
+    /// six bytes are `1F FF E8 00 04 00`.
+    #[test]
+    fn pack_be_raw_syncword_reproduces_wiki_14bit_be_prefix() {
+        let raw = [0x7F, 0xFE, 0x80, 0x01];
+        let (packed, bits) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        // 32 input bits → ceil(32 / 14) = 3 containers → 6 bytes.
+        assert_eq!(packed.len(), 6);
+        assert_eq!(bits, 32);
+        assert_eq!(packed.as_slice(), &[0x1F, 0xFF, 0xE8, 0x00, 0x04, 0x00]);
+    }
+
+    /// Same payload, LE container order — first two containers must
+    /// reproduce the wiki's LE prefix `FF 1F 00 E8`, with the third
+    /// container = `04 00` LE-swapped to `00 04`. Together: `FF 1F 00
+    /// E8 00 04`.
+    #[test]
+    fn pack_le_raw_syncword_reproduces_wiki_14bit_le_prefix() {
+        let raw = [0x7F, 0xFE, 0x80, 0x01];
+        let (packed, bits) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::LittleEndian);
+        assert_eq!(packed.len(), 6);
+        assert_eq!(bits, 32);
+        assert_eq!(packed.as_slice(), &[0xFF, 0x1F, 0x00, 0xE8, 0x00, 0x04]);
+    }
+
+    /// Pack a 6-byte input whose first 4 bytes are the raw-BE
+    /// syncword and whose 5th byte's top nibble is `0xF` (i.e. the
+    /// next-field bits are `1111_1111 = 0xFF...`). This reproduces
+    /// the wiki's `0x07 0xFx` third container exactly because the 10
+    /// bits after the syncword now genuinely are `11_1111_1xxx`.
+    #[test]
+    fn pack_be_with_wiki_post_sync_pattern_reproduces_07f_prefix() {
+        // After syncword, next 10 bits MUST be `11_1111_1xxx` to
+        // produce `0x07F<low4>`. Bit pattern: first byte after sync =
+        // `1111_1111`, next byte high 2 bits = `1x` (only the top
+        // matters for the 10-bit window — bits 32..42).
+        // Container 3 payload = bits 28..42:
+        //   bits 28..32 of sync = 0b0001
+        //   bits 32..40 = first post-sync byte = 0xFF = 0b1111_1111
+        //   bits 40..42 = top 2 bits of second post-sync byte
+        // = 0b0001_1111_1111_<2 bits>. With top 2 bits = 0b00:
+        //   payload = 0b0001_1111_1111_00 = 0x07FC. BE bytes: 0x07,
+        //   0xFC.
+        let raw = [0x7F, 0xFE, 0x80, 0x01, 0xFF, 0x00];
+        let (packed, _) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        assert_eq!(&packed[..4], &[0x1F, 0xFF, 0xE8, 0x00]);
+        // Container 3 must satisfy the wiki's `0x07_F<x>` pattern: top
+        // 12 bits = `0000_0111_1111` = 0x07F.
+        let container3 = u16::from_be_bytes([packed[4], packed[5]]);
+        assert_eq!(container3 >> 4, 0x07F);
+    }
+
+    /// `unpack(pack(b))` recovers `b` on its first `b.len()` bytes for
+    /// every byte order. Inputs whose bit length is not a multiple of
+    /// 14 may have trailing padding bytes after the round-trip but the
+    /// first `b.len()` bytes must equal `b`.
+    #[test]
+    fn pack_then_unpack_roundtrip_be() {
+        let inputs: &[&[u8]] = &[
+            &[],
+            &[0x7F, 0xFE, 0x80, 0x01],
+            &[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0],
+            &[
+                0x7F, 0xFE, 0x80, 0x01, 0x80, 0x01, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+                0x11, 0x22,
+            ],
+        ];
+        for input in inputs {
+            let (packed, bits) = pack_16bit_to_14bit(input, FourteenBitByteOrder::BigEndian);
+            assert_eq!(bits, input.len() * 8);
+            let unpacked = unpack_14bit_to_16bit(&packed, FourteenBitByteOrder::BigEndian).unwrap();
+            assert!(
+                unpacked.len() >= input.len(),
+                "unpacked too short for input.len()={}: got {}",
+                input.len(),
+                unpacked.len()
+            );
+            assert_eq!(
+                &unpacked[..input.len()],
+                *input,
+                "round-trip failed for input {input:?}"
+            );
+        }
+    }
+
+    /// Same as `pack_then_unpack_roundtrip_be` but with LE container
+    /// byte order.
+    #[test]
+    fn pack_then_unpack_roundtrip_le() {
+        let inputs: &[&[u8]] = &[
+            &[],
+            &[0x7F, 0xFE, 0x80, 0x01],
+            &[0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0],
+            &[
+                0x7F, 0xFE, 0x80, 0x01, 0x80, 0x01, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+                0x11, 0x22,
+            ],
+        ];
+        for input in inputs {
+            let (packed, bits) = pack_16bit_to_14bit(input, FourteenBitByteOrder::LittleEndian);
+            assert_eq!(bits, input.len() * 8);
+            let unpacked =
+                unpack_14bit_to_16bit(&packed, FourteenBitByteOrder::LittleEndian).unwrap();
+            assert!(
+                unpacked.len() >= input.len(),
+                "unpacked too short for input.len()={}: got {}",
+                input.len(),
+                unpacked.len()
+            );
+            assert_eq!(
+                &unpacked[..input.len()],
+                *input,
+                "round-trip failed for input {input:?}"
+            );
+        }
+    }
+
+    /// `pack_16bit_to_14bit(b, BE)` and `pack_16bit_to_14bit(b, LE)`
+    /// differ only in the byte order of each container — pair-swapping
+    /// the BE output produces the LE output.
+    #[test]
+    fn pack_be_le_differ_only_by_container_byteswap() {
+        let raw = [0x7F, 0xFE, 0x80, 0x01, 0x12, 0x34, 0x56, 0x78];
+        let (be, _) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        let (le, _) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::LittleEndian);
+        assert_eq!(be.len(), le.len());
+        for pair in 0..(be.len() / 2) {
+            assert_eq!(be[pair * 2], le[pair * 2 + 1]);
+            assert_eq!(be[pair * 2 + 1], le[pair * 2]);
+        }
+    }
+
+    /// Empty input yields empty output and `payload_bit_count == 0`
+    /// (documented contract).
+    #[test]
+    fn pack_empty_yields_empty() {
+        let (out, bits) = pack_16bit_to_14bit(&[], FourteenBitByteOrder::BigEndian);
+        assert!(out.is_empty());
+        assert_eq!(bits, 0);
+    }
+
+    /// Confirm the sign-extension contract: for an input whose first
+    /// 14 bits have bit 13 (the payload sign bit) set, the upper 2
+    /// bits of the corresponding container must be `0b11`. For an
+    /// input where bit 13 is clear, the upper 2 bits must be `0b00`.
+    #[test]
+    fn pack_sign_extends_top_payload_bit() {
+        // Sign bit set: 14 bits of `0b11_1111_0101_0101` = 0x3F55.
+        // Source bytes: top 14 bits of 0xFD_54_xx where:
+        //   first byte = 0xFD = 0b1111_1101
+        //   second byte = 0x54 = 0b0101_0100
+        // First 14 bits MSB-first: 0b11_1111_0101_0101 = 0x3F55. Good.
+        let raw_pos = [0xFD, 0x54];
+        let (packed_pos, _) = pack_16bit_to_14bit(&raw_pos, FourteenBitByteOrder::BigEndian);
+        // First container: payload = 0x3F55, top 2 bits set → 0xFF55.
+        assert_eq!(u16::from_be_bytes([packed_pos[0], packed_pos[1]]), 0xFF55);
+
+        // Sign bit clear: 14 bits of `0b00_1010_1010_1010` = 0x0AAA.
+        // First byte = 0b0010_1010 = 0x2A, second = 0b1010_1000 = 0xA8.
+        // First 14 bits: 0b00_1010_1010_1010 = 0x0AAA. Bit 13 = 0.
+        let raw_neg = [0x2A, 0xA8];
+        let (packed_neg, _) = pack_16bit_to_14bit(&raw_neg, FourteenBitByteOrder::BigEndian);
+        // First container: payload = 0x0AAA, top 2 bits clear → 0x0AAA.
+        assert_eq!(u16::from_be_bytes([packed_neg[0], packed_neg[1]]), 0x0AAA);
     }
 
     /// Helper: read `n` bits MSB-first starting at absolute bit

@@ -411,6 +411,68 @@ impl DtsFrameHeader {
     }
 }
 
+/// Serialise a [`DtsFrameHeader`] back into the raw **little-endian**
+/// on-wire byte representation of the frame-sync header window.
+///
+/// The output always begins with the canonical raw-LE sync `FE 7F 01
+/// 80` regardless of the [`DtsFrameHeader::sync_word_encoding`] field
+/// — the encoder emits the raw-LE form the parser already accepts via
+/// the [`SyncWordEncoding::RawLittleEndian`] branch.
+///
+/// The wiki snapshot describes raw little-endian as "byte-swapped at
+/// the 16-bit-word level" of the raw big-endian stream (see
+/// `docs/audio/dts/wiki/DTS.wiki`'s sync table — `7F FE 80 01` ↔
+/// `FE 7F 01 80`). This encoder therefore:
+///
+/// 1. calls [`encode_frame_header_be`] to build the 13 or 15 raw-BE
+///    bytes,
+/// 2. zero-pads them to **16 bytes** (the parser's minimum input
+///    length for the raw-LE branch — the parser word-swaps a 16-byte
+///    window and consumes 104 or 120 bits from it),
+/// 3. byte-swaps each 16-bit word in place to produce the raw-LE
+///    output.
+///
+/// The output is therefore always exactly 16 bytes long (regardless
+/// of `header.crc_present`). The trailing 3 or 1 zero bytes correspond
+/// to the first 24 or 8 bits of the SUBFRAMES region of a real DTS
+/// frame; a caller muxing the encoder output back into a stream
+/// should overwrite those bytes with the actual SUBFRAMES content
+/// (after byte-swapping their 16-bit-word view to match).
+///
+/// The round-trip property:
+///
+/// ```text
+///   parse_frame_header(&encode_frame_header_le(&hdr)) == Ok(hdr')
+///   where hdr'.sync_word_encoding == SyncWordEncoding::RawBigEndian
+///         hdr' == hdr on every other field
+/// ```
+///
+/// holds exactly (no padding step needed by the caller). The parser
+/// reports `RawBigEndian` because its normalisation step word-swaps
+/// the raw-LE input back into a raw-BE scratch buffer before reading
+/// the bit-table; the `sync_word_encoding` field is therefore the only
+/// field that does not round-trip through the BE encoder, just as
+/// `encode_frame_header_be` already documents.
+///
+/// Returns the same [`Error`] variants as [`encode_frame_header_be`]
+/// for invalid headers (`BlockCountOutOfRange`, `FrameSizeOutOfRange`,
+/// `FieldOutOfRange`).
+pub fn encode_frame_header_le(header: &DtsFrameHeader) -> Result<Vec<u8>> {
+    let mut be = encode_frame_header_be(header)?;
+    // Zero-pad to the parser's minimum raw-LE input length (16). The
+    // BE encoder returns 13 or 15 bytes; the LE branch of the parser
+    // requires a 16-byte window so it can word-swap it before reading
+    // the bit-table. Pad with zeros — the parser only consumes the
+    // first `header_bit_length()` bits.
+    be.resize(16, 0);
+    debug_assert_eq!(be.len() % 2, 0, "raw-LE encoder works on 16-bit words");
+    // Word-swap pairs in place.
+    for pair in be.chunks_exact_mut(2) {
+        pair.swap(0, 1);
+    }
+    Ok(be)
+}
+
 /// Serialise a [`DtsFrameHeader`] back into the raw-BE on-wire byte
 /// representation of the frame-sync header window.
 ///
@@ -420,8 +482,9 @@ impl DtsFrameHeader {
 /// of the [`DtsFrameHeader::sync_word_encoding`] field — the encoder
 /// emits the canonical raw-BE form the parser already understands, so
 /// a caller that needs the raw-LE / 14-bit-BE / 14-bit-LE encoding can
-/// post-process the output (byte-swap pairs for raw-LE, repack
-/// 16→14-bit for the 14-bit variants).
+/// post-process the output (byte-swap pairs for raw-LE via
+/// [`encode_frame_header_le`], repack 16→14-bit for the 14-bit
+/// variants via [`crate::pack_16bit_to_14bit`]).
 ///
 /// The bit layout is the wiki bit-table from
 /// `docs/audio/dts/wiki/DTS.wiki`, MSB-first, in the same order
@@ -2219,5 +2282,213 @@ mod tests {
         let mut h = parse_frame_header(&bytes).unwrap();
         mutate(&mut h);
         h
+    }
+
+    // ---------------------------------------------------------------
+    // Round 145 — encode_frame_header_le(): raw-LE encoder variant.
+    //
+    // The raw-LE encoder is `encode_frame_header_be` + zero-pad to 16
+    // bytes + word-swap pairs. The output always starts with the
+    // canonical raw-LE sync `FE 7F 01 80` and is exactly 16 bytes
+    // long; the parser's raw-LE branch consumes the first
+    // `header_bit_length()` bits (104 or 120) and ignores the trailing
+    // zero padding.
+    // ---------------------------------------------------------------
+
+    /// The first 4 bytes of the encoder output are the canonical
+    /// raw-LE sync regardless of the input header's
+    /// `sync_word_encoding`.
+    #[test]
+    fn encode_le_emits_canonical_raw_le_sync() {
+        let bytes_in = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded = encode_frame_header_le(&hdr).unwrap();
+        assert_eq!(&encoded[..4], &[0xFE, 0x7F, 0x01, 0x80]);
+    }
+
+    /// Encoder output is always exactly 16 bytes regardless of
+    /// `crc_present` (the parser's raw-LE branch reads a 16-byte
+    /// window).
+    #[test]
+    fn encode_le_is_always_16_bytes() {
+        // crc_present == false: BE encoder emits 13 bytes; LE pads to
+        // 16.
+        let bytes_no_crc = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr_no_crc = parse_frame_header(&bytes_no_crc).unwrap();
+        assert!(!hdr_no_crc.crc_present);
+        assert_eq!(encode_frame_header_le(&hdr_no_crc).unwrap().len(), 16);
+
+        // crc_present == true: BE encoder emits 15 bytes; LE pads to
+        // 16.
+        let bytes_crc = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xCAFE), 0xD2EC);
+        let hdr_crc = parse_frame_header(&bytes_crc).unwrap();
+        assert!(hdr_crc.crc_present);
+        assert_eq!(encode_frame_header_le(&hdr_crc).unwrap().len(), 16);
+    }
+
+    /// Bit-for-bit equivalence with the manual word-swap of the BE
+    /// encoder output: `LE == swap16(BE.padded_to_16())`.
+    #[test]
+    fn encode_le_equals_word_swapped_be_padded() {
+        let bytes_in = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xCAFE), 0xD2EC);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let be = encode_frame_header_be(&hdr).unwrap();
+        let le = encode_frame_header_le(&hdr).unwrap();
+        // Pad BE to 16 and word-swap.
+        let mut expected = be.clone();
+        expected.resize(16, 0);
+        for pair in expected.chunks_exact_mut(2) {
+            pair.swap(0, 1);
+        }
+        assert_eq!(le, expected);
+    }
+
+    /// `parse_frame_header(&encode_frame_header_le(&hdr))` round-trips
+    /// every field except `sync_word_encoding` (which always reports
+    /// `RawBigEndian` after parsing because the parser word-swaps the
+    /// LE input back into raw-BE scratch — but the input's first 4
+    /// bytes were the raw-LE sync, so the parser reports
+    /// `RawLittleEndian`).
+    #[test]
+    fn encode_le_round_trips_through_parser_no_crc() {
+        let bytes_in = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded_le = encode_frame_header_le(&hdr).unwrap();
+        let hdr_round = parse_frame_header(&encoded_le).unwrap();
+        // The parser reports RawLittleEndian because that's the sync
+        // it detected at the start of the input.
+        assert_eq!(
+            hdr_round.sync_word_encoding,
+            SyncWordEncoding::RawLittleEndian
+        );
+        // Every other field is preserved.
+        let mut hdr_norm = hdr_round;
+        hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+        assert_eq!(hdr_norm, hdr);
+    }
+
+    /// Same as above with crc_present == true.
+    #[test]
+    fn encode_le_round_trips_through_parser_with_crc() {
+        let bytes_in = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xCAFE), 0xD2EC);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded_le = encode_frame_header_le(&hdr).unwrap();
+        let hdr_round = parse_frame_header(&encoded_le).unwrap();
+        assert_eq!(
+            hdr_round.sync_word_encoding,
+            SyncWordEncoding::RawLittleEndian
+        );
+        let mut hdr_norm = hdr_round;
+        hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+        assert_eq!(hdr_norm, hdr);
+    }
+
+    /// `encode_frame_header_le` inherits the same field-bound checks
+    /// as `encode_frame_header_be` (they share the underlying call).
+    /// Spot-check NBLKS bound here so a future refactor can't drop
+    /// the validation silently.
+    #[test]
+    fn encode_le_rejects_nblks_below_5() {
+        let hdr = synth_hdr(|h| h.blocks_per_frame = 4);
+        let err = encode_frame_header_le(&hdr).unwrap_err();
+        assert_eq!(err, Error::BlockCountOutOfRange { blocks: 4 });
+    }
+
+    /// Spot-check the `header_crc` / `crc_present` mismatch is also
+    /// rejected by the LE wrapper.
+    #[test]
+    fn encode_le_rejects_crc_payload_mismatch() {
+        let hdr = synth_hdr(|h| {
+            h.crc_present = false;
+            h.header_crc = Some(0xBEEF);
+        });
+        let err = encode_frame_header_le(&hdr).unwrap_err();
+        match err {
+            Error::FieldOutOfRange { field, .. } => assert_eq!(field, "header_crc"),
+            other => panic!("expected FieldOutOfRange{{field: header_crc}}, got {other:?}"),
+        }
+    }
+
+    /// Exhaustive grid: every documented LFE code × both CRC states ×
+    /// representative {NBLKS, FSIZE} pairs round-trip through the LE
+    /// encoder.
+    #[test]
+    fn encode_le_round_trip_grid_lfe_crc_states() {
+        for crc_state in [false, true] {
+            for lfe_code in 0u8..=3 {
+                for &(nblks, fsize) in &[(5u8, 95u16), (16u8, 1024u16), (127u8, 16384u16)] {
+                    let crc_arg = if crc_state { Some(0xBEEF) } else { None };
+                    let bytes = build_be_header(
+                        1,
+                        31,
+                        crc_state as u32,
+                        nblks as u32,
+                        (fsize - 1) as u32,
+                        9,
+                        13,
+                        25,
+                        ((lfe_code as u32) & 0b11) << 1,
+                        crc_arg,
+                        0,
+                    );
+                    let hdr = parse_frame_header(&bytes).unwrap();
+                    let encoded = encode_frame_header_le(&hdr).unwrap();
+                    assert_eq!(encoded.len(), 16);
+                    assert_eq!(&encoded[..4], &[0xFE, 0x7F, 0x01, 0x80]);
+                    let hdr_round = parse_frame_header(&encoded).unwrap();
+                    assert_eq!(
+                        hdr_round.sync_word_encoding,
+                        SyncWordEncoding::RawLittleEndian
+                    );
+                    let mut hdr_norm = hdr_round;
+                    hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+                    assert_eq!(hdr_norm, hdr);
+                }
+            }
+        }
+    }
+
+    /// Reproducing the real ffmpeg fixture's first 16 bytes as a
+    /// raw-LE on-wire payload: byte-swap the BE bytes pairwise and
+    /// confirm the encoder matches.
+    #[test]
+    fn encode_le_reproduces_ffmpeg_fixture_byte_swapped() {
+        let ffmpeg_be: [u8; 16] = [
+            0x7f, 0xfe, 0x80, 0x01, 0xfc, 0x3c, 0x3f, 0xf0, 0xb5, 0xe0, 0x01, 0x38, 0x00, 0x03,
+            0xef, 0x7f,
+        ];
+        let hdr = parse_frame_header(&ffmpeg_be).unwrap();
+        assert!(!hdr.crc_present);
+
+        // Manual byte-swap of the BE fixture (the on-wire raw-LE form
+        // a Wave-container-encapsulated DTS-on-CD would carry).
+        let mut expected = [0u8; 16];
+        for i in 0..8 {
+            expected[i * 2] = ffmpeg_be[i * 2 + 1];
+            expected[i * 2 + 1] = ffmpeg_be[i * 2];
+        }
+        let encoded = encode_frame_header_le(&hdr).unwrap();
+        // The BE encoder for this header returns 13 bytes (crc absent),
+        // padded to 16 with three zero bytes. The trailing 3 bytes of
+        // the BE-padded-to-16 buffer are `00 00 00`; after word-swap
+        // the trailing 3 bytes of the LE output are also `00 00 00`.
+        // The ffmpeg fixture's bytes 13..16 are `00 03 ef 7f` (real
+        // SUBFRAMES content) — those bytes won't match our zero
+        // padding. Compare only the first 13 bytes (the header window
+        // proper) plus byte 13 of `expected`... actually the LE
+        // encoder pads bytes 13..16 with zeros, so word-swap puts
+        // zeros at LE bytes 12..16 only if BE bytes 12..16 were also
+        // zero — which they aren't (BE byte 12 is `0x00`, byte 13 is
+        // `0x03` from real fixture). So only compare the first 12
+        // bytes (6 full 16-bit words) which are unambiguous.
+        assert_eq!(&encoded[..12], &expected[..12]);
+        // Byte 12 of BE is part of the header (it's BE byte 12 = `0x00`
+        // = first byte of post-CRC window's continuation, the header's
+        // last byte). Encoder padded BE to 16 with zeros at indices
+        // 13..16, so LE encoder's index 13 corresponds to BE's index
+        // 12. expected[13] is the byte-swap of (BE[12], BE[13]) at
+        // index 1 = BE[12] = 0x00; encoded[13] is the byte-swap of
+        // (BE[12], 0) at index 1 = BE[12] = 0x00. They match.
+        assert_eq!(encoded[13], expected[13]);
     }
 }

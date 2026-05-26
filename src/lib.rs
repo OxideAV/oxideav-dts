@@ -75,6 +75,27 @@
 //! structural bounds plus per-field bit-width bounds via the new
 //! [`Error::FieldOutOfRange`] variant.
 //!
+//! Round 145 (2026-05-26) extends the encoder side with two new
+//! primitives: [`encode_frame_header_le`] emits the raw-LE on-wire
+//! header window (canonical sync `FE 7F 01 80`, always 16 bytes long
+//! — the parser's minimum input length for the raw-LE branch — i.e.
+//! `encode_frame_header_be` zero-padded to 16 and 16-bit-word-swapped);
+//! and [`pack_16bit_to_14bit`] is the inverse of
+//! [`unpack_14bit_to_16bit`], packing an MSB-first 16-bit-equivalent
+//! byte stream into 14-bit-payload containers with the wiki's "sign
+//! bit extension" rule applied to the upper 2 bits of each container.
+//! `pack_16bit_to_14bit` returns the packed bytes plus the
+//! `payload_bit_count` so callers can recover the exact pre-pack bit
+//! length on the receiving end; together with the existing
+//! `unpack_14bit_to_16bit` it completes the bidirectional 14↔16-bit
+//! container conversion the wiki snapshot prescribes. The 14-bit
+//! sync prefix bytes `1F FF E8 00 …` (BE) and `FF 1F 00 E8 …` (LE)
+//! the wiki documents are reproduced byte-for-byte by feeding the
+//! 32-bit raw-BE syncword `7F FE 80 01` into `pack_16bit_to_14bit`
+//! (the last container of the wiki's example carries 10 bits of the
+//! following field that are not part of the syncword — that's why
+//! the wiki shows `07 Fx` rather than a literal trailing byte).
+//!
 //! Round 138 (2026-05-26) surfaces the header→SUBFRAMES boundary
 //! through two new accessors and one [`FrameView`] helper:
 //! [`DtsFrameHeader::header_bit_length`] returns the bit-count the
@@ -134,8 +155,13 @@
 //! - [`encode_frame_header_be`] — inverse of [`parse_frame_header`]
 //!   that emits the wiki bit-table back into raw-BE bytes (added in
 //!   round 141).
-//! - [`unpack_14bit_to_16bit`] / [`FourteenBitByteOrder`] — the
-//!   underlying 14→16-bit unpacker (added in round 2).
+//! - [`encode_frame_header_le`] — raw-LE encoder variant
+//!   (`encode_frame_header_be` zero-padded to 16 bytes + 16-bit-word
+//!   swap; added in round 145).
+//! - [`unpack_14bit_to_16bit`] / [`pack_16bit_to_14bit`] /
+//!   [`FourteenBitByteOrder`] — the 14↔16-bit container conversion
+//!   primitives. `unpack_14bit_to_16bit` added in round 2;
+//!   `pack_16bit_to_14bit` added in round 145.
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -167,11 +193,11 @@ mod unpack14;
 mod registry;
 
 pub use crate::header::{
-    encode_frame_header_be, parse_frame_header, parse_frame_header_14bit, DtsFrameHeader,
-    FrameType, LfeMode, SyncWordEncoding,
+    encode_frame_header_be, encode_frame_header_le, parse_frame_header, parse_frame_header_14bit,
+    DtsFrameHeader, FrameType, LfeMode, SyncWordEncoding,
 };
 pub use crate::iter::{find_next_sync, iter_frames, FrameIterator, FrameView, SyncMatch};
-pub use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
+pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder};
 
 #[cfg(feature = "registry")]
 pub use crate::registry::{
