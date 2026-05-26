@@ -708,6 +708,122 @@ pub fn encode_frame_header_be(header: &DtsFrameHeader) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Serialise a [`DtsFrameHeader`] back into the 14-bit-packed
+/// **big-endian** on-wire byte representation of the frame-sync header
+/// window.
+///
+/// This is the natural composition of [`encode_frame_header_be`] (which
+/// produces the canonical raw-BE header bytes) and
+/// [`crate::pack_16bit_to_14bit`] (which re-packs an MSB-first 16-bit
+/// bit stream into 14-bit-payload containers per the wiki's "sign bit
+/// extension" rule). The output always begins with the wiki-documented
+/// 14-bit-BE sync prefix `1F FF E8 00 …` and represents the same
+/// bit-content as [`encode_frame_header_be`] would, repacked into
+/// 14-bit containers.
+///
+/// ## Output length
+///
+/// The output is always **18 bytes** long — the minimum input length
+/// [`parse_frame_header_14bit`] accepts (nine 14-bit containers =
+/// 126 payload bits, unpacking to 16 raw-BE bytes which covers the
+/// worst-case 120-bit `crc_present == 1` header window). Both
+/// `crc_present` states emit the same length so callers can mux the
+/// output into a 14-bit container stream without branching on the
+/// flag. The encoder pads the raw-BE header to 15 bytes (= 120 bits =
+/// 9 × 14-bit containers minus 6 padding bits per container) before
+/// packing:
+///
+/// | `crc_present` | raw-BE bytes | padded raw-BE | 14-bit containers | output bytes |
+/// | ------------- | ------------ | ------------- | ----------------- | ------------ |
+/// | `false`       | 13           | 15            | 9                 | 18           |
+/// | `true`        | 15           | 15            | 9                 | 18           |
+///
+/// For the no-CRC case the two trailing zero bytes of the padded
+/// raw-BE input land in what would be the first 16 bits of the
+/// SUBFRAMES region of a real DTS frame; the parser only consumes
+/// `header.header_bit_length()` bits from the unpacked stream, so the
+/// padded zeros are inert for parsing purposes. A caller muxing the
+/// encoder output back into a stream should overwrite them (after
+/// unpacking) with the actual SUBFRAMES bytes.
+///
+/// ## Round-trip
+///
+/// `parse_frame_header_14bit(&encode_frame_header_14bit_be(&hdr))` recovers
+/// `hdr` on every field except [`DtsFrameHeader::sync_word_encoding`],
+/// which the parser reports as
+/// [`SyncWordEncoding::FourteenBitBigEndian`] regardless of the input
+/// header's value. This is the same round-trip behaviour
+/// [`encode_frame_header_be`] / [`encode_frame_header_le`] document for
+/// their respective sync encodings.
+///
+/// ## Errors
+///
+/// Returns the same [`Error`] variants as [`encode_frame_header_be`]
+/// for invalid headers (`BlockCountOutOfRange`, `FrameSizeOutOfRange`,
+/// `FieldOutOfRange`).
+pub fn encode_frame_header_14bit_be(header: &DtsFrameHeader) -> Result<Vec<u8>> {
+    let mut raw_be = encode_frame_header_be(header)?;
+    // Pad the raw-BE bytes to 15 bytes (120 bits) so the pack step
+    // emits exactly 9 containers = 18 bytes — the parser's minimum
+    // 14-bit input length. 15 bytes is also the maximum
+    // `header_byte_length()` value (the `crc_present == true` case), so
+    // no header bits are dropped. For the no-CRC case the BE encoder
+    // emits 13 bytes; we extend with 2 zero bytes that land in what
+    // would be the first 16 bits of the SUBFRAMES region of a real
+    // frame, which the parser does not consume.
+    raw_be.resize(15, 0);
+    let (packed, _payload_bit_count) =
+        crate::unpack14::pack_16bit_to_14bit(&raw_be, FourteenBitByteOrder::BigEndian);
+    debug_assert_eq!(
+        packed.len(),
+        18,
+        "14-bit-BE encoded header must be exactly 18 bytes (9 containers)"
+    );
+    Ok(packed)
+}
+
+/// Serialise a [`DtsFrameHeader`] back into the 14-bit-packed
+/// **little-endian** on-wire byte representation of the frame-sync
+/// header window.
+///
+/// Same composition as [`encode_frame_header_14bit_be`] but with
+/// [`FourteenBitByteOrder::LittleEndian`] selected for the pack step,
+/// so each 16-bit container is emitted in little-endian byte order. The
+/// output always begins with the wiki-documented 14-bit-LE sync prefix
+/// `FF 1F 00 E8 …`.
+///
+/// Output length is the same as [`encode_frame_header_14bit_be`]: always
+/// 18 bytes (regardless of `crc_present`). The 14-bit-LE output is
+/// exactly the pairwise byte-swap of the 14-bit-BE output (each
+/// two-byte container swapped independently), matching the wiki's
+/// relationship between `1F FF E8 00 …` (BE) and `FF 1F 00 E8 …` (LE).
+///
+/// ## Round-trip
+///
+/// `parse_frame_header_14bit(&encode_frame_header_14bit_le(&hdr))`
+/// recovers `hdr` on every field except
+/// [`DtsFrameHeader::sync_word_encoding`], which the parser reports as
+/// [`SyncWordEncoding::FourteenBitLittleEndian`] regardless of the
+/// input header's value.
+///
+/// ## Errors
+///
+/// Returns the same [`Error`] variants as [`encode_frame_header_be`]
+/// for invalid headers.
+pub fn encode_frame_header_14bit_le(header: &DtsFrameHeader) -> Result<Vec<u8>> {
+    let mut raw_be = encode_frame_header_be(header)?;
+    // Same 15-byte padding rule as `encode_frame_header_14bit_be`.
+    raw_be.resize(15, 0);
+    let (packed, _payload_bit_count) =
+        crate::unpack14::pack_16bit_to_14bit(&raw_be, FourteenBitByteOrder::LittleEndian);
+    debug_assert_eq!(
+        packed.len(),
+        18,
+        "14-bit-LE encoded header must be exactly 18 bytes (9 containers)"
+    );
+    Ok(packed)
+}
+
 /// Parse a single DTS Core frame-sync header from the start of
 /// `bytes`.
 ///
@@ -2490,5 +2606,274 @@ mod tests {
         // index 1 = BE[12] = 0x00; encoded[13] is the byte-swap of
         // (BE[12], 0) at index 1 = BE[12] = 0x00. They match.
         assert_eq!(encoded[13], expected[13]);
+    }
+
+    // ---------------------------------------------------------------
+    // Round 148 — encode_frame_header_14bit_{be,le}(): 14-bit-packed
+    // encoder variants.
+    //
+    // The 14-bit encoders compose `encode_frame_header_be` with the
+    // round-145 `pack_16bit_to_14bit` primitive. The raw-BE 13- or
+    // 15-byte header window is zero-padded to 16 bytes so the pack
+    // step emits 9 14-bit containers = 18 bytes — the parser's
+    // minimum input length for the 14-bit branch. Both encoders emit
+    // exactly 18 bytes regardless of `crc_present`; the 14-bit-LE
+    // output is the pairwise byte-swap of the 14-bit-BE output.
+    // ---------------------------------------------------------------
+
+    use crate::header::{encode_frame_header_14bit_be, encode_frame_header_14bit_le};
+
+    /// 14-bit-BE encoder output is exactly 18 bytes regardless of
+    /// `crc_present` (matches the parser's minimum 14-bit input length).
+    #[test]
+    fn encode_14bit_be_is_always_18_bytes() {
+        let bytes_no_crc = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr_no_crc = parse_frame_header(&bytes_no_crc).unwrap();
+        assert!(!hdr_no_crc.crc_present);
+        assert_eq!(encode_frame_header_14bit_be(&hdr_no_crc).unwrap().len(), 18);
+
+        let bytes_crc = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xCAFE), 0xD2EC);
+        let hdr_crc = parse_frame_header(&bytes_crc).unwrap();
+        assert!(hdr_crc.crc_present);
+        assert_eq!(encode_frame_header_14bit_be(&hdr_crc).unwrap().len(), 18);
+    }
+
+    /// 14-bit-LE encoder output is also always 18 bytes.
+    #[test]
+    fn encode_14bit_le_is_always_18_bytes() {
+        let bytes_no_crc = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr_no_crc = parse_frame_header(&bytes_no_crc).unwrap();
+        assert_eq!(encode_frame_header_14bit_le(&hdr_no_crc).unwrap().len(), 18);
+
+        let bytes_crc = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xCAFE), 0xD2EC);
+        let hdr_crc = parse_frame_header(&bytes_crc).unwrap();
+        assert_eq!(encode_frame_header_14bit_le(&hdr_crc).unwrap().len(), 18);
+    }
+
+    /// The first 4 bytes of the 14-bit-BE output match the wiki's
+    /// `1F FF E8 00` sync-prefix. The wiki documents the sync as
+    /// `1F FF E8 00 07 Fx` (6 bytes); the trailing `Fx` byte is
+    /// the upper 4 bits of the FTYPE/SHORT/CRC_PRESENT/NBLKS_high
+    /// continuation, which depends on the frame's specific header.
+    #[test]
+    fn encode_14bit_be_starts_with_wiki_sync_prefix() {
+        let bytes_in = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded = encode_frame_header_14bit_be(&hdr).unwrap();
+        // Wiki's first 4 bytes are unambiguous (they're the sign-
+        // extended 14-bit re-packing of the 32-bit raw-BE sync).
+        assert_eq!(&encoded[..4], &[0x1F, 0xFF, 0xE8, 0x00]);
+    }
+
+    /// The first 4 bytes of the 14-bit-LE output match the wiki's
+    /// `FF 1F 00 E8` sync-prefix.
+    #[test]
+    fn encode_14bit_le_starts_with_wiki_sync_prefix() {
+        let bytes_in = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded = encode_frame_header_14bit_le(&hdr).unwrap();
+        assert_eq!(&encoded[..4], &[0xFF, 0x1F, 0x00, 0xE8]);
+    }
+
+    /// 14-bit-LE output is the pairwise byte-swap of the 14-bit-BE
+    /// output (each 16-bit container is swapped independently — the
+    /// payload bits are identical, only the container byte order
+    /// differs).
+    #[test]
+    fn encode_14bit_le_equals_pairwise_byte_swap_of_be() {
+        let bytes_in = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xCAFE), 0xD2EC);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let be = encode_frame_header_14bit_be(&hdr).unwrap();
+        let le = encode_frame_header_14bit_le(&hdr).unwrap();
+        assert_eq!(be.len(), le.len());
+        assert_eq!(be.len() % 2, 0, "container-aligned");
+        let mut expected = be.clone();
+        for pair in expected.chunks_exact_mut(2) {
+            pair.swap(0, 1);
+        }
+        assert_eq!(le, expected);
+    }
+
+    /// `parse_frame_header_14bit(&encode_frame_header_14bit_be(&hdr))`
+    /// round-trips every field except `sync_word_encoding`.
+    #[test]
+    fn encode_14bit_be_round_trips_through_parser_no_crc() {
+        let bytes_in = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded = encode_frame_header_14bit_be(&hdr).unwrap();
+        assert_eq!(encoded.len(), 18);
+        let hdr_round = parse_frame_header_14bit(&encoded).unwrap();
+        assert_eq!(
+            hdr_round.sync_word_encoding,
+            SyncWordEncoding::FourteenBitBigEndian
+        );
+        let mut hdr_norm = hdr_round;
+        hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+        assert_eq!(hdr_norm, hdr);
+    }
+
+    /// Same as above with crc_present == true (15-byte raw-BE header
+    /// re-packed into 18-byte 14-bit container window).
+    #[test]
+    fn encode_14bit_be_round_trips_through_parser_with_crc() {
+        let bytes_in = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xCAFE), 0xD2EC);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded = encode_frame_header_14bit_be(&hdr).unwrap();
+        assert_eq!(encoded.len(), 18);
+        let hdr_round = parse_frame_header_14bit(&encoded).unwrap();
+        assert_eq!(
+            hdr_round.sync_word_encoding,
+            SyncWordEncoding::FourteenBitBigEndian
+        );
+        let mut hdr_norm = hdr_round;
+        hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+        assert_eq!(hdr_norm, hdr);
+    }
+
+    /// 14-bit-LE round-trip through `parse_frame_header_14bit`.
+    #[test]
+    fn encode_14bit_le_round_trips_through_parser_no_crc() {
+        let bytes_in = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded = encode_frame_header_14bit_le(&hdr).unwrap();
+        let hdr_round = parse_frame_header_14bit(&encoded).unwrap();
+        assert_eq!(
+            hdr_round.sync_word_encoding,
+            SyncWordEncoding::FourteenBitLittleEndian
+        );
+        let mut hdr_norm = hdr_round;
+        hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+        assert_eq!(hdr_norm, hdr);
+    }
+
+    /// Same with crc_present == true.
+    #[test]
+    fn encode_14bit_le_round_trips_through_parser_with_crc() {
+        let bytes_in = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0xCAFE), 0xD2EC);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded = encode_frame_header_14bit_le(&hdr).unwrap();
+        let hdr_round = parse_frame_header_14bit(&encoded).unwrap();
+        assert_eq!(
+            hdr_round.sync_word_encoding,
+            SyncWordEncoding::FourteenBitLittleEndian
+        );
+        let mut hdr_norm = hdr_round;
+        hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+        assert_eq!(hdr_norm, hdr);
+    }
+
+    /// Bound-validation inheritance: NBLKS<5 from the BE encoder also
+    /// rejects the 14-bit-BE wrapper.
+    #[test]
+    fn encode_14bit_be_rejects_nblks_below_5() {
+        let hdr = synth_hdr(|h| h.blocks_per_frame = 4);
+        let err = encode_frame_header_14bit_be(&hdr).unwrap_err();
+        assert_eq!(err, Error::BlockCountOutOfRange { blocks: 4 });
+    }
+
+    /// Bound-validation inheritance: FSIZE above 16384 also rejects
+    /// the 14-bit-LE wrapper.
+    #[test]
+    fn encode_14bit_le_rejects_frame_size_above_16384() {
+        let hdr = synth_hdr(|h| h.frame_size_bytes = 16385);
+        let err = encode_frame_header_14bit_le(&hdr).unwrap_err();
+        assert_eq!(err, Error::FrameSizeOutOfRange { frame_size: 16385 });
+    }
+
+    /// Bound-validation inheritance: the crc-present-without-payload
+    /// mismatch is also rejected by the 14-bit-BE wrapper.
+    #[test]
+    fn encode_14bit_be_rejects_crc_payload_mismatch() {
+        let hdr = synth_hdr(|h| {
+            h.crc_present = false;
+            h.header_crc = Some(0xBEEF);
+        });
+        let err = encode_frame_header_14bit_be(&hdr).unwrap_err();
+        match err {
+            Error::FieldOutOfRange { field, .. } => assert_eq!(field, "header_crc"),
+            other => panic!("expected FieldOutOfRange{{field: header_crc}}, got {other:?}"),
+        }
+    }
+
+    /// Exhaustive grid: every documented LFE code × both CRC states ×
+    /// representative {NBLKS, FSIZE} pairs round-trip through each of
+    /// the 14-bit encoders.
+    #[test]
+    fn encode_14bit_round_trip_grid_lfe_crc_states() {
+        for crc_state in [false, true] {
+            for lfe_code in 0u8..=3 {
+                for &(nblks, fsize) in &[(5u8, 95u16), (16u8, 1024u16), (127u8, 16384u16)] {
+                    let crc_arg = if crc_state { Some(0xBEEF) } else { None };
+                    let bytes = build_be_header(
+                        1,
+                        31,
+                        crc_state as u32,
+                        nblks as u32,
+                        (fsize - 1) as u32,
+                        9,
+                        13,
+                        25,
+                        ((lfe_code as u32) & 0b11) << 1,
+                        crc_arg,
+                        0,
+                    );
+                    let hdr = parse_frame_header(&bytes).unwrap();
+
+                    // BE variant.
+                    let encoded_be = encode_frame_header_14bit_be(&hdr).unwrap();
+                    assert_eq!(encoded_be.len(), 18);
+                    assert_eq!(&encoded_be[..4], &[0x1F, 0xFF, 0xE8, 0x00]);
+                    let hdr_round_be = parse_frame_header_14bit(&encoded_be).unwrap();
+                    assert_eq!(
+                        hdr_round_be.sync_word_encoding,
+                        SyncWordEncoding::FourteenBitBigEndian
+                    );
+                    let mut hdr_norm_be = hdr_round_be;
+                    hdr_norm_be.sync_word_encoding = hdr.sync_word_encoding;
+                    assert_eq!(hdr_norm_be, hdr);
+
+                    // LE variant.
+                    let encoded_le = encode_frame_header_14bit_le(&hdr).unwrap();
+                    assert_eq!(encoded_le.len(), 18);
+                    assert_eq!(&encoded_le[..4], &[0xFF, 0x1F, 0x00, 0xE8]);
+                    let hdr_round_le = parse_frame_header_14bit(&encoded_le).unwrap();
+                    assert_eq!(
+                        hdr_round_le.sync_word_encoding,
+                        SyncWordEncoding::FourteenBitLittleEndian
+                    );
+                    let mut hdr_norm_le = hdr_round_le;
+                    hdr_norm_le.sync_word_encoding = hdr.sync_word_encoding;
+                    assert_eq!(hdr_norm_le, hdr);
+
+                    // Cross-check: BE and LE outputs are pairwise byte-
+                    // swaps of each other.
+                    let mut swapped = encoded_be.clone();
+                    for pair in swapped.chunks_exact_mut(2) {
+                        pair.swap(0, 1);
+                    }
+                    assert_eq!(encoded_le, swapped);
+                }
+            }
+        }
+    }
+
+    /// Cross-reference with the existing `unpack_14bit_to_16bit` round-
+    /// trip: unpacking the 14-bit-BE encoder output and reading the
+    /// first `header_byte_length()` bytes equals the BE encoder output
+    /// (padded to the multiple-of-8 boundary the unpacker emits).
+    #[test]
+    fn encode_14bit_be_unpacks_back_to_raw_be_header_prefix() {
+        use crate::FourteenBitByteOrder;
+        let bytes_in = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+        let encoded_14 = encode_frame_header_14bit_be(&hdr).unwrap();
+        let unpacked =
+            crate::unpack_14bit_to_16bit(&encoded_14, FourteenBitByteOrder::BigEndian).unwrap();
+        let raw_be = encode_frame_header_be(&hdr).unwrap();
+        // Unpacked stream starts with the canonical raw-BE sync and the
+        // first 13 bytes equal the BE encoder output (since BE encoder
+        // emits exactly 13 bytes for crc_present == false).
+        assert_eq!(&unpacked[..raw_be.len()], &raw_be[..]);
+        assert_eq!(&unpacked[..4], &[0x7F, 0xFE, 0x80, 0x01]);
     }
 }

@@ -8,6 +8,36 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 148 (2026-05-26) — 14-bit-packed encoder variants that close
+  the parse↔encode round-trip across all four documented sync
+  encodings. Two new primitives:
+  - `encode_frame_header_14bit_be(&DtsFrameHeader) -> Result<Vec<u8>>`
+    composes `encode_frame_header_be` with the round-145
+    `pack_16bit_to_14bit` primitive: the raw-BE header bytes are
+    padded to 15 bytes (= 120 bits = the worst-case `crc_present == 1`
+    header window) and re-packed into nine 14-bit-BE containers. The
+    output is always exactly 18 bytes (regardless of `crc_present`)
+    and always begins with the wiki-documented 14-bit-BE sync prefix
+    `1F FF E8 00 …`.
+  - `encode_frame_header_14bit_le(&DtsFrameHeader)` is the same
+    composition with `FourteenBitByteOrder::LittleEndian`; the output
+    is the pairwise byte-swap of the 14-bit-BE output (each container
+    swapped independently) and begins with `FF 1F 00 E8 …`.
+  - Both encoders inherit the bit-width and structural-bound checks
+    from `encode_frame_header_be`
+    (`BlockCountOutOfRange` / `FrameSizeOutOfRange` /
+    `FieldOutOfRange{header_crc}`).
+  - Fourteen new unit tests covering: fixed 18-byte output for both
+    `crc_present` states (BE + LE), wiki sync-prefix reproduction
+    (BE + LE), pairwise-byte-swap equivalence between the BE and LE
+    outputs, parse↔encode round-trip through `parse_frame_header_14bit`
+    with and without CRC (BE + LE), NBLKS / FSIZE / CRC-payload bound
+    rejection inheritance, an exhaustive 24-case grid
+    ({LFE × CRC × {NBLKS, FSIZE}}) covering both variants and
+    confirming cross-equivalence on every case, and a cross-check
+    that unpacking the 14-bit-BE encoder output through
+    `unpack_14bit_to_16bit` recovers the raw-BE header prefix
+    byte-for-byte.
 - Round 145 (2026-05-26) — raw-LE encoder + bidirectional 14↔16-bit
   container pack/unpack. Two new primitives:
   - `encode_frame_header_le(&DtsFrameHeader) -> Result<Vec<u8>>`

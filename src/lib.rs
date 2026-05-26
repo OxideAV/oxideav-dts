@@ -75,6 +75,24 @@
 //! structural bounds plus per-field bit-width bounds via the new
 //! [`Error::FieldOutOfRange`] variant.
 //!
+//! Round 148 (2026-05-26) completes the encoder surface across all
+//! four documented sync encodings. The two new primitives,
+//! [`encode_frame_header_14bit_be`] and [`encode_frame_header_14bit_le`],
+//! compose [`encode_frame_header_be`] with [`pack_16bit_to_14bit`]:
+//! the raw-BE 13 or 15-byte header window is zero-padded to 16 bytes
+//! (the minimum the parser's 14-bit pre-unpack step needs to land a
+//! 16-byte raw-BE window) and re-packed into 14-bit-payload containers
+//! in the requested byte order. Both encoders emit exactly **18 bytes**
+//! (nine 14-bit containers carrying 126 payload bits) regardless of
+//! `crc_present`; the trailing 16 padding bits land in what would be
+//! the first SUBFRAMES bits of a real frame and are inert for
+//! parsing. The 14-bit-LE output is the pairwise byte-swap of the
+//! 14-bit-BE output, matching the wiki's `1F FF E8 00 …` vs
+//! `FF 1F 00 E8 …` sync-prefix relationship. The
+//! `parse_frame_header_14bit(encode_frame_header_14bit_<be|le>(hdr))`
+//! round-trip recovers `hdr` on every field except `sync_word_encoding`
+//! (the parser reports the encoding it detected at the input).
+//!
 //! Round 145 (2026-05-26) extends the encoder side with two new
 //! primitives: [`encode_frame_header_le`] emits the raw-LE on-wire
 //! header window (canonical sync `FE 7F 01 80`, always 16 bytes long
@@ -158,6 +176,11 @@
 //! - [`encode_frame_header_le`] — raw-LE encoder variant
 //!   (`encode_frame_header_be` zero-padded to 16 bytes + 16-bit-word
 //!   swap; added in round 145).
+//! - [`encode_frame_header_14bit_be`] / [`encode_frame_header_14bit_le`]
+//!   — 14-bit-packed encoder variants (`encode_frame_header_be` padded
+//!   to 16 bytes then re-packed through [`pack_16bit_to_14bit`]; added
+//!   in round 148). Both emit exactly 18 bytes regardless of
+//!   `crc_present`, matching the parser's minimum 14-bit input length.
 //! - [`unpack_14bit_to_16bit`] / [`pack_16bit_to_14bit`] /
 //!   [`FourteenBitByteOrder`] — the 14↔16-bit container conversion
 //!   primitives. `unpack_14bit_to_16bit` added in round 2;
@@ -193,8 +216,9 @@ mod unpack14;
 mod registry;
 
 pub use crate::header::{
-    encode_frame_header_be, encode_frame_header_le, parse_frame_header, parse_frame_header_14bit,
-    DtsFrameHeader, FrameType, LfeMode, SyncWordEncoding,
+    encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,
+    encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, DtsFrameHeader,
+    FrameType, LfeMode, SyncWordEncoding,
 };
 pub use crate::iter::{find_next_sync, iter_frames, FrameIterator, FrameView, SyncMatch};
 pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder};

@@ -5,7 +5,7 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
-**Round 145 — raw-LE encoder + bidirectional 14↔16-bit pack/unpack.**
+**Round 148 — 14-bit-packed encoder variants (all four sync encodings covered).**
 Round 1 landed
 the structural frame-header parser; round 2 added the two 14-bit-packed
 sync encodings (`1F FF E8 00 07 Fx` BE and `FF 1F 00 E8 Fx 07` LE) via
@@ -84,6 +84,27 @@ existing `unpack_14bit_to_16bit` it completes the bidirectional
 two encoder variants plus the 14↔16-bit primitives put all four
 documented sync encodings within reach of a future
 `encode_frame_header_14bit_{be,le}` round.
+Round 148 (2026-05-26) closes the encoder surface across all four
+documented sync encodings. Two new primitives,
+`encode_frame_header_14bit_be(&DtsFrameHeader)` and
+`encode_frame_header_14bit_le(&DtsFrameHeader)`, compose
+`encode_frame_header_be` with `pack_16bit_to_14bit`: the raw-BE
+header bytes are padded to 15 bytes (= 120 bits = the worst-case
+`crc_present == 1` header window) and re-packed into nine 14-bit
+containers in the requested byte order. Both encoders emit
+**exactly 18 bytes** regardless of `crc_present` — matching the
+parser's minimum 14-bit input length, so the
+`parse_frame_header_14bit(encode_frame_header_14bit_{be|le}(hdr))`
+round-trip is exact on every field except `sync_word_encoding`
+(which the parser reports as the variant it detected at the
+input). The 14-bit-LE output is the pairwise byte-swap of the
+14-bit-BE output (each container swapped independently), matching
+the wiki's `1F FF E8 00 …` (BE) vs `FF 1F 00 E8 …` (LE)
+sync-prefix relationship. With these two additions the crate now
+exposes a parse↔encode round-trip on the frame-sync header window
+for every one of the four sync encodings the wiki snapshot
+enumerates (`RawBigEndian`, `RawLittleEndian`,
+`FourteenBitBigEndian`, `FourteenBitLittleEndian`).
 
 The parser surfaces a typed `DtsFrameHeader`:
 
