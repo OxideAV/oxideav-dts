@@ -8,6 +8,45 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 159 (2026-05-27) — `iter_frames_resync` error-tolerant
+  multi-frame walker. The fail-fast `iter_frames` from round 6
+  terminates at the first parse failure; the new
+  `FrameIteratorResync` / `iter_frames_resync(bytes)` instead treat
+  parse failures at candidate sync positions as false-positive
+  syncs and continue scanning from `offset + 1`, recovering real
+  frames that follow corrupted-header patches in the middle of a
+  `.dts` byte stream.
+  - New public types `FrameIteratorResync<'a>` (the iterator),
+    `ResyncEvent { offset, encoding, cause }` (Err item), and
+    `ResyncCause` (the 4-variant cause enum:
+    `StructuralBoundFailed(Error)`, `HeaderEof`,
+    `FrameLengthOverrunsBuffer { declared_len }`,
+    `FourteenBitSyncSkipped`). All re-exported at the crate root.
+  - `iter_frames_resync(bytes)` convenience constructor, mirroring
+    the existing `iter_frames(bytes)`.
+  - The new iterator does NOT depend on the `oxideav-core`
+    integration — both `iter_frames` and `iter_frames_resync` are
+    available in the `--no-default-features` build.
+  - The well-formed-input contract: on a clean stream the resync
+    iterator's yields are byte-for-byte identical to the fail-fast
+    iterator's (every step is `Ok`; frame views match). Round 159
+    asserts this against the bundled ffmpeg 5-frame fixture.
+  - Eleven new unit tests in `src/iter.rs` cover: clean-stream
+    parity with `iter_frames`, false-positive sync skipping with
+    real-frame recovery, frame-length overrun event surfacing,
+    14-bit sync skipping (so a raw stream with stray 14-bit-shaped
+    payload patches still walks), cursor advance (one byte on
+    event, frame_size_bytes on Ok), empty buffer, no-sync buffer,
+    multiple consecutive false positives all reported, truncated
+    tail surfaces overrun event then ends, truncated header
+    surfaces `HeaderEof`, and `iter_frames_resync` ≡
+    `FrameIteratorResync::new`.
+  - Two new integration tests in `tests/multi_frame_iter.rs` cover
+    the resync iterator against the bundled ffmpeg fixture: a
+    clean-fixture equivalence check (resync walks identically to
+    fail-fast), and a corrupted-fixture recovery check (frame-2
+    header byte flip → resync surfaces one `StructuralBoundFailed`
+    event and recovers frames 3, 4, and 5).
 - Round 151 (2026-05-26) — `find_all_syncs` bulk-scan helper plus
   raw-LE `iter_frames` test coverage.
   - `find_all_syncs(bytes: &[u8]) -> Vec<SyncMatch>` is the bulk

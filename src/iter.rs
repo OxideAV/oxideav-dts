@@ -16,6 +16,20 @@
 //!   [`crate::DtsFrameHeader::frame_size_bytes`] (for raw 16-bit
 //!   encodings; see the function docs for the 14-bit advance rule).
 //!
+//! Round 159 (2026-05-27) adds an error-tolerant counterpart to
+//! [`FrameIterator`]:
+//!
+//! - [`FrameIteratorResync`] / [`iter_frames_resync`] — when a
+//!   candidate sync turns out to be a false positive (random payload
+//!   bytes that happened to match a 4-byte sync sequence and whose
+//!   subsequent header bits fail the structural NBLKS / FSIZE bounds,
+//!   or whose declared `frame_size_bytes` overruns end-of-buffer),
+//!   surface a [`ResyncEvent`] reporting the discarded offset + cause
+//!   and continue scanning from `offset + 1` instead of terminating.
+//!   Useful for stream-integrity tooling that needs to walk a
+//!   partially-corrupted `.dts` stream past a malformed-syncword
+//!   patch.
+//!
 //! Neither helper depends on the [`oxideav-core`] integration; both
 //! are available in the `--no-default-features` build alongside the
 //! standalone parsers.
@@ -242,6 +256,201 @@ impl<'a> Iterator for FrameIterator<'a> {
 /// Convenience constructor — equivalent to [`FrameIterator::new`].
 pub fn iter_frames(bytes: &[u8]) -> FrameIterator<'_> {
     FrameIterator::new(bytes)
+}
+
+/// Reason a [`FrameIteratorResync`] step discarded a candidate sync
+/// position and resumed scanning one byte further.
+///
+/// Surfaced through [`ResyncEvent::cause`]; callers can route on the
+/// variant (e.g. log truncated tails differently from false-positive
+/// syncs mid-buffer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResyncCause {
+    /// The header bits that follow the sync failed one of the
+    /// structural bounds the spec mandates (NBLKS &lt; 5 → [`Error::BlockCountOutOfRange`],
+    /// frame size &lt; 95 → [`Error::FrameSizeOutOfRange`]) — strong
+    /// evidence the sync was a coincidental byte sequence inside a
+    /// previous frame's payload rather than the start of a real
+    /// frame.
+    StructuralBoundFailed(Error),
+    /// The candidate sync sat too close to end-of-buffer for the
+    /// header bit-width to fit — the parser returned
+    /// [`Error::UnexpectedEof`] while reading the header itself.
+    HeaderEof,
+    /// The header parsed successfully but its declared
+    /// `frame_size_bytes` runs past end-of-buffer. The fail-fast
+    /// [`FrameIterator`] reports this as
+    /// [`Error::UnexpectedEof`] and terminates; the resync iterator
+    /// treats the candidate as a false-positive sync and resumes
+    /// scanning at `offset + 1`. A genuine truncated tail will
+    /// produce one or more `FrameLengthOverrunsBuffer` events near
+    /// the end of the input and no further successful frames.
+    FrameLengthOverrunsBuffer {
+        /// `header.frame_size_bytes` at the discarded position.
+        declared_len: u16,
+    },
+    /// A 14-bit sync was encountered. The fail-fast iterator yields
+    /// [`Error::UnsupportedFourteenBit`] and terminates; the resync
+    /// iterator instead surfaces this event and continues scanning
+    /// past the 14-bit sync, so a stream with intermixed encodings
+    /// (e.g. a raw-16-bit stream with a few stray 14-bit-shaped byte
+    /// sequences in payload) still walks to completion.
+    FourteenBitSyncSkipped,
+}
+
+/// One step of [`FrameIteratorResync`] when a candidate sync turned
+/// out to be a false positive.
+///
+/// `offset` and `encoding` come from the underlying
+/// [`find_next_sync`] match; `cause` documents which check rejected
+/// the candidate (see [`ResyncCause`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResyncEvent {
+    /// Absolute byte offset of the discarded sync candidate within
+    /// the iterator's input.
+    pub offset: usize,
+    /// Sync encoding that matched at `offset`.
+    pub encoding: SyncWordEncoding,
+    /// Why the candidate was rejected.
+    pub cause: ResyncCause,
+}
+
+/// Error-tolerant counterpart to [`FrameIterator`].
+///
+/// The fail-fast [`FrameIterator`] surfaces a structural-bound
+/// failure at a candidate sync (NBLKS &lt; 5, FSIZE &lt; 95) or a
+/// header-truncation by yielding the parser's [`Error`] and
+/// terminating — appropriate for callers walking a known-good raw
+/// `.dts` stream where any malformed sync is a hard fault.
+///
+/// `FrameIteratorResync` instead treats those cases as **evidence
+/// the candidate sync was a false positive** (a coincidental
+/// 4-byte sequence inside another frame's payload that matched the
+/// 32-bit syncword), yielding a [`ResyncEvent`] documenting the
+/// offset + cause and advancing the cursor by one byte so the scan
+/// resumes past the spurious match. This lets stream-integrity
+/// tooling walk a partially-corrupted stream past malformed-sync
+/// patches and recover frames after the damage.
+///
+/// Iteration logic per step:
+/// 1. Find the next sync at or after the current cursor via
+///    [`find_next_sync`]. If none, the iterator ends (yields
+///    `None`).
+/// 2. If the sync is a 14-bit variant: yield
+///    [`ResyncCause::FourteenBitSyncSkipped`] and advance the
+///    cursor to `offset + 1` (rather than terminating like
+///    [`FrameIterator`] does).
+/// 3. Parse the header at the matched offset. On structural
+///    failure (`BlockCountOutOfRange` / `FrameSizeOutOfRange` /
+///    `UnexpectedEof` while reading the header bits) yield a
+///    [`ResyncEvent`] with the appropriate [`ResyncCause`] and
+///    advance the cursor to `offset + 1`.
+/// 4. If the header parses but `frame_size_bytes` overruns
+///    end-of-buffer, yield
+///    [`ResyncCause::FrameLengthOverrunsBuffer`] with the declared
+///    length and advance the cursor to `offset + 1`. A genuine
+///    truncated tail will therefore emit one or more overrun
+///    events and then iteration ends naturally when no further
+///    sync is found.
+/// 5. Otherwise yield `Ok(FrameView)` and advance the cursor by
+///    `frame_size_bytes`.
+///
+/// This iterator is only meaningful for the raw 16-bit encodings
+/// (the [`FrameIterator`] docs spell out the 14-bit container-byte
+/// advance gap). 14-bit syncs are skipped per step (2) above
+/// rather than walked, so a raw-16-bit stream that contains stray
+/// 14-bit-shaped byte sequences in payload still walks past them.
+#[derive(Debug)]
+pub struct FrameIteratorResync<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> FrameIteratorResync<'a> {
+    /// Construct a resync iterator positioned at byte 0 of `bytes`.
+    pub fn new(bytes: &'a [u8]) -> Self {
+        FrameIteratorResync { bytes, cursor: 0 }
+    }
+
+    /// Current cursor offset (advances on every yielded step,
+    /// whether `Ok` or `Err`).
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+}
+
+impl<'a> Iterator for FrameIteratorResync<'a> {
+    type Item = core::result::Result<FrameView<'a>, ResyncEvent>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let sync_match = find_next_sync(self.bytes, self.cursor)?;
+        let off = sync_match.offset;
+        if matches!(
+            sync_match.encoding,
+            SyncWordEncoding::FourteenBitBigEndian | SyncWordEncoding::FourteenBitLittleEndian
+        ) {
+            self.cursor = off + 1;
+            return Some(Err(ResyncEvent {
+                offset: off,
+                encoding: sync_match.encoding,
+                cause: ResyncCause::FourteenBitSyncSkipped,
+            }));
+        }
+        match parse_frame_header(&self.bytes[off..]) {
+            Ok(hdr) => {
+                let len = hdr.frame_size_bytes as usize;
+                if off + len > self.bytes.len() {
+                    self.cursor = off + 1;
+                    return Some(Err(ResyncEvent {
+                        offset: off,
+                        encoding: sync_match.encoding,
+                        cause: ResyncCause::FrameLengthOverrunsBuffer {
+                            declared_len: hdr.frame_size_bytes,
+                        },
+                    }));
+                }
+                let view = FrameView {
+                    header: hdr,
+                    offset: off,
+                    len,
+                    data: &self.bytes[off..off + len],
+                };
+                self.cursor = off + len;
+                Some(Ok(view))
+            }
+            Err(e) => {
+                let cause = match e {
+                    Error::UnexpectedEof => ResyncCause::HeaderEof,
+                    Error::BlockCountOutOfRange { .. } | Error::FrameSizeOutOfRange { .. } => {
+                        ResyncCause::StructuralBoundFailed(e)
+                    }
+                    // `find_next_sync` already filtered out `NoSync`;
+                    // the 14-bit branch is handled above so
+                    // `UnsupportedFourteenBit` can't fire here;
+                    // `FieldOutOfRange` is encoder-only. Treat any
+                    // other variant as a structural false-positive
+                    // so the iterator stays total over future enum
+                    // extensions.
+                    _ => ResyncCause::StructuralBoundFailed(e),
+                };
+                self.cursor = off + 1;
+                Some(Err(ResyncEvent {
+                    offset: off,
+                    encoding: sync_match.encoding,
+                    cause,
+                }))
+            }
+        }
+    }
+}
+
+/// Convenience constructor — equivalent to
+/// [`FrameIteratorResync::new`].
+///
+/// See [`FrameIteratorResync`] for the resync vs fail-fast
+/// trade-off and the per-step yield contract.
+pub fn iter_frames_resync(bytes: &[u8]) -> FrameIteratorResync<'_> {
+    FrameIteratorResync::new(bytes)
 }
 
 /// Scan an entire byte buffer and return every documented DTS sync
@@ -766,6 +975,392 @@ mod tests {
                 f.header.sync_word_encoding,
                 SyncWordEncoding::RawLittleEndian
             );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Round 159 — FrameIteratorResync.
+    //
+    // Error-tolerant counterpart to FrameIterator: a candidate sync
+    // whose subsequent header bits fail the structural NBLKS / FSIZE
+    // bounds (or whose declared frame_size_bytes overruns
+    // end-of-buffer) is treated as a false-positive sync rather than a
+    // hard fault; the iterator yields a ResyncEvent and continues
+    // scanning from offset + 1. Useful for walking partially-corrupted
+    // streams past malformed-sync patches.
+    // -----------------------------------------------------------------
+
+    /// Bit-vector helper used by the synthetic-frame builders below.
+    /// Pushes the low `width` bits of `value` MSB-first into `bv`.
+    fn push_bits(bv: &mut Vec<bool>, value: u32, width: u32) {
+        for i in (0..width).rev() {
+            bv.push(((value >> i) & 1) == 1);
+        }
+    }
+
+    /// Pack an MSB-first bool vector into bytes, panicking if the
+    /// length is not a multiple of 8.
+    fn bits_to_bytes(bv: &[bool]) -> Vec<u8> {
+        assert_eq!(bv.len() % 8, 0, "bit count must be multiple of 8");
+        let mut out = vec![0u8; bv.len() / 8];
+        for (i, chunk) in bv.chunks(8).enumerate() {
+            let mut b: u8 = 0;
+            for (k, bit) in chunk.iter().enumerate() {
+                if *bit {
+                    b |= 1 << (7 - k);
+                }
+            }
+            out[i] = b;
+        }
+        out
+    }
+
+    /// Build a minimum-size (95-byte) termination raw-BE frame whose
+    /// SUBFRAMES region is filled with `fill`. Header fields chosen so
+    /// the parser accepts the frame.
+    fn build_min_frame_be(fill: u8) -> Vec<u8> {
+        let mut bv: Vec<bool> = Vec::new();
+        push_bits(&mut bv, 0x7FFE_8001, 32);
+        push_bits(&mut bv, 0, 1); // ftype = termination
+        push_bits(&mut bv, 0, 5); // sample_count_m1
+        push_bits(&mut bv, 0, 1); // crc_present
+        push_bits(&mut bv, 5, 7); // nblks = 5
+        push_bits(&mut bv, 94, 14); // fsize-1 = 94 → frame_size = 95
+        push_bits(&mut bv, 0, 6); // amode
+        push_bits(&mut bv, 0, 4); // sfreq
+        push_bits(&mut bv, 0, 5); // rate
+        push_bits(&mut bv, 0, 13); // trailing flags
+        push_bits(&mut bv, 0, 16); // post-CRC window
+        while bv.len() % 8 != 0 {
+            bv.push(false);
+        }
+        let mut buf = bits_to_bytes(&bv);
+        buf.resize(95, fill);
+        for byte in buf.iter_mut().skip(13) {
+            *byte = fill;
+        }
+        buf
+    }
+
+    /// On a well-formed stream the resync walker is byte-for-byte
+    /// equivalent to the fail-fast iterator: every step yields `Ok`
+    /// and the frame views match.
+    #[test]
+    fn resync_walks_clean_stream_identically_to_fail_fast() {
+        // Build a 3-frame raw-BE stream by concatenating three
+        // build_min_frame_be calls. Each frame is 95 B → 3 × 95 = 285 B.
+        let mut stream = Vec::with_capacity(3 * 95);
+        for fill in [0x11u8, 0x22, 0x33] {
+            stream.extend_from_slice(&build_min_frame_be(fill));
+        }
+        assert_eq!(stream.len(), 285);
+
+        let strict: Vec<FrameView<'_>> = iter_frames(&stream)
+            .collect::<core::result::Result<Vec<_>, _>>()
+            .expect("clean stream must walk");
+        let resync: Vec<FrameView<'_>> = iter_frames_resync(&stream)
+            .collect::<core::result::Result<Vec<_>, ResyncEvent>>()
+            .expect("clean stream must walk through resync iter too");
+        assert_eq!(strict.len(), 3);
+        assert_eq!(resync.len(), 3);
+        for (a, b) in strict.iter().zip(resync.iter()) {
+            assert_eq!(a.offset, b.offset);
+            assert_eq!(a.len, b.len);
+            assert_eq!(a.header, b.header);
+        }
+    }
+
+    /// A coincidental 4-byte raw-BE sync pattern in the SUBFRAMES
+    /// region of a preceding frame triggers a false-positive sync at
+    /// that offset. The fail-fast iterator can't see it (it advances
+    /// by frame_size_bytes), but a stand-alone sync planted at an
+    /// arbitrary offset followed by zero bytes will fail
+    /// structural-bound checks: the 7 NBLKS bits decode as 0 → after
+    /// the +1 increment that is < 5 → BlockCountOutOfRange. The
+    /// resync iterator must surface that as a `StructuralBoundFailed`
+    /// ResyncEvent and continue, recovering the real frame that
+    /// follows.
+    #[test]
+    fn resync_skips_false_positive_sync_in_garbage_and_recovers_real_frame() {
+        // Layout: [garbage with embedded false sync 0..32] +
+        // [real frame at offset 32, 95 B].
+        let real = build_min_frame_be(0xCC);
+        let mut buf = vec![0xAAu8; 32];
+        // Plant the canonical raw-BE sync at offset 8, followed by all
+        // zeros for the next ~11 bytes — the parser will read
+        // NBLKS == 0 → BlockCountOutOfRange.
+        buf[8..12].copy_from_slice(&RAW_BE_SYNC);
+        for byte in buf.iter_mut().take(32).skip(12) {
+            *byte = 0;
+        }
+        buf.extend_from_slice(&real);
+        // Sanity: fail-fast iter_frames terminates with an error at
+        // the false sync without recovering the real frame.
+        let mut strict = iter_frames(&buf);
+        match strict.next() {
+            Some(Err(Error::BlockCountOutOfRange { .. })) => {}
+            other => panic!("fail-fast must surface BlockCountOutOfRange, got {other:?}"),
+        }
+        assert!(strict.next().is_none(), "fail-fast iterator terminates");
+
+        // Resync iterator: one Err event for the false sync, then the
+        // real frame, then end.
+        let mut it = iter_frames_resync(&buf);
+        let first = it.next().expect("must yield event");
+        match first {
+            Err(ResyncEvent {
+                offset: 8,
+                encoding: SyncWordEncoding::RawBigEndian,
+                cause: ResyncCause::StructuralBoundFailed(Error::BlockCountOutOfRange { .. }),
+            }) => {}
+            other => panic!("expected StructuralBoundFailed at offset 8, got {other:?}"),
+        }
+        let second = it.next().expect("must yield real frame");
+        let view = second.expect("real frame must parse");
+        assert_eq!(view.offset, 32);
+        assert_eq!(view.len, 95);
+        assert_eq!(
+            view.header.sync_word_encoding,
+            SyncWordEncoding::RawBigEndian
+        );
+        assert_eq!(view.header.frame_size_bytes, 95);
+        assert!(it.next().is_none());
+    }
+
+    /// A false-positive sync at an offset whose declared frame size
+    /// overruns end-of-buffer must surface as
+    /// `FrameLengthOverrunsBuffer`, not terminate the iterator. After
+    /// the event the scan resumes past the spurious sync and finds the
+    /// next real frame (or ends naturally if none).
+    #[test]
+    fn resync_overrun_event_lets_iterator_continue() {
+        // Build a buffer: real frame at offset 0 (95 B); then plant a
+        // raw-BE sync at offset 96 with a header declaring a huge
+        // frame_size (overruns end-of-buffer); then the genuine next
+        // frame at offset 96 + 5 = 101.
+        //
+        // To engineer the "header parses OK but length overruns" case
+        // we use a real 95-byte termination frame but place it inside
+        // a buffer that is exactly 96+95 = 191 B starting at offset 96
+        // — but if we plant the well-formed frame at offset 96, the
+        // resync iterator would correctly walk it. So instead we plant
+        // a HAND-CRAFTED header at offset 96 with FSIZE that exceeds
+        // remaining buffer space.
+
+        let real = build_min_frame_be(0x11);
+        let mut buf = real.clone(); // frame at offset 0..95.
+                                    // 1 byte of garbage so the false sync is well-separated.
+        buf.push(0xAA);
+        let false_sync_off = buf.len(); // == 96
+                                        // Craft a header with FSIZE that overruns the remaining buffer.
+        let total_after_false_sync = 50; // we'll make remaining = 50.
+                                         // Declared frame_size = 200 > 50.
+        let mut bv: Vec<bool> = Vec::new();
+        push_bits(&mut bv, 0x7FFE_8001, 32);
+        push_bits(&mut bv, 0, 1);
+        push_bits(&mut bv, 0, 5);
+        push_bits(&mut bv, 0, 1);
+        push_bits(&mut bv, 5, 7); // nblks = 5
+        push_bits(&mut bv, 199, 14); // fsize-1 = 199 → frame_size = 200
+        push_bits(&mut bv, 0, 6);
+        push_bits(&mut bv, 0, 4);
+        push_bits(&mut bv, 0, 5);
+        push_bits(&mut bv, 0, 13);
+        push_bits(&mut bv, 0, 16);
+        while bv.len() % 8 != 0 {
+            bv.push(false);
+        }
+        let hdr_bytes = bits_to_bytes(&bv);
+        buf.extend_from_slice(&hdr_bytes);
+        // Pad with garbage until we have `total_after_false_sync`
+        // bytes after the false sync (so the header is fully readable
+        // — 13 B — but the declared 200-byte frame overruns).
+        while buf.len() - false_sync_off < total_after_false_sync {
+            buf.push(0xBB);
+        }
+        assert_eq!(buf.len() - false_sync_off, total_after_false_sync);
+
+        // Walk with the resync iterator.
+        let events: Vec<_> = iter_frames_resync(&buf).collect();
+        // Expect: Ok(real frame at 0), Err(FrameLengthOverrunsBuffer at
+        // 96, declared_len=200), then end (find_next_sync from 97
+        // finds nothing — the canonical sync was only planted at 96).
+        assert_eq!(events.len(), 2);
+        let frame = events[0].as_ref().unwrap();
+        assert_eq!(frame.offset, 0);
+        assert_eq!(frame.len, 95);
+
+        match events[1] {
+            Err(ResyncEvent {
+                offset: 96,
+                encoding: SyncWordEncoding::RawBigEndian,
+                cause: ResyncCause::FrameLengthOverrunsBuffer { declared_len: 200 },
+            }) => {}
+            ref other => panic!("expected overrun event at 96 with len 200, got {other:?}"),
+        }
+    }
+
+    /// A 14-bit sync encountered by the resync iterator is reported
+    /// via `FourteenBitSyncSkipped` rather than terminating the walk.
+    /// The iterator continues past the 14-bit sync so subsequent raw
+    /// frames are still recovered.
+    #[test]
+    fn resync_skips_fourteen_bit_sync_and_keeps_walking() {
+        let real = build_min_frame_be(0xDD);
+        let mut buf = Vec::new();
+        // 14-bit-BE sync at offset 0 (6 bytes, lower-14-bits match
+        // 0x1FFF / 0x2800 / 0x07Fx).
+        buf.extend_from_slice(&[0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xFA]);
+        // 2 bytes of garbage so the canonical raw-BE sync starts on a
+        // byte boundary the scanner will reach without colliding.
+        buf.extend_from_slice(&[0xAA, 0xAA]);
+        let real_off = buf.len();
+        buf.extend_from_slice(&real);
+
+        let mut it = iter_frames_resync(&buf);
+        match it.next() {
+            Some(Err(ResyncEvent {
+                offset: 0,
+                encoding: SyncWordEncoding::FourteenBitBigEndian,
+                cause: ResyncCause::FourteenBitSyncSkipped,
+            })) => {}
+            other => panic!("expected 14-bit-BE skip at offset 0, got {other:?}"),
+        }
+        // Next step recovers the real raw-BE frame.
+        let view = it.next().expect("must yield frame").expect("must parse");
+        assert_eq!(view.offset, real_off);
+        assert_eq!(
+            view.header.sync_word_encoding,
+            SyncWordEncoding::RawBigEndian
+        );
+        assert!(it.next().is_none());
+    }
+
+    /// Cursor progresses correctly across mixed events: a real frame
+    /// advances by frame_size_bytes; a ResyncEvent advances by exactly
+    /// one byte.
+    #[test]
+    fn resync_cursor_advances_one_byte_on_event_and_frame_size_on_ok() {
+        let real = build_min_frame_be(0x44);
+        let mut buf = vec![0xAAu8; 4];
+        buf[0..4].copy_from_slice(&RAW_BE_SYNC); // false sync at 0.
+                                                 // Pad so the false-sync header reads zeros → BlockCountOutOfRange.
+        buf.resize(20, 0);
+        // Real frame at offset 20.
+        let real_off = buf.len();
+        buf.extend_from_slice(&real);
+
+        let mut it = iter_frames_resync(&buf);
+        // Step 1: false sync at 0; cursor must advance to 1.
+        let _ = it.next();
+        assert_eq!(it.cursor(), 1);
+        // Step 2: real frame at 20; cursor advances by frame_size_bytes.
+        let _ = it.next();
+        assert_eq!(it.cursor(), real_off + 95);
+        // Step 3: no more syncs.
+        assert!(it.next().is_none());
+    }
+
+    /// An empty buffer yields nothing.
+    #[test]
+    fn resync_empty_buffer_yields_none() {
+        let buf: [u8; 0] = [];
+        assert!(iter_frames_resync(&buf).next().is_none());
+    }
+
+    /// A buffer with no sync at all yields nothing.
+    #[test]
+    fn resync_no_sync_yields_none() {
+        let buf = vec![0xAAu8; 64];
+        assert!(iter_frames_resync(&buf).next().is_none());
+    }
+
+    /// Multiple consecutive false-positive raw-BE sync sequences are
+    /// each reported (in order) and the iterator finally terminates
+    /// when no more syncs exist.
+    #[test]
+    fn resync_multiple_consecutive_false_positives_each_reported() {
+        let mut buf = vec![0u8; 64];
+        // Three false sync sequences at offsets 0, 16, 32 with all
+        // zeros following → each fails NBLKS bound.
+        for &off in &[0usize, 16, 32] {
+            buf[off..off + 4].copy_from_slice(&RAW_BE_SYNC);
+        }
+        let events: Vec<_> = iter_frames_resync(&buf).collect();
+        assert_eq!(events.len(), 3);
+        for (i, &expected_off) in [0usize, 16, 32].iter().enumerate() {
+            match events[i] {
+                Err(ResyncEvent {
+                    offset,
+                    encoding: SyncWordEncoding::RawBigEndian,
+                    cause: ResyncCause::StructuralBoundFailed(Error::BlockCountOutOfRange { .. }),
+                }) if offset == expected_off => {}
+                ref other => panic!("event {i} mismatch: {other:?}"),
+            }
+        }
+    }
+
+    /// A genuine truncated tail surfaces as a single
+    /// `FrameLengthOverrunsBuffer` event with the declared length;
+    /// the iterator then ends because no subsequent sync exists in
+    /// the truncated buffer.
+    #[test]
+    fn resync_truncated_tail_surfaces_overrun_event_then_ends() {
+        // Build a valid-header buffer whose declared frame_size_bytes
+        // is 95 but the buffer holds only 50 bytes total.
+        let real = build_min_frame_be(0xEE);
+        let truncated = &real[..50];
+        let events: Vec<_> = iter_frames_resync(truncated).collect();
+        assert_eq!(events.len(), 1);
+        match events[0] {
+            Err(ResyncEvent {
+                offset: 0,
+                encoding: SyncWordEncoding::RawBigEndian,
+                cause: ResyncCause::FrameLengthOverrunsBuffer { declared_len: 95 },
+            }) => {}
+            ref other => panic!("expected overrun event, got {other:?}"),
+        }
+    }
+
+    /// A header that's truncated mid-bits (sync present, body too
+    /// short to read all 104 header bits) yields `HeaderEof`. The
+    /// iterator then ends because no subsequent sync follows.
+    #[test]
+    fn resync_truncated_header_surfaces_header_eof() {
+        // Sync + 4 bytes (so the parser sees 8 bytes total — far less
+        // than the 13-byte minimum header window).
+        let buf = [0x7F, 0xFE, 0x80, 0x01, 0x00, 0x00, 0x00, 0x00];
+        let events: Vec<_> = iter_frames_resync(&buf).collect();
+        assert_eq!(events.len(), 1);
+        match events[0] {
+            Err(ResyncEvent {
+                offset: 0,
+                encoding: SyncWordEncoding::RawBigEndian,
+                cause: ResyncCause::HeaderEof,
+            }) => {}
+            ref other => panic!("expected HeaderEof, got {other:?}"),
+        }
+    }
+
+    /// The convenience constructor `iter_frames_resync` is equivalent
+    /// to `FrameIteratorResync::new`.
+    #[test]
+    fn iter_frames_resync_matches_struct_new() {
+        let real = build_min_frame_be(0x55);
+        let a: Vec<_> = iter_frames_resync(&real).collect();
+        let b: Vec<_> = FrameIteratorResync::new(&real).collect();
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.iter().zip(b.iter()) {
+            // FrameView lifetimes are anonymous; compare via fields.
+            match (x, y) {
+                (Ok(fx), Ok(fy)) => {
+                    assert_eq!(fx.offset, fy.offset);
+                    assert_eq!(fx.len, fy.len);
+                    assert_eq!(fx.header, fy.header);
+                }
+                (Err(ex), Err(ey)) => assert_eq!(ex, ey),
+                _ => panic!("variants differ"),
+            }
         }
     }
 }

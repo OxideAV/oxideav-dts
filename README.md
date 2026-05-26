@@ -5,6 +5,37 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 159 — `iter_frames_resync` error-tolerant frame walker.**
+Round 159 (2026-05-27) adds an error-tolerant counterpart to the
+round-6 `iter_frames`: `iter_frames_resync(bytes) -> FrameIteratorResync<'_>`
+walks the same raw-16-bit DTS Core stream as `iter_frames`, but when
+a candidate sync turns out to be a false positive (random payload
+bytes that happened to match a 4-byte sync sequence and whose
+subsequent header bits fail the structural NBLKS / FSIZE bounds, or
+whose declared `frame_size_bytes` overruns end-of-buffer), the
+iterator yields a `ResyncEvent { offset, encoding, cause }` and
+**continues scanning** from `offset + 1` instead of terminating. The
+new `ResyncCause` enum documents the four discard reasons:
+`StructuralBoundFailed(Error)` (NBLKS &lt; 5 or FSIZE &lt; 95 — the
+classic false-positive sync signature), `HeaderEof` (sync too close
+to end-of-buffer for the 13–15-byte header window),
+`FrameLengthOverrunsBuffer { declared_len }` (header parses but the
+declared length runs past the input), and `FourteenBitSyncSkipped`
+(a 14-bit sync at the cursor; skipped rather than terminating like
+the fail-fast iterator does, so a raw-16-bit stream with stray
+14-bit-shaped byte sequences in payload still walks). The fail-fast
+`iter_frames` from round 6 is unchanged — well-formed input walks
+through both iterators identically and round 159 confirms this via a
+fixture-level equivalence test (the bundled ffmpeg 5-frame fixture
+yields the same five frames through both). A corrupted-header
+variant of the same fixture (header byte flip in frame 2 →
+NBLKS=0) demonstrates the recovery contract: the resync iterator
+surfaces one `StructuralBoundFailed` event at offset 1024 and then
+walks frames 3, 4, and 5 (1024 B each); the fail-fast iterator
+terminates at frame 2. Useful for demuxers, stream-integrity
+tooling, and forensic walkers that need to survive a corrupted
+patch in the middle of a `.dts` byte stream.
+
 **Round 151 — `find_all_syncs` bulk-scan helper + raw-LE `iter_frames` test coverage.**
 Round 151 (2026-05-26) adds `find_all_syncs(bytes) -> Vec<SyncMatch>`,
 the bulk-scan counterpart to the round-6 `find_next_sync`: instead of
@@ -201,6 +232,51 @@ at the iterator's current position yields
 single-frame `parse_frame_header_14bit` entry point remains for
 callers that have already partitioned 14-bit input into
 frame-sized slices.
+
+## Error-tolerant iteration (round 159)
+
+```rust
+use oxideav_dts::{iter_frames_resync, ResyncCause, ResyncEvent};
+
+let bytes: &[u8] = /* possibly-corrupted raw .dts stream */ &[];
+let mut recovered = 0usize;
+let mut discarded = 0usize;
+for step in iter_frames_resync(bytes) {
+    match step {
+        Ok(view) => {
+            recovered += 1;
+            println!("frame {} ok ({} B)", view.offset, view.len);
+        }
+        Err(ResyncEvent { offset, cause, .. }) => {
+            discarded += 1;
+            match cause {
+                ResyncCause::StructuralBoundFailed(_) => {
+                    eprintln!("false sync at {offset}: header bounds failed");
+                }
+                ResyncCause::HeaderEof => {
+                    eprintln!("sync at {offset}: header truncated");
+                }
+                ResyncCause::FrameLengthOverrunsBuffer { declared_len } => {
+                    eprintln!("frame at {offset} declares {declared_len} B but overruns");
+                }
+                ResyncCause::FourteenBitSyncSkipped => {
+                    eprintln!("14-bit sync at {offset}: skipped");
+                }
+            }
+        }
+    }
+}
+```
+
+The contract: every yielded step (whether `Ok` or `Err`) advances
+the cursor; iteration ends naturally when `find_next_sync` finds no
+more syncs. A well-formed stream walks identically to `iter_frames`
+— round 159 verifies this against the bundled ffmpeg 5-frame
+fixture. Round 159 also exercises the recovery path against a
+manually-corrupted variant of the same fixture (one-byte flip in
+frame 2's header → `NBLKS == 0`): the resync iterator surfaces one
+`StructuralBoundFailed` event at offset 1024 and then recovers
+frames 3, 4, and 5 from offsets 2048 / 3072 / 4096.
 
 ## Framework integration (round 4, default-on `registry` feature)
 

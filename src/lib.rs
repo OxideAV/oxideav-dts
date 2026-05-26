@@ -89,6 +89,19 @@
 //! (per the wiki), but the previous test grid only exercised raw-BE
 //! via the bundled ffmpeg fixture.
 //!
+//! Round 159 (2026-05-27) adds an error-tolerant counterpart to
+//! [`iter_frames`]: [`iter_frames_resync`] / [`FrameIteratorResync`]
+//! treat a candidate sync whose subsequent header bits fail the
+//! structural NBLKS / FSIZE bounds (or whose declared
+//! `frame_size_bytes` overruns end-of-buffer) as a false-positive
+//! sync rather than a hard fault — they surface a [`ResyncEvent`]
+//! documenting the discarded offset + cause and continue scanning
+//! one byte further instead of terminating. This lets demuxers and
+//! stream-integrity tooling walk a partially-corrupted `.dts`
+//! stream past malformed-sync patches and recover frames after the
+//! damage. The fail-fast [`iter_frames`] remains exactly as
+//! documented (returns the first parse error and terminates).
+//!
 //! Round 148 (2026-05-26) completes the encoder surface across all
 //! four documented sync encodings. The two new primitives,
 //! [`encode_frame_header_14bit_be`] and [`encode_frame_header_14bit_le`],
@@ -204,6 +217,9 @@
 //!   walker + resync helpers. `find_next_sync` / `iter_frames` /
 //!   `FrameIterator` / `FrameView` / `SyncMatch` added in round 6;
 //!   `find_all_syncs` added in round 151.
+//! - [`iter_frames_resync`] / [`FrameIteratorResync`] /
+//!   [`ResyncEvent`] / [`ResyncCause`] — error-tolerant walker that
+//!   skips past false-positive sync candidates (added in round 159).
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -240,7 +256,8 @@ pub use crate::header::{
     FrameType, LfeMode, SyncWordEncoding,
 };
 pub use crate::iter::{
-    find_all_syncs, find_next_sync, iter_frames, FrameIterator, FrameView, SyncMatch,
+    find_all_syncs, find_next_sync, iter_frames, iter_frames_resync, FrameIterator,
+    FrameIteratorResync, FrameView, ResyncCause, ResyncEvent, SyncMatch,
 };
 pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder};
 
