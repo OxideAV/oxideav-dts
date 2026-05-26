@@ -31,6 +31,13 @@ impl From<DtsError> for CoreError {
             DtsError::BlockCountOutOfRange { .. } | DtsError::FrameSizeOutOfRange { .. } => {
                 CoreError::InvalidData(e.to_string())
             }
+            // The encoder-only [`DtsError::FieldOutOfRange`] variant is
+            // not produced by any parser path, so the runtime decoder
+            // surface cannot emit it via `send_packet`. We still map it
+            // for completeness should a future caller invoke
+            // [`crate::encode_frame_header_be`] from inside the
+            // decoder path.
+            DtsError::FieldOutOfRange { .. } => CoreError::InvalidData(e.to_string()),
         }
     }
 }

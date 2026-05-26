@@ -8,6 +8,34 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 141 (2026-05-26) — `encode_frame_header_be(&DtsFrameHeader)
+  -> Result<Vec<u8>>` serialises a parsed [`DtsFrameHeader`] back
+  into the raw-BE on-wire bytes of the frame-sync header window
+  (104 or 120 bits, i.e. 13 or 15 bytes depending on
+  `crc_present`). The encoder is the inverse of
+  `parse_frame_header` against the wiki bit-table — every field
+  round-trips bit-exact, and the canonical raw-BE sync
+  `7F FE 80 01` is always emitted even if the source header was
+  parsed from the raw-LE / 14-bit-BE / 14-bit-LE encoding (the
+  caller is expected to repack post-process if a non-raw-BE
+  on-wire form is needed). The encoder validates the same
+  structural bounds as the parser (`BlockCountOutOfRange`,
+  `FrameSizeOutOfRange`) plus per-field bit-width bounds via a
+  new `Error::FieldOutOfRange { field, value, max }` variant
+  covering AMODE > 63, SFREQ > 15, RATE > 31, EXT_DESCR > 7,
+  VERSION > 15, COPY_HISTORY > 3, PCMR > 7, DIALNORM > 15,
+  `sample_count_per_block` > 32, and a `header_crc.is_some()`
+  vs `crc_present` mismatch (rejected so a silent drop or
+  garbage-emit bug cannot defeat the round-trip property).
+- Twelve new unit tests covering: non-trivial round-trip with CRC,
+  minimal 13-byte termination-frame round-trip without CRC, every
+  field-bounds rejection variant, raw-LE input normalised to
+  raw-BE output (every field preserved except
+  `sync_word_encoding`), an exhaustive grid over the four LFE
+  codes × two CRC states × three {NBLKS, FSIZE} pairs (24 cases),
+  and a byte-for-byte equality check against the real ffmpeg
+  fixture's 13-byte header window
+  (`encode_frame_header_be(parse(b))[..] == b[..13]`).
 - Round 138 (2026-05-26) — header → SUBFRAMES boundary accessors.
   `DtsFrameHeader::header_bit_length()` returns the total bit-count
   the frame-sync header window occupies (sync + base + trailing +

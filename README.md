@@ -51,6 +51,21 @@ through three new accessors derived entirely from the wiki bit-table:
 `FrameView::payload()` which slices off the SUBFRAMES region
 (`data[header_byte_length()..]`) for downstream re-muxers and the
 future subframe decoder.
+Round 141 (2026-05-26) closes the parse↔encode round-trip on the
+frame-sync header window: new
+`encode_frame_header_be(&DtsFrameHeader) -> Result<Vec<u8>>` writes
+a parsed `DtsFrameHeader` back into the on-wire bytes the wiki
+bit-table prescribes. The output is exactly `header_byte_length()`
+bytes long (13 or 15) and always begins with the canonical raw-BE
+sync `7F FE 80 01` regardless of `sync_word_encoding`; the encoder
+validates the parser's structural bounds plus per-field bit-width
+bounds (a new `Error::FieldOutOfRange { field, value, max }`
+variant) so a malformed `DtsFrameHeader` cannot smuggle bits into
+the next field. The round-trip property
+`parse(pad15(encode_frame_header_be(hdr)))` recovers `hdr` on
+every field except `sync_word_encoding` (the parser tags the
+output as `RawBigEndian` by construction); a real ffmpeg fixture's
+13-byte header window is reproduced byte-for-byte.
 
 The parser surfaces a typed `DtsFrameHeader`:
 

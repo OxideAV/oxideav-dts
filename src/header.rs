@@ -411,6 +411,240 @@ impl DtsFrameHeader {
     }
 }
 
+/// Serialise a [`DtsFrameHeader`] back into the raw-BE on-wire byte
+/// representation of the frame-sync header window.
+///
+/// The output is exactly [`DtsFrameHeader::header_byte_length`] bytes
+/// long (13 or 15, depending on [`DtsFrameHeader::crc_present`]), and
+/// always begins with the 4-byte raw-BE sync `7F FE 80 01` regardless
+/// of the [`DtsFrameHeader::sync_word_encoding`] field — the encoder
+/// emits the canonical raw-BE form the parser already understands, so
+/// a caller that needs the raw-LE / 14-bit-BE / 14-bit-LE encoding can
+/// post-process the output (byte-swap pairs for raw-LE, repack
+/// 16→14-bit for the 14-bit variants).
+///
+/// The bit layout is the wiki bit-table from
+/// `docs/audio/dts/wiki/DTS.wiki`, MSB-first, in the same order
+/// [`parse_frame_header`] consumes:
+///
+/// 1. 32-bit sync `0x7FFE_8001`.
+/// 2. Base block (43 bits): FTYPE(1), SHORT(5), CRC_PRESENT(1),
+///    NBLKS(7), FSIZE-1(14), AMODE(6), SFREQ(4), RATE(5).
+/// 3. Trailing flags (13 bits): DOWNMIX(1), DYNRANGE(1), TIMSTP(1),
+///    AUXDATA(1), HDCD(1), EXT_DESCR(3), EXT_CODING(1), ASPF(1),
+///    LFE(2), PRED_HISTORY(1).
+/// 4. Optional HEADER_CRC (16 bits) iff `header.crc_present` is set.
+/// 5. Post-CRC window (16 bits): MULTIRATE_INTER(1), VERSION(4),
+///    COPY_HISTORY(2), PCMR(3), FRONT_SUM(1), SURROUND_SUM(1),
+///    DIALNORM(4).
+///
+/// The encoder validates the same field bounds [`parse_frame_header`]
+/// enforces and is otherwise the inverse of [`parse_frame_header`].
+/// The round-trip property:
+///
+/// ```text
+///   parse_frame_header(&pad15(encode_frame_header_be(&hdr))) == Ok(hdr')
+///   where hdr'.sync_word_encoding == SyncWordEncoding::RawBigEndian
+///         hdr' == hdr on every other field
+///   and   pad15(v) = v padded with zero bytes to length 15
+/// ```
+///
+/// holds because the parser conservatively requires 15 bytes of input
+/// (the worst-case `crc_present == 1` window) regardless of the
+/// `crc_present` bit, while the encoder emits the actual
+/// [`DtsFrameHeader::header_byte_length`] bytes (13 or 15). Callers
+/// muxing the encoder output back into a stream should append the
+/// SUBFRAMES region they already had (the parser tolerates any
+/// trailing bytes); callers re-parsing a bare header should pad with
+/// up to two zero bytes.
+///
+/// Returns:
+/// - [`Error::BlockCountOutOfRange`] if `header.blocks_per_frame < 5`
+///   or > 127 (NBLKS is a 7-bit field).
+/// - [`Error::FrameSizeOutOfRange`] if `header.frame_size_bytes < 95`
+///   or > 16384 (FSIZE-1 is a 14-bit field).
+/// - [`Error::FieldOutOfRange`] if any other field is too large for
+///   its documented bit width (AMODE > 63, SFREQ > 15, RATE > 31,
+///   EXT_DESCR > 7, VERSION > 15, COPY_HISTORY > 3, PCMR > 7,
+///   DIALNORM > 15, sample_count_per_block == 0 or > 32).
+///
+/// The encoder is the bounded primitive added in round 141; it
+/// closes the parse/encode round-trip the wiki bit-table enables
+/// without needing any of the docs-blocked value tables. Payload /
+/// SUBFRAMES content remains the caller's responsibility — this
+/// helper only owns the frame-sync header window.
+pub fn encode_frame_header_be(header: &DtsFrameHeader) -> Result<Vec<u8>> {
+    // Field-width validation. The parser enforces NBLKS and FSIZE
+    // bounds; this encoder additionally enforces every field fits its
+    // declared bit width so a caller cannot smuggle bits past the
+    // boundary into the next field.
+    if header.blocks_per_frame < 5 || header.blocks_per_frame > 127 {
+        return Err(Error::BlockCountOutOfRange {
+            blocks: header.blocks_per_frame,
+        });
+    }
+    if !(95..=16384).contains(&header.frame_size_bytes) {
+        return Err(Error::FrameSizeOutOfRange {
+            frame_size: header.frame_size_bytes,
+        });
+    }
+    // sample_count_per_block is stored as +1 of the SHORT field. The
+    // SHORT field is 5 bits so the valid range is 0..=31, and the
+    // stored value must be 1..=32.
+    if header.sample_count_per_block == 0 || header.sample_count_per_block > 32 {
+        return Err(Error::FieldOutOfRange {
+            field: "sample_count_per_block",
+            value: header.sample_count_per_block as u32,
+            max: 32,
+        });
+    }
+    if header.amode > 63 {
+        return Err(Error::FieldOutOfRange {
+            field: "amode",
+            value: header.amode as u32,
+            max: 63,
+        });
+    }
+    if header.sfreq_index > 15 {
+        return Err(Error::FieldOutOfRange {
+            field: "sfreq_index",
+            value: header.sfreq_index as u32,
+            max: 15,
+        });
+    }
+    if header.rate_index > 31 {
+        return Err(Error::FieldOutOfRange {
+            field: "rate_index",
+            value: header.rate_index as u32,
+            max: 31,
+        });
+    }
+    if header.ext_descr > 7 {
+        return Err(Error::FieldOutOfRange {
+            field: "ext_descr",
+            value: header.ext_descr as u32,
+            max: 7,
+        });
+    }
+    if header.version > 15 {
+        return Err(Error::FieldOutOfRange {
+            field: "version",
+            value: header.version as u32,
+            max: 15,
+        });
+    }
+    if header.copy_history > 3 {
+        return Err(Error::FieldOutOfRange {
+            field: "copy_history",
+            value: header.copy_history as u32,
+            max: 3,
+        });
+    }
+    if header.source_pcm_resolution_index > 7 {
+        return Err(Error::FieldOutOfRange {
+            field: "source_pcm_resolution_index",
+            value: header.source_pcm_resolution_index as u32,
+            max: 7,
+        });
+    }
+    if header.dialog_normalization > 15 {
+        return Err(Error::FieldOutOfRange {
+            field: "dialog_normalization",
+            value: header.dialog_normalization as u32,
+            max: 15,
+        });
+    }
+    // header_crc presence must agree with crc_present (encoder is
+    // strict: silently dropping the value or silently emitting a
+    // garbage 16-bit field would defeat the round-trip property).
+    if header.crc_present != header.header_crc.is_some() {
+        return Err(Error::FieldOutOfRange {
+            field: "header_crc",
+            value: header.header_crc.unwrap_or(0) as u32,
+            max: 0,
+        });
+    }
+
+    // Walk the same bit-table the parser consumes. We accumulate into
+    // a small bit-vector and chunk to bytes MSB-first; the layout is
+    // identical to the test helper `build_be_header` used in this
+    // module's existing test grid (the helper now lives in
+    // `#[cfg(test)]`, so externalising the logic as a public
+    // primitive does not duplicate runtime code).
+    let mut bits: Vec<bool> = Vec::with_capacity(120);
+
+    fn push(bv: &mut Vec<bool>, value: u32, width: u32) {
+        for i in (0..width).rev() {
+            bv.push(((value >> i) & 1) == 1);
+        }
+    }
+
+    // Sync (32 bits) — canonical raw-BE 0x7FFE_8001.
+    push(&mut bits, 0x7FFE_8001, 32);
+    // Base 43 bits.
+    push(
+        &mut bits,
+        match header.frame_type {
+            FrameType::Termination => 0,
+            FrameType::Normal => 1,
+        },
+        1,
+    );
+    // SHORT = sample_count_per_block - 1.
+    push(&mut bits, (header.sample_count_per_block - 1) as u32, 5);
+    push(&mut bits, header.crc_present as u32, 1);
+    push(&mut bits, header.blocks_per_frame as u32, 7);
+    // FSIZE-1.
+    push(&mut bits, (header.frame_size_bytes - 1) as u32, 14);
+    push(&mut bits, header.amode as u32, 6);
+    push(&mut bits, header.sfreq_index as u32, 4);
+    push(&mut bits, header.rate_index as u32, 5);
+    // Trailing 13 bits.
+    push(&mut bits, header.downmix as u32, 1);
+    push(&mut bits, header.dynamic_range as u32, 1);
+    push(&mut bits, header.time_stamp as u32, 1);
+    push(&mut bits, header.aux_data as u32, 1);
+    push(&mut bits, header.hdcd as u32, 1);
+    push(&mut bits, header.ext_descr as u32, 3);
+    push(&mut bits, header.ext_coding as u32, 1);
+    push(&mut bits, header.aspf as u32, 1);
+    push(&mut bits, header.lfe.code() as u32, 2);
+    push(&mut bits, header.predictor_history as u32, 1);
+    // Optional HEADER_CRC.
+    if let Some(crc) = header.header_crc {
+        push(&mut bits, crc as u32, 16);
+    }
+    // Post-CRC 16 bits.
+    push(&mut bits, header.multirate_inter as u32, 1);
+    push(&mut bits, header.version as u32, 4);
+    push(&mut bits, header.copy_history as u32, 2);
+    push(&mut bits, header.source_pcm_resolution_index as u32, 3);
+    push(&mut bits, header.front_sum as u32, 1);
+    push(&mut bits, header.surround_sum as u32, 1);
+    push(&mut bits, header.dialog_normalization as u32, 4);
+
+    // The bit-table sums to 104 or 120 bits — both exact multiples of
+    // 8 by the same arithmetic `header_bit_length()` documents. Assert
+    // we wrote exactly `header_byte_length()` * 8 bits.
+    debug_assert_eq!(
+        bits.len() as u32,
+        header.header_bit_length(),
+        "encoder wrote a different bit-count than header_bit_length() reports"
+    );
+
+    let mut bytes = Vec::with_capacity(bits.len() / 8);
+    for chunk in bits.chunks(8) {
+        let mut b: u8 = 0;
+        for (i, bit) in chunk.iter().enumerate() {
+            if *bit {
+                b |= 1 << (7 - i);
+            }
+        }
+        bytes.push(b);
+    }
+    Ok(bytes)
+}
+
 /// Parse a single DTS Core frame-sync header from the start of
 /// `bytes`.
 ///
@@ -1672,5 +1906,318 @@ mod tests {
             hdr_raw.header_byte_length(),
             hdr_packed.header_byte_length()
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Round 141 — encode_frame_header_be(): parse ↔ encode round-trip.
+    //
+    // The encoder is the inverse of `parse_frame_header` against the
+    // wiki bit-table. Every structural field round-trips bit-exact;
+    // the encoder's output is always exactly `header_byte_length()`
+    // bytes long and starts with the canonical raw-BE sync regardless
+    // of the source `sync_word_encoding`.
+    // ---------------------------------------------------------------
+
+    /// A synthesised non-trivial header with every structural field
+    /// set to a distinctive value round-trips through encode → parse
+    /// with bit-exact equality on every field except
+    /// `sync_word_encoding` (the encoder always emits raw-BE).
+    #[test]
+    fn encode_round_trip_non_trivial_with_crc() {
+        let bytes_in = build_be_header(
+            1,                  // FTYPE
+            31,                 // SHORT
+            1,                  // CRC present
+            16,                 // NBLKS
+            1023,               // FSIZE-1
+            9,                  // AMODE
+            13,                 // SFREQ
+            25,                 // RATE
+            0b1_0100_1010_0011, // 13 trailing bits
+            Some(0xC0DE),       // HEADER_CRC
+            0xD2EC,             // 16 post-CRC bits
+        );
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+
+        let encoded = encode_frame_header_be(&hdr).expect("encode must succeed");
+        // header_byte_length() reports 15 because crc_present is set.
+        assert_eq!(encoded.len(), hdr.header_byte_length());
+        assert_eq!(encoded.len(), 15);
+
+        // The encoded output begins with the canonical raw-BE sync.
+        assert_eq!(&encoded[..4], &[0x7F, 0xFE, 0x80, 0x01]);
+
+        // The header bytes byte-for-byte match the synthesised input
+        // (build_be_header pads to 16 bytes; encode_frame_header_be
+        // emits exactly 15 because crc_present is set).
+        assert_eq!(&encoded[..], &bytes_in[..encoded.len()]);
+
+        // Re-parse the encoded bytes and confirm every field is
+        // identical except `sync_word_encoding`.
+        let mut hdr_round = parse_frame_header(&encoded).unwrap();
+        assert_eq!(hdr_round.sync_word_encoding, SyncWordEncoding::RawBigEndian);
+        hdr_round.sync_word_encoding = hdr.sync_word_encoding;
+        assert_eq!(hdr_round, hdr);
+    }
+
+    /// Termination frame with no CRC: encoder emits exactly 13 bytes.
+    /// The 13-byte header window is shorter than the 15-byte minimum
+    /// the parser requires (the parser always reads up to the
+    /// worst-case CRC-present 120-bit window before discriminating);
+    /// for the round-trip we pad the encoder output with two
+    /// scratch-SUBFRAMES bytes (the actual SUBFRAMES region begins
+    /// immediately after the 13-byte header anyway).
+    #[test]
+    fn encode_round_trip_termination_no_crc_minimal() {
+        let bytes_in = build_be_header(0, 0, 0, 5, 94, 0, 0, 0, 0, None, 0);
+        let hdr = parse_frame_header(&bytes_in).unwrap();
+
+        let encoded = encode_frame_header_be(&hdr).unwrap();
+        assert_eq!(encoded.len(), 13);
+        assert_eq!(encoded.len(), hdr.header_byte_length());
+
+        // Bytes 0..13 must match the synthesised input (build_be_header
+        // pads to 16 but the meaningful header window is 13 bytes).
+        assert_eq!(&encoded[..], &bytes_in[..13]);
+
+        let mut padded = encoded.clone();
+        padded.extend_from_slice(&[0u8; 2]);
+        let hdr_round = parse_frame_header(&padded).unwrap();
+        assert_eq!(hdr_round.frame_type, FrameType::Termination);
+        assert_eq!(hdr_round.sample_count_per_block, 1);
+        assert!(!hdr_round.crc_present);
+        assert_eq!(hdr_round.blocks_per_frame, 5);
+        assert_eq!(hdr_round.frame_size_bytes, 95);
+        // Sync_word_encoding is the only differing field by design.
+        let mut hdr_norm = hdr_round;
+        hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+        assert_eq!(hdr_norm, hdr);
+    }
+
+    /// Field-bound enforcement: NBLKS < 5 is rejected by the encoder
+    /// (mirrors the parser bound).
+    #[test]
+    fn encode_rejects_nblks_below_5() {
+        let hdr = synth_hdr(|h| h.blocks_per_frame = 4);
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        assert_eq!(err, Error::BlockCountOutOfRange { blocks: 4 });
+    }
+
+    /// Field-bound enforcement: NBLKS > 127 cannot fit the 7-bit
+    /// field.
+    #[test]
+    fn encode_rejects_nblks_above_127() {
+        let hdr = synth_hdr(|h| h.blocks_per_frame = 128);
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        assert_eq!(err, Error::BlockCountOutOfRange { blocks: 128 });
+    }
+
+    /// Field-bound enforcement: FSIZE < 95 is rejected (parser bound).
+    #[test]
+    fn encode_rejects_frame_size_below_95() {
+        let hdr = synth_hdr(|h| h.frame_size_bytes = 94);
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        assert_eq!(err, Error::FrameSizeOutOfRange { frame_size: 94 });
+    }
+
+    /// Field-bound enforcement: FSIZE > 16384 cannot fit the 14-bit
+    /// FSIZE-1 field (max 16383+1 = 16384).
+    #[test]
+    fn encode_rejects_frame_size_above_16384() {
+        let hdr = synth_hdr(|h| h.frame_size_bytes = 16385);
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        assert_eq!(err, Error::FrameSizeOutOfRange { frame_size: 16385 });
+    }
+
+    /// Field-bound enforcement: AMODE > 63 cannot fit the 6-bit field.
+    #[test]
+    fn encode_rejects_amode_above_63() {
+        let hdr = synth_hdr(|h| h.amode = 64);
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        assert_eq!(
+            err,
+            Error::FieldOutOfRange {
+                field: "amode",
+                value: 64,
+                max: 63
+            }
+        );
+    }
+
+    /// Field-bound enforcement: PCMR > 7 cannot fit the 3-bit field.
+    #[test]
+    fn encode_rejects_pcmr_above_7() {
+        let hdr = synth_hdr(|h| h.source_pcm_resolution_index = 8);
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        assert_eq!(
+            err,
+            Error::FieldOutOfRange {
+                field: "source_pcm_resolution_index",
+                value: 8,
+                max: 7,
+            }
+        );
+    }
+
+    /// Field-bound enforcement: VERSION > 15 cannot fit the 4-bit
+    /// field.
+    #[test]
+    fn encode_rejects_version_above_15() {
+        let hdr = synth_hdr(|h| h.version = 16);
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        assert_eq!(
+            err,
+            Error::FieldOutOfRange {
+                field: "version",
+                value: 16,
+                max: 15,
+            }
+        );
+    }
+
+    /// Field-bound enforcement: `header_crc.is_some()` must match
+    /// `crc_present`. A `Some(_)` payload with `crc_present == false`
+    /// is rejected so a silent emit-or-drop bug cannot break the
+    /// round-trip.
+    #[test]
+    fn encode_rejects_crc_payload_without_crc_present() {
+        let hdr = synth_hdr(|h| {
+            h.crc_present = false;
+            h.header_crc = Some(0x1234);
+        });
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        match err {
+            Error::FieldOutOfRange { field, .. } => assert_eq!(field, "header_crc"),
+            other => panic!("expected FieldOutOfRange{{field: header_crc}}, got {other:?}"),
+        }
+    }
+
+    /// Mirror: `crc_present == true` with `header_crc == None` is
+    /// also rejected (no silent zeroing of the field).
+    #[test]
+    fn encode_rejects_crc_present_without_payload() {
+        let hdr = synth_hdr(|h| {
+            h.crc_present = true;
+            h.header_crc = None;
+        });
+        let err = encode_frame_header_be(&hdr).unwrap_err();
+        match err {
+            Error::FieldOutOfRange { field, .. } => assert_eq!(field, "header_crc"),
+            other => panic!("expected FieldOutOfRange{{field: header_crc}}, got {other:?}"),
+        }
+    }
+
+    /// Encoding a header parsed from the raw-LE input still emits the
+    /// canonical raw-BE on-wire bytes — only `sync_word_encoding`
+    /// differs in the re-parsed result.
+    #[test]
+    fn encode_normalises_le_input_to_raw_be_output() {
+        let raw_be = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        // Byte-swap each pair to obtain the raw-LE form.
+        let raw_le: Vec<u8> = raw_be.chunks_exact(2).flat_map(|c| [c[1], c[0]]).collect();
+        let hdr_le = parse_frame_header(&raw_le).unwrap();
+        assert_eq!(hdr_le.sync_word_encoding, SyncWordEncoding::RawLittleEndian);
+
+        let encoded = encode_frame_header_be(&hdr_le).unwrap();
+        // First 4 bytes are the canonical raw-BE sync, NOT the
+        // byte-swapped LE form.
+        assert_eq!(&encoded[..4], &[0x7F, 0xFE, 0x80, 0x01]);
+
+        // Pad to the parser's 15-byte minimum (encoded.len() is 13
+        // because crc_present is false here).
+        let mut padded = encoded.clone();
+        padded.extend_from_slice(&[0u8; 2]);
+        let hdr_round = parse_frame_header(&padded).unwrap();
+        assert_eq!(hdr_round.sync_word_encoding, SyncWordEncoding::RawBigEndian);
+        // Every other field is preserved.
+        let mut hdr_norm = hdr_round;
+        hdr_norm.sync_word_encoding = hdr_le.sync_word_encoding;
+        assert_eq!(hdr_norm, hdr_le);
+    }
+
+    /// Exhaustive grid: for every documented LFE code, both CRC
+    /// states, and a representative {NBLKS, FSIZE} pair, the encoded
+    /// output round-trips back through the parser.
+    #[test]
+    fn encode_round_trip_grid_lfe_crc_states() {
+        for crc_state in [false, true] {
+            for lfe_code in 0u8..=3 {
+                for &(nblks, fsize) in &[(5u8, 95u16), (16u8, 1024u16), (127u8, 16384u16)] {
+                    let crc_arg = if crc_state { Some(0xBEEF) } else { None };
+                    let bytes = build_be_header(
+                        1,
+                        31,
+                        crc_state as u32,
+                        nblks as u32,
+                        (fsize - 1) as u32,
+                        9,
+                        13,
+                        25,
+                        // Stuff in the LFE code at the right offset
+                        // within the 13-bit trailing slot: positions
+                        // MSB-first are 1+1+1+1+1+3+1+1+(2)+1 = LFE at
+                        // bit-offset 9..11 (0-indexed from MSB), so
+                        // the 2-bit field sits at bit (12 - 9 .. 12 -
+                        // 9 + 2) within the 13-bit value, i.e. shift
+                        // left by 1. Easier: encode through the
+                        // accessor route rather than hand-bitfiddling.
+                        ((lfe_code as u32) & 0b11) << 1,
+                        crc_arg,
+                        0,
+                    );
+                    let hdr = parse_frame_header(&bytes).unwrap();
+                    assert_eq!(hdr.lfe.code(), lfe_code);
+                    assert_eq!(hdr.crc_present, crc_state);
+
+                    let encoded = encode_frame_header_be(&hdr).unwrap();
+                    assert_eq!(encoded.len(), hdr.header_byte_length());
+
+                    // Pad the encoded output to the parser's 15-byte
+                    // minimum: for crc_present=false the encoder
+                    // emits 13 bytes, while the parser conservatively
+                    // requires the 120-bit worst-case window.
+                    let mut padded = encoded.clone();
+                    while padded.len() < 15 {
+                        padded.push(0);
+                    }
+                    let hdr_round = parse_frame_header(&padded).unwrap();
+                    let mut hdr_norm = hdr_round;
+                    hdr_norm.sync_word_encoding = hdr.sync_word_encoding;
+                    assert_eq!(hdr_norm, hdr);
+                }
+            }
+        }
+    }
+
+    /// `encode_frame_header_be(parse(b))` reproduces the prefix of the
+    /// real ffmpeg fixture byte-for-byte (the public FFMPEG fixture
+    /// lives in `tests/black_box_ffmpeg.rs`; we re-inline the first
+    /// 16 bytes here for a unit-test-level assertion).
+    #[test]
+    fn encode_reproduces_ffmpeg_fixture_header_prefix() {
+        // Same bytes as in tests/black_box_ffmpeg.rs.
+        let ffmpeg_bytes: [u8; 16] = [
+            0x7f, 0xfe, 0x80, 0x01, 0xfc, 0x3c, 0x3f, 0xf0, 0xb5, 0xe0, 0x01, 0x38, 0x00, 0x03,
+            0xef, 0x7f,
+        ];
+        let hdr = parse_frame_header(&ffmpeg_bytes).unwrap();
+        // ffmpeg's frame has crc_present == false, so the header
+        // window is 13 bytes long.
+        assert!(!hdr.crc_present);
+        assert_eq!(hdr.header_byte_length(), 13);
+
+        let encoded = encode_frame_header_be(&hdr).unwrap();
+        assert_eq!(encoded.len(), 13);
+        assert_eq!(&encoded[..], &ffmpeg_bytes[..13]);
+    }
+
+    /// Helper for the bounds tests: build a baseline well-formed
+    /// header from `build_be_header` defaults and then let the caller
+    /// mutate a single field before encoding.
+    fn synth_hdr(mutate: impl FnOnce(&mut DtsFrameHeader)) -> DtsFrameHeader {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
+        let mut h = parse_frame_header(&bytes).unwrap();
+        mutate(&mut h);
+        h
     }
 }

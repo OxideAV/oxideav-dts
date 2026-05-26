@@ -65,6 +65,16 @@
 //! [`Error::UnsupportedFourteenBit`] and terminates if a 14-bit
 //! sync is encountered.
 //!
+//! Round 141 (2026-05-26) closes the parse↔encode round-trip on the
+//! frame-sync header window: [`encode_frame_header_be`] serialises a
+//! parsed [`DtsFrameHeader`] back into the raw-BE on-wire bytes
+//! prescribed by the wiki bit-table (exactly
+//! [`DtsFrameHeader::header_byte_length`] bytes long — 13 or 15 — and
+//! always beginning with the canonical raw-BE sync). The encoder is
+//! the inverse of [`parse_frame_header`] and validates the same
+//! structural bounds plus per-field bit-width bounds via the new
+//! [`Error::FieldOutOfRange`] variant.
+//!
 //! Round 138 (2026-05-26) surfaces the header→SUBFRAMES boundary
 //! through two new accessors and one [`FrameView`] helper:
 //! [`DtsFrameHeader::header_bit_length`] returns the bit-count the
@@ -121,6 +131,9 @@
 //!   for the two raw 16-bit syncs.
 //! - [`parse_frame_header_14bit`] — single-frame parser for the two
 //!   14-bit packed syncs (added in round 2).
+//! - [`encode_frame_header_be`] — inverse of [`parse_frame_header`]
+//!   that emits the wiki bit-table back into raw-BE bytes (added in
+//!   round 141).
 //! - [`unpack_14bit_to_16bit`] / [`FourteenBitByteOrder`] — the
 //!   underlying 14→16-bit unpacker (added in round 2).
 //! - [`Error`] — crate-local error type.
@@ -154,8 +167,8 @@ mod unpack14;
 mod registry;
 
 pub use crate::header::{
-    parse_frame_header, parse_frame_header_14bit, DtsFrameHeader, FrameType, LfeMode,
-    SyncWordEncoding,
+    encode_frame_header_be, parse_frame_header, parse_frame_header_14bit, DtsFrameHeader,
+    FrameType, LfeMode, SyncWordEncoding,
 };
 pub use crate::iter::{find_next_sync, iter_frames, FrameIterator, FrameView, SyncMatch};
 pub use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
@@ -202,6 +215,25 @@ pub enum Error {
         /// Decoded frame size in bytes (after the +1 increment).
         frame_size: u16,
     },
+    /// A field passed to [`crate::encode_frame_header_be`] does not
+    /// fit the bit-width the wiki bit-table documents (e.g. AMODE > 63
+    /// for a 6-bit field, VERSION > 15 for a 4-bit field, or a
+    /// `header_crc: Some(_)` paired with `crc_present == false`).
+    /// Only the encoder returns this variant; the parser cannot
+    /// produce out-of-range values because every field is read from
+    /// the bit-vector through a width-bounded read.
+    FieldOutOfRange {
+        /// Static name of the offending [`crate::DtsFrameHeader`]
+        /// field.
+        field: &'static str,
+        /// Caller-supplied value.
+        value: u32,
+        /// Maximum value the field's documented bit-width can hold.
+        /// For the `header_crc` mismatch variant this is set to `0`
+        /// (the value being out-of-range is the `Some` vs `None`
+        /// disagreement with `crc_present`, not the integer payload).
+        max: u32,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -226,6 +258,11 @@ impl core::fmt::Display for Error {
                 f,
                 "oxideav-dts: frame size {frame_size} B is out of the documented \
                  95..=16384 range (spec mandates >=95)"
+            ),
+            Error::FieldOutOfRange { field, value, max } => write!(
+                f,
+                "oxideav-dts: field `{field}` value {value} exceeds the wiki \
+                 bit-table maximum {max}"
             ),
         }
     }
