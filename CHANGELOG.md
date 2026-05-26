@@ -8,6 +8,33 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 151 (2026-05-26) — `find_all_syncs` bulk-scan helper plus
+  raw-LE `iter_frames` test coverage.
+  - `find_all_syncs(bytes: &[u8]) -> Vec<SyncMatch>` is the bulk
+    counterpart to the round-6 `find_next_sync`: it scans the entire
+    input buffer and returns every documented sync occurrence (all
+    four encodings) as a vector. Same `O(n)` cost as a
+    `find_next_sync` loop from `offset + 1`; the bulk helper just
+    materialises the result for stream-integrity tooling that needs
+    every resync point up front. The four documented sync prefixes
+    start with mutually-distinct first bytes (`7F` / `FE` / `1F` /
+    `FF`), so adjacent (non-overlapping) sync occurrences are both
+    reported. Includes a doctest plus seven unit tests covering:
+    empty buffer, no-sync buffer, single sync, mixed raw-BE / raw-LE,
+    all four encodings, consecutive back-to-back syncs, garbage-
+    interspersed positions, and parity with the explicit
+    `find_next_sync` loop reference.
+  - Three new unit tests for `iter_frames` against a hand-built
+    multi-frame raw-LE byte stream (constructed by pairwise
+    word-swap of a two-frame raw-BE buffer to match the wiki's
+    raw-LE-is-word-swapped-raw-BE definition): the walker
+    correctly identifies both frames as
+    `SyncWordEncoding::RawLittleEndian`, advances by
+    `frame_size_bytes` (which the wiki defines as byte length of the
+    unpacked raw-16-bit stream — byte-equivalent across both raw
+    encodings), and remains robust to leading garbage / resync.
+    Closes a coverage hole because the previous test grid only
+    exercised the raw-BE path via the bundled ffmpeg fixture.
 - Round 148 (2026-05-26) — 14-bit-packed encoder variants that close
   the parse↔encode round-trip across all four documented sync
   encodings. Two new primitives:

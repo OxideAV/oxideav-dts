@@ -5,6 +5,22 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 151 — `find_all_syncs` bulk-scan helper + raw-LE `iter_frames` test coverage.**
+Round 151 (2026-05-26) adds `find_all_syncs(bytes) -> Vec<SyncMatch>`,
+the bulk-scan counterpart to the round-6 `find_next_sync`: instead of
+returning the first sync at or after a cursor, it walks the entire
+input buffer and returns every documented sync occurrence (all four
+encodings) as a vector. Same `O(n)` cost as a `find_next_sync` loop
+from `offset + 1`; the bulk helper just materialises the result for
+stream-integrity tooling that needs every resync point up front
+rather than walking one at a time. The round also closes a missing
+coverage gap by exercising `iter_frames` against a hand-built
+multi-frame raw-LE stream — the iterator was already raw-LE-capable
+because `frame_size_bytes` is byte-equivalent across both raw
+encodings (the wiki defines raw-LE as the 16-bit-word-swap of
+raw-BE), but the previous test grid only exercised raw-BE via the
+bundled ffmpeg fixture.
+
 **Round 148 — 14-bit-packed encoder variants (all four sync encodings covered).**
 Round 1 landed
 the structural frame-header parser; round 2 added the two 14-bit-packed

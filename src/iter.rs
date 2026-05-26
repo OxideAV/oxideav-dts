@@ -244,9 +244,72 @@ pub fn iter_frames(bytes: &[u8]) -> FrameIterator<'_> {
     FrameIterator::new(bytes)
 }
 
+/// Scan an entire byte buffer and return every documented DTS sync
+/// occurrence it contains.
+///
+/// This is the bulk-scan counterpart to [`find_next_sync`]: instead of
+/// returning the first hit at or after a cursor, it walks the buffer
+/// from start to end and collects every position where one of the four
+/// documented sync sequences appears. Useful for tooling that needs to
+/// validate stream integrity, count frames without parsing them, or
+/// build an index of resync points up front.
+///
+/// The scan honours the same matching rules as [`find_next_sync`]:
+///
+/// - `7F FE 80 01` — raw big-endian (4 bytes).
+/// - `FE 7F 01 80` — raw little-endian (4 bytes).
+/// - `1F FF E8 00 07 Fx` — 14-bit packed big-endian (6 bytes, matched
+///   on the lower 14 bits of each container per [`detect_sync`]).
+/// - `FF 1F 00 E8 Fx 07` — 14-bit packed little-endian (6 bytes,
+///   matched on the lower 14 bits of each container).
+///
+/// Each yielded [`SyncMatch`] reports the absolute byte offset of the
+/// first sync byte plus the matched encoding. Overlapping matches are
+/// not possible because the four sync sequences differ in their first
+/// two bytes (`7F`/`FE`/`1F`/`FF`), but the scan still advances
+/// one byte at a time so adjacent sync occurrences (one ending and the
+/// next starting on consecutive bytes) are both reported.
+///
+/// The scan is `O(n)` — each byte is visited at most twice by
+/// [`detect_sync`] (one 4-byte raw check, one 6-byte 14-bit check).
+/// Callers that only need the first sync should prefer
+/// [`find_next_sync`] to avoid materialising the result vector.
+///
+/// ## Example
+///
+/// ```
+/// use oxideav_dts::{find_all_syncs, SyncWordEncoding};
+///
+/// let mut buf = vec![0u8; 32];
+/// buf[0..4].copy_from_slice(&[0x7F, 0xFE, 0x80, 0x01]);
+/// buf[8..12].copy_from_slice(&[0xFE, 0x7F, 0x01, 0x80]);
+///
+/// let matches = find_all_syncs(&buf);
+/// assert_eq!(matches.len(), 2);
+/// assert_eq!(matches[0].offset, 0);
+/// assert_eq!(matches[0].encoding, SyncWordEncoding::RawBigEndian);
+/// assert_eq!(matches[1].offset, 8);
+/// assert_eq!(matches[1].encoding, SyncWordEncoding::RawLittleEndian);
+/// ```
+pub fn find_all_syncs(bytes: &[u8]) -> Vec<SyncMatch> {
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    while let Some(m) = find_next_sync(bytes, cursor) {
+        out.push(m);
+        // Advance by one byte so consecutive (non-overlapping) syncs
+        // are both reported. The four documented sync prefixes start
+        // with `7F`/`FE`/`1F`/`FF`, all distinct, so no two sync
+        // sequences can overlap; a one-byte step is therefore both
+        // sufficient and minimal.
+        cursor = m.offset + 1;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FrameType;
 
     const RAW_BE_SYNC: [u8; 4] = [0x7F, 0xFE, 0x80, 0x01];
     const RAW_LE_SYNC: [u8; 4] = [0xFE, 0x7F, 0x01, 0x80];
@@ -459,5 +522,250 @@ mod tests {
         let payload = view.payload();
         assert_eq!(payload.len(), 95 - 15);
         assert!(payload.iter().all(|&b| b == 0xEF));
+    }
+
+    // ---------------------------------------------------------------
+    // Round 151 — find_all_syncs() bulk-scan helper.
+    //
+    // Counterpart to find_next_sync() that returns every sync match in
+    // a buffer, useful for stream-integrity tooling that needs to know
+    // about every resync point up front rather than walking one at a
+    // time.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn find_all_syncs_empty_buffer_returns_empty_vec() {
+        let buf: [u8; 0] = [];
+        assert!(find_all_syncs(&buf).is_empty());
+    }
+
+    #[test]
+    fn find_all_syncs_no_sync_returns_empty_vec() {
+        let buf = vec![0xAAu8; 64];
+        assert!(find_all_syncs(&buf).is_empty());
+    }
+
+    #[test]
+    fn find_all_syncs_returns_single_match_for_single_sync() {
+        let mut buf = vec![0u8; 16];
+        buf[0..4].copy_from_slice(&RAW_BE_SYNC);
+        let matches = find_all_syncs(&buf);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].offset, 0);
+        assert_eq!(matches[0].encoding, SyncWordEncoding::RawBigEndian);
+    }
+
+    #[test]
+    fn find_all_syncs_mixed_raw_be_and_le_in_one_buffer() {
+        // Stream pattern: BE at 0, LE at 8, BE at 16, LE at 24.
+        let mut buf = vec![0xAAu8; 32];
+        buf[0..4].copy_from_slice(&RAW_BE_SYNC);
+        buf[8..12].copy_from_slice(&RAW_LE_SYNC);
+        buf[16..20].copy_from_slice(&RAW_BE_SYNC);
+        buf[24..28].copy_from_slice(&RAW_LE_SYNC);
+        let matches = find_all_syncs(&buf);
+        assert_eq!(matches.len(), 4);
+        assert_eq!(matches[0].offset, 0);
+        assert_eq!(matches[0].encoding, SyncWordEncoding::RawBigEndian);
+        assert_eq!(matches[1].offset, 8);
+        assert_eq!(matches[1].encoding, SyncWordEncoding::RawLittleEndian);
+        assert_eq!(matches[2].offset, 16);
+        assert_eq!(matches[2].encoding, SyncWordEncoding::RawBigEndian);
+        assert_eq!(matches[3].offset, 24);
+        assert_eq!(matches[3].encoding, SyncWordEncoding::RawLittleEndian);
+    }
+
+    #[test]
+    fn find_all_syncs_with_all_four_encodings() {
+        // Pack one of each documented sync encoding into a single
+        // buffer; find_all_syncs must report all four.
+        let mut buf = vec![0xAAu8; 48];
+        buf[0..4].copy_from_slice(&RAW_BE_SYNC);
+        buf[8..12].copy_from_slice(&RAW_LE_SYNC);
+        buf[16..22].copy_from_slice(&[0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xFA]);
+        buf[24..30].copy_from_slice(&[0xFF, 0x1F, 0x00, 0xE8, 0xF3, 0x07]);
+        let matches = find_all_syncs(&buf);
+        assert_eq!(matches.len(), 4);
+        assert_eq!(matches[0].encoding, SyncWordEncoding::RawBigEndian);
+        assert_eq!(matches[1].encoding, SyncWordEncoding::RawLittleEndian);
+        assert_eq!(matches[2].encoding, SyncWordEncoding::FourteenBitBigEndian);
+        assert_eq!(
+            matches[3].encoding,
+            SyncWordEncoding::FourteenBitLittleEndian
+        );
+    }
+
+    #[test]
+    fn find_all_syncs_consecutive_back_to_back_frames() {
+        // Two raw-BE syncs adjacent at offsets 0 and 4 — no gap.
+        let mut buf = vec![0u8; 16];
+        buf[0..4].copy_from_slice(&RAW_BE_SYNC);
+        buf[4..8].copy_from_slice(&RAW_BE_SYNC);
+        let matches = find_all_syncs(&buf);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].offset, 0);
+        assert_eq!(matches[1].offset, 4);
+    }
+
+    #[test]
+    fn find_all_syncs_walks_full_buffer_independent_of_starting_garbage() {
+        // 5 bytes of garbage, then BE sync at 5, more garbage, LE sync
+        // at 20, trailing tail of garbage.
+        let mut buf = vec![0xAAu8; 32];
+        buf[5..9].copy_from_slice(&RAW_BE_SYNC);
+        buf[20..24].copy_from_slice(&RAW_LE_SYNC);
+        let matches = find_all_syncs(&buf);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].offset, 5);
+        assert_eq!(matches[1].offset, 20);
+    }
+
+    /// Cross-check parity with `find_next_sync` looped from `offset+1`
+    /// — `find_all_syncs` must agree with the explicit loop on every
+    /// match.
+    #[test]
+    fn find_all_syncs_matches_find_next_sync_loop() {
+        let mut buf = vec![0xAAu8; 64];
+        buf[3..7].copy_from_slice(&RAW_BE_SYNC);
+        buf[15..19].copy_from_slice(&RAW_LE_SYNC);
+        buf[40..44].copy_from_slice(&RAW_BE_SYNC);
+
+        // find_next_sync loop reference.
+        let mut reference: Vec<SyncMatch> = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(m) = find_next_sync(&buf, cursor) {
+            reference.push(m);
+            cursor = m.offset + 1;
+        }
+
+        let bulk = find_all_syncs(&buf);
+        assert_eq!(bulk, reference);
+    }
+
+    // ---------------------------------------------------------------
+    // Round 151 — iter_frames coverage for raw-LE streams.
+    //
+    // The iterator's `frame_size_bytes`-based advance is documented as
+    // applying to "raw 16-bit encodings" (both RawBigEndian AND
+    // RawLittleEndian — the FSIZE field is the byte length of the
+    // raw 16-bit-per-word on-wire stream, which is byte-equivalent
+    // between BE and LE because the LE form is just a pairwise
+    // byte-swap of the BE form). The existing
+    // `multi_frame_iter.rs::iter_frames_walks_all_five_frames_in_fixture`
+    // test exercises the BE path against the ffmpeg fixture; the
+    // raw-LE path is exercised here by byte-swapping that fixture
+    // (synthesised inline so the iterator's LE walk is covered without
+    // adding a new fixture file).
+    // ---------------------------------------------------------------
+
+    /// Build a multi-frame raw-LE byte buffer by byte-swapping a
+    /// raw-BE frame buffer pairwise. The frame layout (count, sizes,
+    /// SUBFRAMES contents) is preserved because raw-LE is defined by
+    /// the wiki as the 16-bit-word-swapped form of raw-BE.
+    fn build_raw_le_two_frame_stream() -> Vec<u8> {
+        // Two back-to-back 96-byte termination frames (NBLKS=5,
+        // FSIZE=96). We hand-build the BE form via the same bit-
+        // table the parser consumes and then word-swap to LE.
+        let mut be = Vec::with_capacity(2 * 96);
+        for _frame in 0..2 {
+            let mut bv: Vec<bool> = Vec::new();
+            fn push(bv: &mut Vec<bool>, value: u32, width: u32) {
+                for i in (0..width).rev() {
+                    bv.push(((value >> i) & 1) == 1);
+                }
+            }
+            push(&mut bv, 0x7FFE_8001, 32);
+            push(&mut bv, 0, 1); // ftype = termination
+            push(&mut bv, 0, 5); // sample_count_m1
+            push(&mut bv, 0, 1); // crc_present
+            push(&mut bv, 5, 7); // nblks
+            push(&mut bv, 95, 14); // fsize-1 = 95 -> frame_size = 96
+            push(&mut bv, 0, 6); // amode
+            push(&mut bv, 0, 4); // sfreq
+            push(&mut bv, 0, 5); // rate
+            push(&mut bv, 0, 13); // trailing flags
+            push(&mut bv, 0, 16); // post-CRC window
+            while bv.len() % 8 != 0 {
+                bv.push(false);
+            }
+            // Convert MSB-first bit-vector to bytes.
+            let mut frame_bytes = vec![0u8; 96];
+            for (i, chunk) in bv.chunks(8).enumerate() {
+                let mut b: u8 = 0;
+                for (k, bit) in chunk.iter().enumerate() {
+                    if *bit {
+                        b |= 1 << (7 - k);
+                    }
+                }
+                frame_bytes[i] = b;
+            }
+            // Fill bytes 13..96 (SUBFRAMES region) with a distinct
+            // per-frame pattern so payload checks can differentiate.
+            for byte in frame_bytes.iter_mut().skip(13) {
+                *byte = 0xCD;
+            }
+            be.extend_from_slice(&frame_bytes);
+        }
+        // Word-swap each 16-bit pair to produce the raw-LE form.
+        for pair in be.chunks_exact_mut(2) {
+            pair.swap(0, 1);
+        }
+        be
+    }
+
+    #[test]
+    fn iter_frames_walks_raw_le_two_frame_stream() {
+        let buf = build_raw_le_two_frame_stream();
+        // Sanity: starts with the canonical raw-LE sync.
+        assert_eq!(&buf[..4], &[0xFE, 0x7F, 0x01, 0x80]);
+        // Second frame's sync at offset 96.
+        assert_eq!(&buf[96..100], &[0xFE, 0x7F, 0x01, 0x80]);
+
+        let frames: Vec<_> = iter_frames(&buf)
+            .collect::<core::result::Result<Vec<_>, _>>()
+            .expect("raw-LE multi-frame stream must walk");
+        assert_eq!(frames.len(), 2);
+
+        for (i, frame) in frames.iter().enumerate() {
+            assert_eq!(
+                frame.header.sync_word_encoding,
+                SyncWordEncoding::RawLittleEndian,
+                "frame {i} encoding",
+            );
+            assert_eq!(frame.offset, i * 96);
+            assert_eq!(frame.len, 96);
+            assert_eq!(frame.header.frame_size_bytes, 96);
+            assert_eq!(frame.header.blocks_per_frame, 5);
+            assert_eq!(frame.header.frame_type, FrameType::Termination);
+            assert!(!frame.header.crc_present);
+            // The byte-length accessor returns the unpacked-bitstream
+            // (raw-BE) header byte count regardless of the on-wire
+            // sync encoding — 13 bytes when `crc_present == 0`.
+            assert_eq!(frame.header.header_byte_length(), 13);
+        }
+    }
+
+    /// The raw-LE walk is robust to leading garbage in the same way
+    /// the raw-BE walk is — `find_next_sync` skips past unrelated
+    /// bytes and lands on the first LE sync.
+    #[test]
+    fn iter_frames_raw_le_handles_leading_garbage() {
+        let stream = build_raw_le_two_frame_stream();
+        let mut prefixed = Vec::with_capacity(7 + stream.len());
+        prefixed.extend_from_slice(&[0xAA; 7]);
+        prefixed.extend_from_slice(&stream);
+
+        let frames: Vec<_> = iter_frames(&prefixed)
+            .collect::<core::result::Result<Vec<_>, _>>()
+            .expect("garbage-prefixed raw-LE stream must still walk");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].offset, 7);
+        assert_eq!(frames[1].offset, 7 + 96);
+        for f in &frames {
+            assert_eq!(
+                f.header.sync_word_encoding,
+                SyncWordEncoding::RawLittleEndian
+            );
+        }
     }
 }

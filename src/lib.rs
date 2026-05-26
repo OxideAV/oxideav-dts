@@ -75,6 +75,20 @@
 //! structural bounds plus per-field bit-width bounds via the new
 //! [`Error::FieldOutOfRange`] variant.
 //!
+//! Round 151 (2026-05-26) adds [`find_all_syncs`], the bulk-scan
+//! counterpart to [`find_next_sync`]: instead of returning the first
+//! sync at or after a cursor, it walks the entire input buffer and
+//! returns every documented sync occurrence (all four encodings) as a
+//! `Vec<SyncMatch>`. Useful for stream-integrity tooling that needs to
+//! know about every resync point up front rather than walking one at a
+//! time. Same `O(n)` cost as a `find_next_sync` loop from cursor + 1;
+//! the bulk helper just materialises the result. The round also closes
+//! a missing coverage gap by testing [`iter_frames`] against a raw-LE
+//! multi-frame stream — the iterator already supported raw-LE because
+//! `frame_size_bytes` is byte-equivalent across both raw encodings
+//! (per the wiki), but the previous test grid only exercised raw-BE
+//! via the bundled ffmpeg fixture.
+//!
 //! Round 148 (2026-05-26) completes the encoder surface across all
 //! four documented sync encodings. The two new primitives,
 //! [`encode_frame_header_14bit_be`] and [`encode_frame_header_14bit_le`],
@@ -185,6 +199,11 @@
 //!   [`FourteenBitByteOrder`] — the 14↔16-bit container conversion
 //!   primitives. `unpack_14bit_to_16bit` added in round 2;
 //!   `pack_16bit_to_14bit` added in round 145.
+//! - [`find_next_sync`] / [`find_all_syncs`] / [`iter_frames`] /
+//!   [`FrameIterator`] / [`FrameView`] / [`SyncMatch`] — multi-frame
+//!   walker + resync helpers. `find_next_sync` / `iter_frames` /
+//!   `FrameIterator` / `FrameView` / `SyncMatch` added in round 6;
+//!   `find_all_syncs` added in round 151.
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -220,7 +239,9 @@ pub use crate::header::{
     encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, DtsFrameHeader,
     FrameType, LfeMode, SyncWordEncoding,
 };
-pub use crate::iter::{find_next_sync, iter_frames, FrameIterator, FrameView, SyncMatch};
+pub use crate::iter::{
+    find_all_syncs, find_next_sync, iter_frames, FrameIterator, FrameView, SyncMatch,
+};
 pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder};
 
 #[cfg(feature = "registry")]
