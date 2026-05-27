@@ -5,6 +5,47 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 165 — `find_next_sync` first-byte gate (`O(n)` constant-factor speedup).**
+Round 165 (2026-05-27) gates the multi-byte `detect_sync` call inside
+`find_next_sync` behind a one-byte filter
+(`is_sync_first_byte_candidate`). The four documented DTS sync
+sequences (`7F FE 80 01` raw-BE, `FE 7F 01 80` raw-LE,
+`1F FF E8 00 07 Fx` 14-bit-BE, `FF 1F 00 E8 Fx 07` 14-bit-LE) all
+begin with distinct first bytes — `0x7F`, `0xFE`, `0x1F`, `0xFF` per
+the wiki bit-table — so 252 of 256 possible payload bytes can be
+rejected with a single compare-and-branch rather than the previous
+4-byte raw-sync equality check + two 6-byte 14-bit container
+unpacks. On uniform-random payload the inner loop visits ~98.4% of
+positions with the cheap path; the walk order, returned `SyncMatch
+{ offset, encoding }`, and end-of-buffer bookkeeping are
+**unchanged** from round 6 — round 165 also adds eight new tests
+(171 total, up from 163) including:
+
+- a `find_next_sync_matches_pre_optimization_reference_on_candidate_dense_payload`
+  harness that packs every fourth byte with a first-byte sync
+  candidate but a non-sync continuation, and proves the optimised
+  scanner returns the same `None` (and then the same embedded sync
+  at offset 100) the pre-round-165 brute-force reference returns;
+- a 4 KB pseudo-random-buffer cross-check sweeping every possible
+  `start` offset and asserting per-call agreement with the
+  reference;
+- a `find_all_syncs_matches_reference_on_random_buffer_with_embedded_syncs`
+  bulk-scan parity test that embeds one sync of each of the four
+  encodings at known positions and verifies the optimised
+  `find_all_syncs` recovers every (offset, encoding) pair the
+  reference recovers;
+- an all-`0xFF` payload stress test (every position is a first-byte
+  candidate — the negative filter's degenerate case) with one real
+  raw-LE sync embedded mid-buffer;
+- an exhaustive 256-input check that the filter accepts exactly the
+  four documented first bytes `{0x1F, 0x7F, 0xFE, 0xFF}` and
+  rejects the other 252.
+
+The downstream walkers (`iter_frames`, `iter_frames_resync`,
+`find_all_syncs`) inherit the speedup transparently because they
+all dispatch through `find_next_sync`. No public API surface change;
+no docs gap touched (#928 / #1055 / #1084 still open).
+
 **Round 159 — `iter_frames_resync` error-tolerant frame walker.**
 Round 159 (2026-05-27) adds an error-tolerant counterpart to the
 round-6 `iter_frames`: `iter_frames_resync(bytes) -> FrameIteratorResync<'_>`

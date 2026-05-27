@@ -102,6 +102,27 @@
 //! damage. The fail-fast [`iter_frames`] remains exactly as
 //! documented (returns the first parse error and terminates).
 //!
+//! Round 165 (2026-05-27) gates the inner-loop multi-byte
+//! [`crate::SyncWordEncoding`] detection of [`find_next_sync`] (and
+//! therefore [`find_all_syncs`], [`iter_frames`], and
+//! [`iter_frames_resync`]) behind a one-byte first-byte filter. The
+//! four documented sync sequences all begin with one of `0x7F` /
+//! `0xFE` / `0x1F` / `0xFF` (distinct first bytes per the wiki
+//! bit-table), so 252 of 256 possible payload bytes are
+//! short-circuited before the multi-byte comparison fires. On
+//! random payload the inner loop visits ~98.4% of positions with a
+//! single byte read + branch rather than the previous 4-byte raw
+//! check + 6-byte 14-bit check. The walk order, returned offsets,
+//! and matched encoding tags are unchanged from round 6 — round 165
+//! also adds 8 new tests (171 total) including a
+//! `find_next_sync_matches_pre_optimization_reference_on_candidate_dense_payload`
+//! equivalence harness, a pseudo-random-buffer cross-check against
+//! a brute-force pre-optimisation reference, an all-`0xFF` payload
+//! stress test (every position is a first-byte candidate so the
+//! gate's negative-filter property must hold from the
+//! multi-byte side), and an exhaustive 256-input check that the
+//! first-byte filter accepts exactly `{0x1F, 0x7F, 0xFE, 0xFF}`.
+//!
 //! Round 148 (2026-05-26) completes the encoder surface across all
 //! four documented sync encodings. The two new primitives,
 //! [`encode_frame_header_14bit_be`] and [`encode_frame_header_14bit_le`],

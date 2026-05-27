@@ -8,6 +8,54 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 165 (2026-05-27) — `find_next_sync` first-byte gate
+  (constant-factor speedup, no API change). The inner loop of
+  `find_next_sync(bytes, start)` now skips positions whose first
+  byte cannot start any of the four documented sync sequences
+  (`0x7F` raw-BE / `0xFE` raw-LE / `0x1F` 14-bit-BE / `0xFF`
+  14-bit-LE) with a single compare-and-branch, rather than calling
+  the multi-byte `detect_sync` helper on every position. On
+  uniform-random payload 252 of 256 first bytes short-circuit
+  through the cheap path (4-byte raw-sync equality check + two
+  6-byte 14-bit container unpacks elided). The walk order,
+  returned `SyncMatch { offset, encoding }`, and end-of-buffer
+  bookkeeping are identical to round 6 — downstream walkers
+  (`iter_frames`, `iter_frames_resync`, `find_all_syncs`) inherit
+  the speedup transparently because they all dispatch through
+  `find_next_sync`.
+- Round 165 (2026-05-27) — eight new tests covering the optimised
+  scanner:
+  - `first_byte_candidate_accepts_exactly_four_bytes` —
+    exhaustive 256-input check that the filter accepts exactly
+    `{0x1F, 0x7F, 0xFE, 0xFF}` and rejects the other 252.
+  - `first_byte_candidate_accepts_documented_sync_prefixes` —
+    spot-checks each documented sync's first byte individually
+    plus four adjacent non-sync bytes.
+  - `find_next_sync_matches_pre_optimization_reference_on_candidate_dense_payload`
+    — packs every fourth byte with a first-byte sync candidate
+    but a non-sync continuation; the optimised scanner must
+    return the same `None` (then the same embedded sync at offset
+    100) as the pre-round-165 brute-force reference.
+  - `find_next_sync_matches_reference_on_pseudo_random_buffer` —
+    4 KB LCG-seeded random buffer; sweeps every possible `start`
+    offset and asserts per-call agreement with the reference.
+  - `find_all_syncs_matches_reference_on_random_buffer_with_embedded_syncs`
+    — bulk-scan parity test embedding one sync of each of the
+    four encodings at known positions; verifies the optimised
+    `find_all_syncs` recovers every `(offset, encoding)` pair the
+    reference recovers.
+  - `find_next_sync_handles_all_ones_payload_with_one_embedded_sync`
+    — all-`0xFF` payload (every position is a first-byte
+    candidate, the negative filter's degenerate case) with one
+    real raw-LE sync embedded at offset 50.
+  - `find_next_sync_handles_all_zero_payload` — all-zero buffer
+    (no first-byte candidates anywhere) returns `None`; confirms
+    the early-exit path doesn't infinite-loop or skip
+    end-of-buffer bookkeeping.
+  - `find_next_sync_start_sweep_matches_reference_with_two_real_syncs`
+    — sweeps `start` across every offset of a 200 B buffer
+    holding two real syncs; per-call agreement with the
+    reference.
 - Round 159 (2026-05-27) — `iter_frames_resync` error-tolerant
   multi-frame walker. The fail-fast `iter_frames` from round 6
   terminates at the first parse failure; the new
