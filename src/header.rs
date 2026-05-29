@@ -89,6 +89,71 @@ pub enum SyncWordEncoding {
     FourteenBitLittleEndian,
 }
 
+impl SyncWordEncoding {
+    /// Byte length of the on-wire sync sequence for this encoding,
+    /// directly read from the wiki snapshot's
+    /// "How to distinguish different versions" table
+    /// (`docs/audio/dts/wiki/DTS.wiki`):
+    ///
+    /// | Encoding                  | Sync sequence            | Bytes |
+    /// | ------------------------- | ------------------------ | ----- |
+    /// | `RawBigEndian`            | `7F FE 80 01`            | 4     |
+    /// | `RawLittleEndian`         | `FE 7F 01 80`            | 4     |
+    /// | `FourteenBitBigEndian`    | `1F FF E8 00 07 Fx`      | 6     |
+    /// | `FourteenBitLittleEndian` | `FF 1F 00 E8 Fx 07`      | 6     |
+    ///
+    /// The 14-bit variants are 6 bytes because the last container
+    /// (`07 Fx` / `Fx 07`) carries the upper bits of the 32-bit
+    /// syncword inside a 14-bit-payload container, and matching the
+    /// full sync requires inspecting the four high bits of that
+    /// trailing container per [`crate::parse_frame_header_14bit`]'s
+    /// detection rule.
+    ///
+    /// This accessor is the wiki-derived counterpart to a
+    /// [`crate::SyncMatch::sync_byte_length`] call. It does not
+    /// reflect the **frame** byte length (that is
+    /// [`crate::DtsFrameHeader::frame_size_bytes`]) — only the bytes
+    /// the sync sequence itself occupies on the wire.
+    #[inline]
+    pub fn sync_byte_length(self) -> usize {
+        match self {
+            SyncWordEncoding::RawBigEndian | SyncWordEncoding::RawLittleEndian => 4,
+            SyncWordEncoding::FourteenBitBigEndian | SyncWordEncoding::FourteenBitLittleEndian => 6,
+        }
+    }
+
+    /// Whether this encoding is one of the two raw 16-bit-per-word
+    /// forms (the native DTS encodings per the wiki).
+    ///
+    /// Equivalent to `matches!(self, RawBigEndian | RawLittleEndian)`
+    /// and provided so demuxer / re-muxer code can branch on the
+    /// "raw vs 14-bit container" distinction without spelling the
+    /// `matches!` out at every call site.
+    #[inline]
+    pub fn is_raw_16bit(self) -> bool {
+        matches!(
+            self,
+            SyncWordEncoding::RawBigEndian | SyncWordEncoding::RawLittleEndian
+        )
+    }
+
+    /// Whether this encoding is one of the two 14-bit-packed
+    /// container forms (the wiki's "DTS Music CD" / "DTS-in-WAV"
+    /// 14-bit forms).
+    ///
+    /// Equivalent to `!self.is_raw_16bit()` but spelled out
+    /// affirmatively for readability at call sites that need the
+    /// 14-bit branch (e.g. the [`crate::FrameIterator`]'s
+    /// `UnsupportedFourteenBit` guard).
+    #[inline]
+    pub fn is_14bit_packed(self) -> bool {
+        matches!(
+            self,
+            SyncWordEncoding::FourteenBitBigEndian | SyncWordEncoding::FourteenBitLittleEndian
+        )
+    }
+}
+
 /// Frame-type flag (FTYPE bit, 1 bit wide).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FrameType {

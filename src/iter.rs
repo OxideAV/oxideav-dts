@@ -70,6 +70,33 @@ pub struct SyncMatch {
     pub encoding: SyncWordEncoding,
 }
 
+impl SyncMatch {
+    /// Byte length of the sync sequence at [`Self::offset`],
+    /// delegated to [`SyncWordEncoding::sync_byte_length`].
+    ///
+    /// Equivalent to `self.encoding.sync_byte_length()`. Provided as a
+    /// thin accessor so the common pattern "advance the cursor past
+    /// the matched sync" reads naturally —
+    /// `cursor = sync_match.offset + sync_match.sync_byte_length()`
+    /// — without spelling the field access out.
+    #[inline]
+    pub fn sync_byte_length(&self) -> usize {
+        self.encoding.sync_byte_length()
+    }
+
+    /// Half-open byte range of the sync sequence at this match
+    /// (`offset..offset + sync_byte_length()`).
+    ///
+    /// Provided so callers that want to highlight the matched bytes
+    /// (e.g. for stream-integrity tooling that emits a per-sync
+    /// hex-window report) can slice the input directly:
+    /// `&bytes[sync_match.sync_byte_range()]`.
+    #[inline]
+    pub fn sync_byte_range(&self) -> core::ops::Range<usize> {
+        self.offset..self.offset + self.sync_byte_length()
+    }
+}
+
 /// First-byte gate for the four documented DTS sync sequences.
 ///
 /// All four sync words begin with a distinct first byte that does
@@ -560,6 +587,98 @@ pub fn find_all_syncs(bytes: &[u8]) -> Vec<SyncMatch> {
         cursor = m.offset + 1;
     }
     out
+}
+
+/// Lazy streaming iterator over every DTS sync sequence in a byte
+/// buffer.
+///
+/// Same matching rules and walk order as [`find_all_syncs`] — the
+/// only difference is that this iterator does **not** materialise the
+/// full result vector. It walks the buffer one [`find_next_sync`]
+/// hop at a time, yielding each [`SyncMatch`] as it is found and
+/// stopping when [`find_next_sync`] returns `None`.
+///
+/// Useful when the caller only needs to:
+///
+/// - act on syncs in order (e.g. stream-integrity tooling that prints
+///   each resync point to a log as it walks),
+/// - stop early after the first N matches (`iter_syncs(bytes).take(8)`),
+/// - or chain a filter / sniff through standard
+///   [`Iterator`] combinators (e.g.
+///   `iter_syncs(bytes).filter(|m| m.encoding.is_raw_16bit())`)
+///
+/// without paying the upfront allocation that [`find_all_syncs`]
+/// incurs. For a workload that consumes every match anyway,
+/// `find_all_syncs(bytes)` and `iter_syncs(bytes).collect()` produce
+/// the same `Vec<SyncMatch>` at the same `O(n)` cost — pick the bulk
+/// helper when the result is needed as a slice, the iterator when the
+/// caller is fine with element-by-element consumption.
+///
+/// The iterator is non-overlapping: after yielding a match at
+/// `offset`, scanning resumes at `offset + 1`, identical to
+/// [`find_all_syncs`]. The four documented sync prefixes have
+/// distinct first bytes (`7F` / `FE` / `1F` / `FF`), so no two real
+/// sync sequences can overlap — a one-byte step is both sufficient
+/// and minimal. Adjacent syncs (one ending and the next starting on
+/// consecutive bytes) are both reported.
+///
+/// ## Example
+///
+/// ```
+/// use oxideav_dts::{iter_syncs, SyncWordEncoding};
+///
+/// let mut buf = vec![0u8; 32];
+/// buf[0..4].copy_from_slice(&[0x7F, 0xFE, 0x80, 0x01]);
+/// buf[8..12].copy_from_slice(&[0xFE, 0x7F, 0x01, 0x80]);
+///
+/// let mut it = iter_syncs(&buf);
+/// let first = it.next().unwrap();
+/// assert_eq!(first.offset, 0);
+/// assert_eq!(first.encoding, SyncWordEncoding::RawBigEndian);
+/// let second = it.next().unwrap();
+/// assert_eq!(second.offset, 8);
+/// assert_eq!(second.encoding, SyncWordEncoding::RawLittleEndian);
+/// assert!(it.next().is_none());
+/// ```
+#[derive(Debug)]
+pub struct SyncIterator<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+}
+
+impl<'a> SyncIterator<'a> {
+    /// Construct an iterator positioned at byte 0 of `bytes`.
+    pub fn new(bytes: &'a [u8]) -> Self {
+        SyncIterator { bytes, cursor: 0 }
+    }
+
+    /// Current scan cursor. After yielding a match at `offset` the
+    /// cursor advances to `offset + 1`; after exhausting the input it
+    /// rests at the byte position [`find_next_sync`] gave up at.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+}
+
+impl<'a> Iterator for SyncIterator<'a> {
+    type Item = SyncMatch;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let m = find_next_sync(self.bytes, self.cursor)?;
+        // Same one-byte advance as `find_all_syncs`: the four sync
+        // prefixes have distinct first bytes so non-overlapping
+        // matches at adjacent offsets are still both reported.
+        self.cursor = m.offset + 1;
+        Some(m)
+    }
+}
+
+/// Convenience constructor — equivalent to [`SyncIterator::new`].
+///
+/// See [`SyncIterator`] for the streaming vs bulk-scan trade-off
+/// against [`find_all_syncs`].
+pub fn iter_syncs(bytes: &[u8]) -> SyncIterator<'_> {
+    SyncIterator::new(bytes)
 }
 
 #[cfg(test)]
@@ -1632,5 +1751,214 @@ mod tests {
                 "divergence at start={start}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Round 179 — SyncWordEncoding::sync_byte_length /
+    //             SyncMatch::sync_byte_length / sync_byte_range /
+    //             SyncIterator + iter_syncs
+    // ---------------------------------------------------------------
+
+    /// Wiki sync table directly enumerates the four sync sequences.
+    /// Length 4 for the two raw encodings (`7F FE 80 01` /
+    /// `FE 7F 01 80`); length 6 for the two 14-bit-packed encodings
+    /// (`1F FF E8 00 07 Fx` / `FF 1F 00 E8 Fx 07`).
+    #[test]
+    fn sync_word_encoding_byte_length_matches_wiki_sync_table() {
+        assert_eq!(SyncWordEncoding::RawBigEndian.sync_byte_length(), 4);
+        assert_eq!(SyncWordEncoding::RawLittleEndian.sync_byte_length(), 4);
+        assert_eq!(SyncWordEncoding::FourteenBitBigEndian.sync_byte_length(), 6);
+        assert_eq!(
+            SyncWordEncoding::FourteenBitLittleEndian.sync_byte_length(),
+            6
+        );
+    }
+
+    /// `is_raw_16bit` accepts exactly the two raw encodings;
+    /// `is_14bit_packed` accepts exactly the other two. The two
+    /// predicates are mutually exclusive and jointly exhaustive over
+    /// the documented sync encodings.
+    #[test]
+    fn sync_word_encoding_raw_vs_packed_predicates_partition_the_enum() {
+        for enc in [
+            SyncWordEncoding::RawBigEndian,
+            SyncWordEncoding::RawLittleEndian,
+            SyncWordEncoding::FourteenBitBigEndian,
+            SyncWordEncoding::FourteenBitLittleEndian,
+        ] {
+            assert_ne!(
+                enc.is_raw_16bit(),
+                enc.is_14bit_packed(),
+                "exactly one predicate must hold for {enc:?}"
+            );
+        }
+        assert!(SyncWordEncoding::RawBigEndian.is_raw_16bit());
+        assert!(SyncWordEncoding::RawLittleEndian.is_raw_16bit());
+        assert!(!SyncWordEncoding::FourteenBitBigEndian.is_raw_16bit());
+        assert!(!SyncWordEncoding::FourteenBitLittleEndian.is_raw_16bit());
+        assert!(SyncWordEncoding::FourteenBitBigEndian.is_14bit_packed());
+        assert!(SyncWordEncoding::FourteenBitLittleEndian.is_14bit_packed());
+    }
+
+    /// `SyncMatch::sync_byte_length` delegates to the encoding; the
+    /// resulting half-open range carries the expected number of
+    /// bytes for each of the four documented encodings.
+    #[test]
+    fn sync_match_sync_byte_range_carries_wiki_documented_byte_count() {
+        let cases = [
+            (SyncWordEncoding::RawBigEndian, 4usize),
+            (SyncWordEncoding::RawLittleEndian, 4),
+            (SyncWordEncoding::FourteenBitBigEndian, 6),
+            (SyncWordEncoding::FourteenBitLittleEndian, 6),
+        ];
+        for (enc, expected_len) in cases {
+            let m = SyncMatch {
+                offset: 17,
+                encoding: enc,
+            };
+            assert_eq!(m.sync_byte_length(), expected_len);
+            let r = m.sync_byte_range();
+            assert_eq!(r.start, 17);
+            assert_eq!(r.end, 17 + expected_len);
+        }
+    }
+
+    /// `sync_byte_range` lets the caller slice the matched bytes
+    /// straight out of the input. For a raw-BE sync at offset 0
+    /// that slice is `7F FE 80 01`.
+    #[test]
+    fn sync_match_sync_byte_range_slices_raw_be_sync_bytes() {
+        let mut buf = vec![0u8; 16];
+        buf[..4].copy_from_slice(&RAW_BE_SYNC);
+        let m = find_next_sync(&buf, 0).unwrap();
+        assert_eq!(&buf[m.sync_byte_range()], &RAW_BE_SYNC);
+    }
+
+    /// `sync_byte_range` for a 14-bit-BE sync at offset 5 reproduces
+    /// the wiki's `1F FF E8 00 07 F0` prefix.
+    #[test]
+    fn sync_match_sync_byte_range_slices_14bit_be_sync_bytes() {
+        let mut buf = vec![0u8; 32];
+        buf[5..11].copy_from_slice(&[0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xF0]);
+        let m = find_next_sync(&buf, 0).unwrap();
+        assert_eq!(m.encoding, SyncWordEncoding::FourteenBitBigEndian);
+        assert_eq!(m.sync_byte_range(), 5..11);
+        assert_eq!(
+            &buf[m.sync_byte_range()],
+            &[0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xF0]
+        );
+    }
+
+    /// `iter_syncs` and `find_all_syncs` must agree element-by-element
+    /// on a buffer that contains all four documented sync encodings.
+    /// This is the streaming/bulk equivalence contract — collect()
+    /// of the iterator equals the vector returned by the bulk helper.
+    #[test]
+    fn iter_syncs_collects_to_same_vec_as_find_all_syncs_on_mixed_encoding_buffer() {
+        let mut buf = vec![0u8; 64];
+        buf[2..6].copy_from_slice(&RAW_BE_SYNC);
+        buf[12..16].copy_from_slice(&RAW_LE_SYNC);
+        buf[24..30].copy_from_slice(&[0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xF5]);
+        buf[40..46].copy_from_slice(&[0xFF, 0x1F, 0x00, 0xE8, 0xF7, 0x07]);
+        let bulk = find_all_syncs(&buf);
+        let streamed: Vec<SyncMatch> = iter_syncs(&buf).collect();
+        assert_eq!(bulk, streamed);
+        assert_eq!(streamed.len(), 4);
+        assert_eq!(streamed[0].encoding, SyncWordEncoding::RawBigEndian);
+        assert_eq!(streamed[1].encoding, SyncWordEncoding::RawLittleEndian);
+        assert_eq!(streamed[2].encoding, SyncWordEncoding::FourteenBitBigEndian);
+        assert_eq!(
+            streamed[3].encoding,
+            SyncWordEncoding::FourteenBitLittleEndian
+        );
+    }
+
+    /// Streaming + bulk agree on an empty-result buffer (no syncs).
+    /// The iterator yields `None` on the first `next()` call.
+    #[test]
+    fn iter_syncs_returns_none_on_buffer_without_any_syncs() {
+        let buf = vec![0xAAu8; 256];
+        let mut it = iter_syncs(&buf);
+        assert!(it.next().is_none());
+        assert_eq!(find_all_syncs(&buf), Vec::<SyncMatch>::new());
+    }
+
+    /// `take(N)` correctly limits the iterator without forcing a
+    /// full scan — the next call after the take window stops yielding
+    /// even if more syncs exist downstream.
+    #[test]
+    fn iter_syncs_take_window_stops_after_n_matches() {
+        let mut buf = vec![0u8; 256];
+        // Plant five raw-BE syncs at 10, 30, 50, 70, 90.
+        for off in [10usize, 30, 50, 70, 90] {
+            buf[off..off + 4].copy_from_slice(&RAW_BE_SYNC);
+        }
+        let first_three: Vec<SyncMatch> = iter_syncs(&buf).take(3).collect();
+        assert_eq!(first_three.len(), 3);
+        assert_eq!(first_three[0].offset, 10);
+        assert_eq!(first_three[1].offset, 30);
+        assert_eq!(first_three[2].offset, 50);
+    }
+
+    /// `filter` combinator: select only the raw-16-bit syncs from a
+    /// mixed-encoding buffer using `SyncWordEncoding::is_raw_16bit`.
+    #[test]
+    fn iter_syncs_filter_by_is_raw_16bit_excludes_14bit_matches() {
+        let mut buf = vec![0u8; 64];
+        buf[0..4].copy_from_slice(&RAW_BE_SYNC);
+        buf[10..16].copy_from_slice(&[0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xF1]);
+        buf[20..24].copy_from_slice(&RAW_LE_SYNC);
+        buf[30..36].copy_from_slice(&[0xFF, 0x1F, 0x00, 0xE8, 0xF2, 0x07]);
+        let raws: Vec<SyncMatch> = iter_syncs(&buf)
+            .filter(|m| m.encoding.is_raw_16bit())
+            .collect();
+        assert_eq!(raws.len(), 2);
+        assert!(raws.iter().all(|m| m.encoding.is_raw_16bit()));
+        assert_eq!(raws[0].offset, 0);
+        assert_eq!(raws[1].offset, 20);
+    }
+
+    /// `SyncIterator::cursor()` exposes the scan position. After
+    /// yielding the only match in the buffer, the cursor advances to
+    /// `offset + 1`; after the iterator is exhausted, it sits at the
+    /// position `find_next_sync` gave up at.
+    #[test]
+    fn sync_iterator_cursor_reflects_scan_position() {
+        let mut buf = vec![0u8; 32];
+        buf[10..14].copy_from_slice(&RAW_BE_SYNC);
+        let mut it = iter_syncs(&buf);
+        assert_eq!(it.cursor(), 0);
+        let m = it.next().unwrap();
+        assert_eq!(m.offset, 10);
+        // After yielding the match at offset 10, the cursor advanced
+        // by one so the next scan starts at offset 11 (the
+        // non-overlapping resume position documented for
+        // find_all_syncs).
+        assert_eq!(it.cursor(), 11);
+        assert!(it.next().is_none());
+    }
+
+    /// `iter_syncs` agrees with the reference `find_all_syncs` on a
+    /// 4 KB pseudo-random buffer with four embedded real syncs (one
+    /// of each encoding). Equivalence is checked element-by-element
+    /// so the streaming iterator inherits the bulk helper's
+    /// reference-validation coverage.
+    #[test]
+    fn iter_syncs_matches_reference_on_pseudo_random_buffer_with_embedded_syncs() {
+        let mut buf = vec![0u8; 4096];
+        let mut state: u64 = 0x4242_4242_4242_4242;
+        for b in buf.iter_mut() {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *b = (state >> 32) as u8;
+        }
+        buf[200..204].copy_from_slice(&RAW_BE_SYNC);
+        buf[800..804].copy_from_slice(&RAW_LE_SYNC);
+        buf[1500..1506].copy_from_slice(&[0x1F, 0xFF, 0xE8, 0x00, 0x07, 0xF2]);
+        buf[3000..3006].copy_from_slice(&[0xFF, 0x1F, 0x00, 0xE8, 0xF4, 0x07]);
+        let streamed: Vec<SyncMatch> = iter_syncs(&buf).collect();
+        let reference = reference_find_all_syncs(&buf);
+        assert_eq!(streamed, reference);
     }
 }

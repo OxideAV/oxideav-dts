@@ -5,6 +5,42 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 179 — `iter_syncs` lazy streaming iterator + `SyncWordEncoding` / `SyncMatch` accessor surface.**
+Round 179 (2026-05-29) adds a streaming counterpart to the
+round-151 `find_all_syncs` bulk helper plus a small accessor surface
+on `SyncWordEncoding` and `SyncMatch` derived directly from the wiki
+sync-sequence table (`docs/audio/dts/wiki/DTS.wiki`'s
+"How to distinguish different versions" enumeration). The new
+`iter_syncs(bytes) -> SyncIterator<'_>` returns an
+`Iterator<Item = SyncMatch>` that walks the buffer one
+`find_next_sync` hop at a time and yields matches as they appear —
+same matching rules, same walk order, same `O(n)` cost as
+`find_all_syncs`, but no upfront `Vec<SyncMatch>` allocation. Useful
+when the caller is fine with element-by-element consumption,
+wants to stop early after a `take(N)` window, or routes through
+standard `Iterator` combinators (e.g.
+`iter_syncs(bytes).filter(|m| m.encoding.is_raw_16bit())`). The new
+`SyncWordEncoding::sync_byte_length()` reports the on-wire byte
+length of the matched sync sequence (4 for raw-BE / raw-LE per the
+wiki's `7F FE 80 01` / `FE 7F 01 80` rows; 6 for the two
+14-bit-packed encodings per `1F FF E8 00 07 Fx` / `FF 1F 00 E8 Fx 07`);
+`SyncWordEncoding::is_raw_16bit()` / `is_14bit_packed()` are
+mutually-exclusive predicates that partition the enum into the
+raw-vs-container distinction the wiki documents. `SyncMatch`
+forwards both into `sync_byte_length()` / `sync_byte_range()` so
+the common "advance the cursor past the matched sync" / "slice the
+matched bytes" patterns read naturally
+(`cursor = m.offset + m.sync_byte_length()` /
+`&bytes[m.sync_byte_range()]`). Eleven new tests (plus one new
+doc-test) lock down the byte counts against the wiki table, the
+raw-vs-packed partition, the streaming-vs-bulk equivalence
+(`iter_syncs(...).collect() == find_all_syncs(...)`) on a
+mixed-encoding buffer, an empty-result buffer, `take(N)` window
+correctness, `is_raw_16bit` filter combinator usage, and a 4 KB
+pseudo-random buffer cross-check against the existing
+`reference_find_all_syncs`. No new docs gap is introduced; the
+existing #928 / #1055 / #1084 docs gaps remain open.
+
 **Round 165 — `find_next_sync` first-byte gate (`O(n)` constant-factor speedup).**
 Round 165 (2026-05-27) gates the multi-byte `detect_sync` call inside
 `find_next_sync` behind a one-byte filter

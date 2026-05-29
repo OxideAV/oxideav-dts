@@ -8,6 +8,43 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 179 (2026-05-29) — lazy `iter_syncs` / `SyncIterator`
+  streaming counterpart to `find_all_syncs`, plus a small accessor
+  surface on `SyncWordEncoding` and `SyncMatch` derived from the
+  wiki sync-sequence table (`docs/audio/dts/wiki/DTS.wiki`). New
+  public surface:
+  - `iter_syncs(bytes) -> SyncIterator<'_>` and `SyncIterator` —
+    `Iterator<Item = SyncMatch>` over every sync sequence in a
+    byte buffer. Same matching rules, walk order, and `O(n)` cost
+    as `find_all_syncs`, but without the upfront `Vec<SyncMatch>`
+    allocation. Useful for `take(N)`, `filter`, and `map`-style
+    consumption (e.g. streaming sniffers that act on each match
+    as it appears rather than after the full scan completes).
+  - `SyncWordEncoding::sync_byte_length() -> usize` — wiki-table-
+    derived byte length of the on-wire sync sequence (4 for the
+    two raw encodings, 6 for the two 14-bit-packed encodings).
+  - `SyncWordEncoding::is_raw_16bit()` / `is_14bit_packed()` —
+    mutually-exclusive predicates that partition the enum into
+    the raw vs container forms documented in the wiki.
+  - `SyncMatch::sync_byte_length() -> usize` and
+    `sync_byte_range() -> Range<usize>` — delegate to the
+    encoding's wiki-derived length so the common "advance past the
+    matched sync" / "highlight the matched bytes" patterns read as
+    `cursor = m.offset + m.sync_byte_length()` /
+    `&bytes[m.sync_byte_range()]`.
+
+  Eleven new tests (plus one new doc-test) lock down: the four
+  wiki-table sync byte counts (4 / 4 / 6 / 6), the raw-vs-packed
+  predicate partition, `sync_byte_range` slicing back the original
+  sync bytes for raw-BE and 14-bit-BE inputs, streaming vs bulk
+  equivalence (`iter_syncs(...).collect() == find_all_syncs(...)`)
+  on a mixed-encoding buffer, an empty-result buffer, `take(N)`
+  window correctness, the `is_raw_16bit` filter combinator, the
+  `SyncIterator::cursor()` progression contract, and a 4 KB
+  pseudo-random buffer cross-check against the existing
+  `reference_find_all_syncs`. No new docs gap is introduced; the
+  byte-length values are read verbatim from the wiki snapshot.
+
 - Round 165 (2026-05-27) — `find_next_sync` first-byte gate
   (constant-factor speedup, no API change). The inner loop of
   `find_next_sync(bytes, start)` now skips positions whose first

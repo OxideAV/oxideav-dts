@@ -123,6 +123,41 @@
 //! multi-byte side), and an exhaustive 256-input check that the
 //! first-byte filter accepts exactly `{0x1F, 0x7F, 0xFE, 0xFF}`.
 //!
+//! Round 179 (2026-05-29) adds a streaming counterpart to
+//! [`find_all_syncs`] plus a small accessor surface on
+//! [`SyncWordEncoding`] and [`SyncMatch`], all derived directly from
+//! the wiki snapshot's "How to distinguish different versions"
+//! sync-sequence table:
+//!
+//! - [`iter_syncs`] / [`SyncIterator`] — a lazy `Iterator<Item =
+//!   SyncMatch>` over every sync sequence in a byte buffer. Same
+//!   matching rules, walk order, and `O(n)` cost as
+//!   [`find_all_syncs`], but without the upfront `Vec<SyncMatch>`
+//!   allocation. Lets stream-integrity tooling consume matches one
+//!   at a time, stop early after a [`Iterator::take`] window, or
+//!   route through standard combinators (e.g.
+//!   `iter_syncs(bytes).filter(|m| m.encoding.is_raw_16bit())`).
+//! - [`SyncWordEncoding::sync_byte_length`] — wiki-table-derived
+//!   byte count of the on-wire sync sequence (4 for the raw
+//!   encodings, 6 for the 14-bit-packed encodings).
+//!   [`SyncWordEncoding::is_raw_16bit`] and
+//!   [`SyncWordEncoding::is_14bit_packed`] are convenience
+//!   predicates so callers can branch on the raw-vs-packed
+//!   distinction without spelling out the four-arm `matches!`.
+//! - [`SyncMatch::sync_byte_length`] and
+//!   [`SyncMatch::sync_byte_range`] — thin accessors that delegate
+//!   to the encoding's wiki-derived length so the common pattern
+//!   "advance past the matched sync" or "highlight the matched
+//!   bytes" reads naturally
+//!   (`cursor = m.offset + m.sync_byte_length()` /
+//!   `&bytes[m.sync_byte_range()]`).
+//!
+//! No new docs gap is introduced. The byte-length values are read
+//! verbatim from `docs/audio/dts/wiki/DTS.wiki`'s sync table. The
+//! existing #928 / #1055 / #1084 docs gaps (SFREQ / RATE / AMODE
+//! tables, HEADER_CRC polynomial, PCMR / DIALNORM tables,
+//! 14-bit container-byte advance rule) remain open.
+//!
 //! Round 148 (2026-05-26) completes the encoder surface across all
 //! four documented sync encodings. The two new primitives,
 //! [`encode_frame_header_14bit_be`] and [`encode_frame_header_14bit_le`],
@@ -238,6 +273,8 @@
 //!   walker + resync helpers. `find_next_sync` / `iter_frames` /
 //!   `FrameIterator` / `FrameView` / `SyncMatch` added in round 6;
 //!   `find_all_syncs` added in round 151.
+//! - [`iter_syncs`] / [`SyncIterator`] — lazy streaming counterpart
+//!   to [`find_all_syncs`] (added in round 179).
 //! - [`iter_frames_resync`] / [`FrameIteratorResync`] /
 //!   [`ResyncEvent`] / [`ResyncCause`] — error-tolerant walker that
 //!   skips past false-positive sync candidates (added in round 159).
@@ -277,8 +314,8 @@ pub use crate::header::{
     FrameType, LfeMode, SyncWordEncoding,
 };
 pub use crate::iter::{
-    find_all_syncs, find_next_sync, iter_frames, iter_frames_resync, FrameIterator,
-    FrameIteratorResync, FrameView, ResyncCause, ResyncEvent, SyncMatch,
+    find_all_syncs, find_next_sync, iter_frames, iter_frames_resync, iter_syncs, FrameIterator,
+    FrameIteratorResync, FrameView, ResyncCause, ResyncEvent, SyncIterator, SyncMatch,
 };
 pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder};
 
