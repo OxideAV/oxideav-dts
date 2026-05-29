@@ -21,7 +21,7 @@
 
 use oxideav_dts::{
     parse_frame_header, parse_frame_header_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder,
-    FrameType, LfeMode, SyncWordEncoding,
+    FrameType, LfeMode, SyncWordEncoding, TargetedBitRate,
 };
 
 /// 16 bytes captured from a real `ffmpeg -c:a dca -b:a 768k -ar
@@ -48,18 +48,21 @@ fn parses_real_ffmpeg_frame_header() {
     // 16 sub-blocks of 32 samples each.
     assert_eq!(hdr.blocks_per_frame, 15);
 
-    // The raw indices below are what the parser observed; the
-    // semantic mapping (AMODE 2 == stereo, SFREQ 13 == 48 kHz,
-    // RATE 15 == 768 kb/s, all per ffprobe's external read of the
-    // same file) cannot be asserted yet because the index→value
-    // tables are not in `docs/` (see README "Docs gaps").
+    // The raw indices below are what the parser observed. ffprobe's
+    // external read of the same file reports AMODE 2 == stereo,
+    // SFREQ 13 == 48 kHz, RATE 15 == 768 kb/s.
     assert_eq!(hdr.amode, 2);
     assert_eq!(hdr.sfreq_index, 13);
     assert_eq!(hdr.rate_index, 15);
 
-    // The resolvers must return None until the tables land.
+    // Round 185: the RATE table (ETSI §5.3.1 Table 5-7) resolves the
+    // bitrate. Code 15 (0b01111) → 768 000 bps — cross-validated
+    // against ffprobe's external read of this same frame (768 kb/s).
+    assert_eq!(hdr.bit_rate_bps(), Some(768_000));
+    assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Fixed(768_000));
+    // The SFREQ (sample-rate) and AMODE (channel-count) tables are
+    // still missing from `docs/`, so those resolvers stay None.
     assert_eq!(hdr.sample_rate_hz(), None);
-    assert_eq!(hdr.bit_rate_bps(), None);
     assert_eq!(hdr.channel_count(), None);
 
     // Round 3: trailing-13-bit field as observed in the real
@@ -142,8 +145,11 @@ fn parses_14bit_be_repacked_ffmpeg_frame_header() {
     assert_eq!(hdr.amode, 2);
     assert_eq!(hdr.sfreq_index, 13);
     assert_eq!(hdr.rate_index, 15);
+    // Round 185: bitrate resolves identically through the 14-bit-BE
+    // container path (RATE 15 → 768 000 bps per Table 5-7).
+    assert_eq!(hdr.bit_rate_bps(), Some(768_000));
+    assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Fixed(768_000));
     assert_eq!(hdr.sample_rate_hz(), None);
-    assert_eq!(hdr.bit_rate_bps(), None);
     assert_eq!(hdr.channel_count(), None);
     // Round 3: trailing-field equivalence with the raw-BE parse.
     assert_eq!(hdr.lfe, LfeMode::None);
@@ -176,6 +182,10 @@ fn parses_14bit_le_repacked_ffmpeg_frame_header() {
     assert_eq!(hdr.amode, 2);
     assert_eq!(hdr.sfreq_index, 13);
     assert_eq!(hdr.rate_index, 15);
+    // Round 185: bitrate resolves identically through the 14-bit-LE
+    // container path (RATE 15 → 768 000 bps per Table 5-7).
+    assert_eq!(hdr.bit_rate_bps(), Some(768_000));
+    assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Fixed(768_000));
     // Round 3.
     assert_eq!(hdr.lfe, LfeMode::None);
     assert!(hdr.predictor_history);

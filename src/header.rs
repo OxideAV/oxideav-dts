@@ -217,13 +217,63 @@ impl LfeMode {
     }
 }
 
+/// Targeted transmission bit-rate decoded from the 5-bit `RATE`
+/// header field.
+///
+/// The mapping is **ETSI TS 102 114 V1.3.1 §5.3.1, Table 5-7**
+/// ("RATE parameter versus targeted bit-rate"), transcribed in
+/// `docs/audio/dts/dts-core-extracts.md` §1. Table 5-7 enumerates 25
+/// fixed targeted rates (codes `0b00000`..=`0b11000`), one *open*-mode
+/// code (`0b11101`), and marks every other code invalid. Per the
+/// spec the field names the *targeted* transmission rate, which may
+/// be greater than or equal to the actual coded bit-rate; *open* mode
+/// permits rates that are not table entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum TargetedBitRate {
+    /// One of the 25 fixed targeted rates from Table 5-7, in bits per
+    /// second (e.g. code `0b01111` → `768_000`). The `1 411,2 kbit/s`
+    /// entry (code `0b10110`) is represented exactly as `1_411_200`.
+    Fixed(u32),
+    /// `RATE == 0b11101` — *open* mode. The frame's targeted bit-rate
+    /// is not constrained to a Table 5-7 entry, so no fixed bps value
+    /// applies.
+    Open,
+    /// A reserved / invalid `RATE` code: any code Table 5-7 does not
+    /// list among the 25 fixed values or the open code.
+    Invalid,
+}
+
+/// Bits-per-second values for the 25 fixed `RATE` codes
+/// (`0b00000`..=`0b11000`), in code order, per ETSI TS 102 114
+/// §5.3.1 Table 5-7 (`docs/audio/dts/dts-core-extracts.md` §1).
+/// ETSI lists the rates in kbit/s; this table converts each to bits
+/// per second (the decimal-comma `1 411,2 kbit/s` entry → `1_411_200`).
+const RATE_TABLE_BPS: [u32; 25] = [
+    32_000, 56_000, 64_000, 96_000, 112_000, 128_000, 192_000, 224_000, 256_000, 320_000, 384_000,
+    448_000, 512_000, 576_000, 640_000, 768_000, 960_000, 1_024_000, 1_152_000, 1_280_000,
+    1_344_000, 1_408_000, 1_411_200, 1_472_000, 1_536_000,
+];
+
+/// Resolve a raw 5-bit `RATE` index to its [`TargetedBitRate`] per
+/// Table 5-7. Codes `0..=24` are the fixed rates; `29` (`0b11101`)
+/// is the open code; everything else is invalid.
+fn targeted_bit_rate_from_index(rate_index: u8) -> TargetedBitRate {
+    match rate_index {
+        0..=24 => TargetedBitRate::Fixed(RATE_TABLE_BPS[rate_index as usize]),
+        29 => TargetedBitRate::Open,
+        _ => TargetedBitRate::Invalid,
+    }
+}
+
 /// Parsed DTS Core frame-sync header.
 ///
 /// Round 1 surfaces only the structural fields whose semantics are
-/// unambiguous in the wiki snapshot. The sample-rate / bitrate /
-/// channel-count *value* tables are not in `docs/` yet — see
-/// [`Self::sample_rate_hz`], [`Self::bit_rate_bps`], and
-/// [`Self::channel_count`] for the `Option` semantics.
+/// unambiguous in the wiki snapshot. The sample-rate / channel-count
+/// *value* tables are not in `docs/` yet — see [`Self::sample_rate_hz`]
+/// and [`Self::channel_count`] for the `Option` semantics. The
+/// bitrate table (ETSI §5.3.1 Table 5-7) landed in round 185, so
+/// [`Self::bit_rate_bps`] / [`Self::targeted_bit_rate`] now resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DtsFrameHeader {
     /// Which of the four documented sync encodings was found at
@@ -248,17 +298,22 @@ pub struct DtsFrameHeader {
     /// Sample-frequency index (SFREQ, 0..=15). The Hz mapping is
     /// not yet in `docs/`; see [`Self::sample_rate_hz`].
     pub sfreq_index: u8,
-    /// Transmission-bitrate index (RATE, 0..=31). The bps mapping
-    /// is not yet in `docs/`; see [`Self::bit_rate_bps`].
+    /// Transmission-bitrate index (RATE, 0..=31). Resolves to a
+    /// targeted bit-rate via ETSI §5.3.1 Table 5-7 — see
+    /// [`Self::bit_rate_bps`] / [`Self::targeted_bit_rate`].
     pub rate_index: u8,
     /// Embedded-downmix-coefficients flag (`DOWNMIX`, 1 bit).
     pub downmix: bool,
-    /// Embedded-dynamic-range-data flag (`DYNRANGE`, 1 bit).
+    /// Embedded-dynamic-range-data flag (`DYNF` / `DYNRANGE`, 1 bit).
+    /// Per ETSI §5.3.1 Table 5-8 (`docs/audio/dts/dts-core-extracts.md`
+    /// §1): `false` → dynamic-range coefficients not present;
+    /// `true` → present at the start of each subframe.
     pub dynamic_range: bool,
-    /// Timestamp-field-present flag (`TIMSTP`, 1 bit). The wiki
-    /// snapshot only names the bit; round 3 does not interpret the
-    /// optional timestamp payload that may appear later in the
-    /// bitstream.
+    /// Timestamp-field-present flag (`TIMEF` / `TIMSTP`, 1 bit). Per
+    /// ETSI §5.3.1 Table 5-9 (`docs/audio/dts/dts-core-extracts.md`
+    /// §1): `false` → time stamps not present; `true` → present at
+    /// the end of the core audio data. Round 3 surfaces the flag but
+    /// does not interpret the optional timestamp payload itself.
     pub time_stamp: bool,
     /// Auxiliary-data-field-present flag (`AUXDATA`, 1 bit).
     pub aux_data: bool,
@@ -339,15 +394,31 @@ impl DtsFrameHeader {
         None
     }
 
-    /// Resolve [`Self::rate_index`] to a transmission bit-rate in
-    /// bits per second.
+    /// Resolve [`Self::rate_index`] to its targeted transmission
+    /// bit-rate per ETSI TS 102 114 §5.3.1 Table 5-7.
     ///
-    /// Returns `None` for now: the index→bps table is missing from
-    /// `docs/audio/dts/`. The wiki snapshot says "See table below"
-    /// but the table itself was not mirrored.
+    /// This is the richer counterpart to [`Self::bit_rate_bps`]: it
+    /// preserves the *open*-mode (`RATE == 0b11101`) and *invalid*
+    /// distinctions that the `Option<u32>` accessor collapses to
+    /// `None`. See [`TargetedBitRate`].
+    pub fn targeted_bit_rate(&self) -> TargetedBitRate {
+        targeted_bit_rate_from_index(self.rate_index)
+    }
+
+    /// Resolve [`Self::rate_index`] to a targeted transmission
+    /// bit-rate in bits per second.
+    ///
+    /// Returns `Some(bps)` for the 25 fixed `RATE` codes of ETSI
+    /// §5.3.1 Table 5-7 (e.g. code `0b01111` → `Some(768_000)`), and
+    /// `None` for the *open*-mode code (`0b11101`, where no fixed rate
+    /// applies) and for any reserved / invalid code. Callers that need
+    /// to distinguish open from invalid should use
+    /// [`Self::targeted_bit_rate`].
     pub fn bit_rate_bps(&self) -> Option<u32> {
-        let _ = self.rate_index;
-        None
+        match self.targeted_bit_rate() {
+            TargetedBitRate::Fixed(bps) => Some(bps),
+            TargetedBitRate::Open | TargetedBitRate::Invalid => None,
+        }
     }
 
     /// Resolve [`Self::amode`] to a count of audio channels (LFE
@@ -1756,10 +1827,13 @@ mod tests {
             0,
         );
         let hdr = parse_frame_header_14bit(&packed).unwrap();
-        // The SFREQ/RATE/AMODE tables remain missing from docs/; the
-        // resolvers must still return None.
+        // The SFREQ/AMODE tables remain missing from docs/, so those
+        // resolvers still return None. RATE code 25 (0b11001) is an
+        // invalid code per Table 5-7, so bit_rate_bps() is None for a
+        // now-documented reason (not a missing table).
         assert_eq!(hdr.sample_rate_hz(), None);
         assert_eq!(hdr.bit_rate_bps(), None);
+        assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Invalid);
         assert_eq!(hdr.channel_count(), None);
         // Round 5: the PCMR and DIALNORM resolvers also remain
         // None until the docs tables land.
@@ -1777,12 +1851,82 @@ mod tests {
     fn value_resolvers_return_none_until_tables_land() {
         let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0), 0);
         let hdr = parse_frame_header(&bytes).unwrap();
+        // SFREQ (sample-rate) and AMODE (channel) tables are still
+        // missing; those resolvers return None.
         assert_eq!(hdr.sample_rate_hz(), None);
-        assert_eq!(hdr.bit_rate_bps(), None);
         assert_eq!(hdr.channel_count(), None);
+        // RATE code 25 (0b11001) is an invalid Table 5-7 code →
+        // bit_rate_bps() None, targeted_bit_rate() Invalid.
+        assert_eq!(hdr.bit_rate_bps(), None);
+        assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Invalid);
         // Round 5 resolvers wait on their own docs gaps too.
         assert_eq!(hdr.source_pcm_bits_per_sample(), None);
         assert_eq!(hdr.dialog_normalization_db(), None);
+    }
+
+    /// Every fixed `RATE` code (0..=24) resolves to the Table 5-7
+    /// bit-rate; the open code (29) and all reserved codes resolve to
+    /// `Open` / `Invalid` respectively. The expected bps values are
+    /// transcribed from ETSI §5.3.1 Table 5-7
+    /// (`docs/audio/dts/dts-core-extracts.md` §1).
+    #[test]
+    fn rate_table_5_7_resolves_every_code() {
+        // (code, expected fixed bps) for the 25 documented rates.
+        let fixed: [(u8, u32); 25] = [
+            (0, 32_000),
+            (1, 56_000),
+            (2, 64_000),
+            (3, 96_000),
+            (4, 112_000),
+            (5, 128_000),
+            (6, 192_000),
+            (7, 224_000),
+            (8, 256_000),
+            (9, 320_000),
+            (10, 384_000),
+            (11, 448_000),
+            (12, 512_000),
+            (13, 576_000),
+            (14, 640_000),
+            (15, 768_000),
+            (16, 960_000),
+            (17, 1_024_000),
+            (18, 1_152_000),
+            (19, 1_280_000),
+            (20, 1_344_000),
+            (21, 1_408_000),
+            (22, 1_411_200),
+            (23, 1_472_000),
+            (24, 1_536_000),
+        ];
+        for (code, bps) in fixed {
+            // Build a minimal valid header carrying this RATE code.
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 2, 13, code as u32, 0, None, 0);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(hdr.rate_index, code);
+            assert_eq!(
+                hdr.targeted_bit_rate(),
+                TargetedBitRate::Fixed(bps),
+                "RATE code {code} should map to {bps} bps",
+            );
+            assert_eq!(hdr.bit_rate_bps(), Some(bps));
+        }
+        // Open code (0b11101 = 29).
+        let open = build_be_header(1, 31, 0, 16, 1023, 2, 13, 29, 0, None, 0);
+        let hdr = parse_frame_header(&open).unwrap();
+        assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Open);
+        assert_eq!(hdr.bit_rate_bps(), None);
+        // Every reserved code (25..=28, 30, 31) is Invalid.
+        for code in [25u8, 26, 27, 28, 30, 31] {
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 2, 13, code as u32, 0, None, 0);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(
+                hdr.targeted_bit_rate(),
+                TargetedBitRate::Invalid,
+                "RATE code {code} should be Invalid",
+            );
+            assert_eq!(hdr.bit_rate_bps(), None);
+        }
     }
 
     // ---------------------------------------------------------------

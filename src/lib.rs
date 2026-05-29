@@ -225,17 +225,19 @@
 //! - sample-frequency index (4 bits),
 //! - transmission-bitrate index (5 bits).
 //!
-//! The wiki snapshot does **not** mirror the *value* tables for
-//! sample frequency / bitrate / channel-configuration / source
-//! PCM resolution / dialog normalization; the structural parser
-//! therefore returns the raw indices and exposes `Option`
-//! resolvers ([`DtsFrameHeader::sample_rate_hz`],
-//! [`DtsFrameHeader::bit_rate_bps`],
+//! The structural parser returns the raw indices and exposes
+//! `Option` resolvers for the value tables. The transmission-bitrate
+//! table landed in round 185 from ETSI TS 102 114 §5.3.1 Table 5-7
+//! (`docs/audio/dts/dts-core-extracts.md` §1): [`TargetedBitRate`] /
+//! [`DtsFrameHeader::targeted_bit_rate`] /
+//! [`DtsFrameHeader::bit_rate_bps`] now resolve. The remaining value
+//! tables (sample frequency / channel-configuration / source PCM
+//! resolution / dialog normalization) are still missing, so
+//! [`DtsFrameHeader::sample_rate_hz`],
 //! [`DtsFrameHeader::channel_count`],
-//! [`DtsFrameHeader::source_pcm_bits_per_sample`],
-//! [`DtsFrameHeader::dialog_normalization_db`]) that return
-//! `None` until the tables land in `docs/`. See `README.md`'s
-//! "Docs gaps" section.
+//! [`DtsFrameHeader::source_pcm_bits_per_sample`], and
+//! [`DtsFrameHeader::dialog_normalization_db`] return `None` until
+//! they land in `docs/`. See `README.md`'s "Docs gaps" section.
 //!
 //! ## What does *not* belong here
 //!
@@ -249,6 +251,8 @@
 //! - [`DtsFrameHeader`] — typed parse result.
 //! - [`SyncWordEncoding`] — the four documented sync variants.
 //! - [`FrameType`] — termination vs normal.
+//! - [`TargetedBitRate`] — `RATE`-field resolution (fixed / open /
+//!   invalid) per ETSI §5.3.1 Table 5-7 (added in round 185).
 //! - [`parse_frame_header`] — non-allocating single-frame parser
 //!   for the two raw 16-bit syncs.
 //! - [`parse_frame_header_14bit`] — single-frame parser for the two
@@ -311,7 +315,7 @@ mod registry;
 pub use crate::header::{
     encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,
     encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, DtsFrameHeader,
-    FrameType, LfeMode, SyncWordEncoding,
+    FrameType, LfeMode, SyncWordEncoding, TargetedBitRate,
 };
 pub use crate::iter::{
     find_all_syncs, find_next_sync, iter_frames, iter_frames_resync, iter_syncs, FrameIterator,

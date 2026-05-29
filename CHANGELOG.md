@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 185 (2026-05-29) — transmission bit-rate resolution from
+  ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-7 (transcribed in
+  `docs/audio/dts/dts-core-extracts.md` §1). New public surface:
+  - `TargetedBitRate` — `Fixed(u32)` (one of the 25 documented
+    targeted rates, in bits per second), `Open` (`RATE == 0b11101`),
+    or `Invalid` (any reserved code). `#[non_exhaustive]`.
+  - `DtsFrameHeader::targeted_bit_rate() -> TargetedBitRate` —
+    resolves the 5-bit `RATE` index per Table 5-7.
+
+  Behavioural change (not a signature change): `DtsFrameHeader::bit_rate_bps()`
+  now returns `Some(bps)` for the 25 fixed codes (e.g. code `0b01111`
+  → `Some(768_000)`) instead of the round-1 placeholder `None`; it
+  still returns `None` for the open and invalid codes (use
+  `targeted_bit_rate()` to distinguish). The `dynamic_range` (`DYNF`,
+  Table 5-8) and `time_stamp` (`TIMEF`, Table 5-9) field docs now
+  cite the same clause. One new exhaustive unit test walks all 32
+  `RATE` codes; the ffmpeg black-box tests now assert `768_000` bps
+  across the raw-BE / 14-bit-BE / 14-bit-LE encodings,
+  cross-validated against ffprobe's external read of the same frame.
+  The SFREQ (sample-rate) and AMODE (channel) value tables remain a
+  docs gap, so `sample_rate_hz()` / `channel_count()` still return
+  `None`.
+
 - Round 179 (2026-05-29) — lazy `iter_syncs` / `SyncIterator`
   streaming counterpart to `find_all_syncs`, plus a small accessor
   surface on `SyncWordEncoding` and `SyncMatch` derived from the

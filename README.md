@@ -5,6 +5,28 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 185 — `RATE` → targeted bit-rate (ETSI §5.3.1 Table 5-7).**
+Round 185 (2026-05-29) wires ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-7
+("RATE parameter versus targeted bit-rate", transcribed in
+`docs/audio/dts/dts-core-extracts.md` §1) into the header resolvers.
+The new `TargetedBitRate` enum distinguishes the 25 fixed targeted
+rates (`Fixed(bps)`), the open-mode code `0b11101` (`Open`), and
+every reserved code (`Invalid`); `DtsFrameHeader::targeted_bit_rate()`
+returns it, and `DtsFrameHeader::bit_rate_bps()` — which had returned
+`None` since round 1 — now resolves the fixed codes to bits per
+second (e.g. code `0b01111` → `Some(768_000)`). The mapping is
+cross-validated against the existing 768 kb/s ffmpeg black-box
+fixture, whose `RATE` index 15 now resolves to exactly the 768 000 bps
+ffprobe reports for the same frame. Tables 5-8 (`DYNF`) / 5-9
+(`TIMEF`) from the same clause are present/not-present flags already
+surfaced as `dynamic_range` / `time_stamp`; their field docs now cite
+the tables. One new exhaustive test walks all 32 `RATE` codes
+(25 fixed + open + 6 invalid); the black-box tests assert the
+768 000 bps result across the raw-BE, 14-bit-BE, and 14-bit-LE input
+encodings. This closes the bitrate half of docs gap #928; the
+SFREQ (sample-rate) and AMODE (channel-count) value tables remain
+open (`sample_rate_hz()` / `channel_count()` still return `None`).
+
 **Round 179 — `iter_syncs` lazy streaming iterator + `SyncWordEncoding` / `SyncMatch` accessor surface.**
 Round 179 (2026-05-29) adds a streaming counterpart to the
 round-151 `find_all_syncs` bulk helper plus a small accessor surface
@@ -369,7 +391,8 @@ exposes:
   bad sync, NBLKS < 5, frame size < 95, truncated header — at the
   packet boundary); `receive_frame` returns
   `Error::Unsupported` because PCM output remains gated on the
-  SFREQ/RATE/AMODE value tables landing in `docs/` (see below).
+  SFREQ/AMODE value tables (and the subband/QMF decode path) landing
+  in `docs/` (see below). The RATE table landed in round 185.
 - `probe_dts(&[u8]) -> Confidence` — standalone confidence helper:
   returns `1.0` on a valid frame header at offset 0, `0.5` on a
   truncated buffer (sync present but body short), `0.0` on
@@ -389,24 +412,34 @@ crate-local `Error` / `Result` types remain.
 
 `docs/audio/dts/wiki/DTS.wiki` documents the frame-header bit
 layout but only says *"See table below"* for the value tables of
-three fields. The wiki page itself was mirrored as-is, so those
-tables are not in `docs/`:
+three fields. The wiki page itself was mirrored as-is, so some of
+those tables are not in `docs/`:
 
 1. **Sample-frequency index → Hz**: SFREQ is a 4-bit code; the
    mapping table (16 entries) is missing. `DtsFrameHeader::sample_rate_hz()`
    returns `None` until it lands.
-2. **Transmission-bitrate index → bps**: RATE is a 5-bit code; the
-   mapping table (32 entries, often including reserved / open-rate
-   sentinels) is missing. `DtsFrameHeader::bit_rate_bps()` returns
-   `None`.
+2. **Transmission-bitrate index → bps**: *Resolved in round 185.*
+   ETSI TS 102 114 §5.3.1 Table 5-7 (transcribed in
+   `docs/audio/dts/dts-core-extracts.md` §1) gives the 25 fixed
+   targeted rates plus the open (`0b11101`) and invalid codes.
+   `DtsFrameHeader::bit_rate_bps()` now resolves the fixed codes (e.g.
+   code `0b01111` → `Some(768_000)`, cross-validated against the
+   768 kb/s ffmpeg black-box fixture); `DtsFrameHeader::targeted_bit_rate()`
+   preserves the open/invalid distinction via `TargetedBitRate`.
+   (Tables 5-8 `DYNF` / 5-9 `TIMEF` from the same clause are
+   present/not-present flags already surfaced as `dynamic_range` /
+   `time_stamp`.)
 3. **AMODE → channel-count / layout**: AMODE 0..=15 is documented
    as "standard layouts" but the layout descriptions (mono, dual-
    mono, L+R, L+R+C, …) are not in the snapshot.
    `DtsFrameHeader::channel_count()` returns `None`.
 
-A clean-room recipe for filling the gap: cite ETSI TS 102 114
-§5.3.1 tables 5.7 / 5.8 / 5.9 verbatim (the spec is public on the
-ETSI portal) and mirror them into `docs/audio/dts/spec/`.
+A clean-room recipe for filling the remaining SFREQ / AMODE gaps:
+cite the ETSI TS 102 114 §5.3.1 sample-frequency and channel-mode
+value tables verbatim (the spec is staged at
+`docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf`) and
+transcribe them into `docs/audio/dts/dts-core-extracts.md` alongside
+the Table 5-7 / 5-8 / 5-9 entries already there.
 
 ### Round-3 docs gaps
 
