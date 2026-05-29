@@ -8,6 +8,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 189 (2026-05-30) — 14-bit container-byte frame-advance
+  accessor derived from
+  `docs/audio/dts/dts-core-extracts.md` §3.3 (ETSI TS 102 114 V1.3.1
+  §5.3.1 `FSIZE+1` definition combined with the §6.1.3.1 / §6.3.x
+  28-bit-word-boundary invariant). New public surface:
+  - `DtsFrameHeader::frame_size_container_bytes(SyncWordEncoding) -> u32`
+    — returns the container-byte distance from this frame's
+    syncword to the next frame's syncword for each of the four wire
+    encodings. For `RawBigEndian` / `RawLittleEndian` the answer is
+    just `frame_size_bytes` (FSIZE+1 already counts on-wire
+    container bytes of the 16-bit-per-word stream). For
+    `FourteenBitBigEndian` / `FourteenBitLittleEndian` the answer is
+    `2 * ceil(frame_size_bytes * 8 / 14)` container bytes (one
+    16-bit container word carries 14 logical bits per §3.2 /
+    §6.1.3.1; the partial final word is padded out to the next
+    two-container-word boundary per the ETSI alignment invariant).
+
+  Seven new unit tests lock the formula down:
+  raw-equals-`frame_size_bytes` for both raw encodings;
+  1024-logical → 1172-container; minimum 95 → 110 / maximum
+  16384 → 18726 container-byte advance; strict-greater-than-raw
+  + closed-form `16/14` scaling upper bound on a spread of frame
+  sizes; BE/LE equivalence on both pairs (the 14-bit-LE byte count
+  matches 14-bit-BE because LE is the pairwise byte-swap of BE per
+  the wiki); the 14-bit advance is always even (the §3.3 / §6.1.3.1
+  28-bit-word-boundary invariant forces the per-frame step to land
+  on a two-container-word boundary); and a closed-form cross-check
+  `2 * ceil(frame_size_bytes * 8 / 14)`. This closes the
+  analytical half of round-6 docs gap #7; the empirical half (wiring
+  the advance + a streaming per-frame 14↔16-bit unpacker into
+  `iter_frames`) is now a focused follow-up rather than blocked.
+
 - Round 185 (2026-05-29) — transmission bit-rate resolution from
   ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-7 (transcribed in
   `docs/audio/dts/dts-core-extracts.md` §1). New public surface:

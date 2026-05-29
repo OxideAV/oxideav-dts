@@ -545,6 +545,79 @@ impl DtsFrameHeader {
         debug_assert_eq!(bits % 8, 0, "DTS header window must be byte-aligned");
         (bits / 8) as usize
     }
+
+    /// Container-byte distance from this frame's syncword to the next
+    /// frame's syncword, for a given wire encoding.
+    ///
+    /// Derived from **ETSI TS 102 114 V1.3.1 §5.3.1** (the `FSIZE`
+    /// definition) and the 14-bit container-byte advance rule
+    /// transcribed in `docs/audio/dts/dts-core-extracts.md` §3.3:
+    ///
+    /// - For the raw 16-bit encodings (`RawBigEndian` /
+    ///   `RawLittleEndian`) the answer is just
+    ///   [`Self::frame_size_bytes`]: `FSIZE+1` already counts bytes of
+    ///   the on-wire 16-bit-word stream, which is the same as the
+    ///   container-byte stream when no 14-bit re-packing is in effect.
+    /// - For the 14-bit-packed encodings (`FourteenBitBigEndian` /
+    ///   `FourteenBitLittleEndian`) the same `FSIZE+1` logical bytes
+    ///   are carried in 14-bit-payload containers. Per §3.3 each
+    ///   container word (= 16 container bits = **2 container bytes**)
+    ///   carries 14 logical bits, so the span occupies
+    ///   `ceil((FSIZE+1) * 8 / 14)` container **words** =
+    ///   `2 * ceil((FSIZE+1) * 8 / 14)` container bytes (the partial
+    ///   final word is padded out — the ETSI "28-bit-word boundary"
+    ///   invariant in §6.1.3.1 / §6.3.x guarantees the next syncword
+    ///   re-aligns on a 28-bit (i.e. two-container-word) boundary).
+    ///
+    /// The return type is [`u32`] because `frame_size_bytes` tops out
+    /// at 16 384, the 14-bit scaling factor is 16 / 14 ≈ 1.143, and
+    /// `16_384 * 16 / 14 + 1` comfortably fits.
+    ///
+    /// This accessor is the analytical half of round-6 docs gap #7
+    /// (see `README.md`'s "Docs gaps"): it gives a multi-frame iterator
+    /// the byte-count it needs to step from one 14-bit-packed sync to
+    /// the next. The empirical half — actually walking a 14-bit
+    /// container stream through [`crate::FrameIterator`] — is a
+    /// follow-up that needs a streaming 14-bit-to-16-bit unpacker for
+    /// the header window of each frame (because the parser reads its
+    /// fields from the unpacked stream); this accessor lets that
+    /// follow-up land without the formula having to be re-derived
+    /// against `dts-core-extracts.md` §3.3 from scratch.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use oxideav_dts::{parse_frame_header, SyncWordEncoding};
+    ///
+    /// // A 1024-byte raw-BE frame: container advance equals
+    /// // frame_size_bytes exactly.
+    /// # let bytes: &[u8] = &[];
+    /// # if let Ok(hdr) = parse_frame_header(bytes) {
+    /// assert_eq!(
+    ///     hdr.frame_size_container_bytes(SyncWordEncoding::RawBigEndian),
+    ///     hdr.frame_size_bytes as u32,
+    /// );
+    /// // The same frame's 14-bit-packed container distance is
+    /// // ceil(1024 * 8 / 14) words = 586 words = 1172 bytes.
+    /// # }
+    /// ```
+    pub fn frame_size_container_bytes(&self, encoding: SyncWordEncoding) -> u32 {
+        let logical_bytes = self.frame_size_bytes as u32;
+        if encoding.is_raw_16bit() {
+            // FSIZE+1 already counts on-wire container bytes for the
+            // raw encodings (the wiki notes raw-LE is the
+            // 16-bit-word-swap of raw-BE; byte count is preserved).
+            return logical_bytes;
+        }
+        // 14-bit-packed: 14 logical bits per 16 container bits.
+        // ceil(logical_bytes * 8 / 14) container words; one word = 2
+        // container bytes. Equivalent integer form: round the
+        // logical-bit count up to the next multiple of 14, then
+        // multiply by 2/14 = 1/7.
+        let logical_bits = logical_bytes * 8;
+        let container_words = logical_bits.div_ceil(14);
+        container_words * 2
+    }
 }
 
 /// Serialise a [`DtsFrameHeader`] back into the raw **little-endian**
@@ -2294,6 +2367,185 @@ mod tests {
             hdr_raw.header_byte_length(),
             hdr_packed.header_byte_length()
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Round 189 — frame_size_container_bytes(): 14-bit container-byte
+    // advance rule per ETSI TS 102 114 V1.3.1 §5.3.1 + the
+    // 14↔16-bit advance synthesis in
+    // `docs/audio/dts/dts-core-extracts.md` §3.3.
+    //
+    // For the raw encodings the advance equals `frame_size_bytes`
+    // verbatim (FSIZE+1 already counts container bytes). For the
+    // 14-bit encodings the same logical span occupies
+    // `ceil(frame_size_bytes * 8 / 14)` container words = twice that
+    // many container bytes (one container word = 2 container bytes
+    // = 16 container bits = 14 logical bits).
+    // ---------------------------------------------------------------
+
+    /// Returning the bare `frame_size_bytes` for the two raw 16-bit
+    /// encodings is the explicit `FSIZE+1` contract from
+    /// `docs/audio/dts/dts-core-extracts.md` §3.1.
+    #[test]
+    fn frame_size_container_bytes_raw_equals_frame_size_bytes() {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 0, 0, 0, 0, None, 0);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert_eq!(hdr.frame_size_bytes, 1024);
+        assert_eq!(
+            hdr.frame_size_container_bytes(SyncWordEncoding::RawBigEndian),
+            1024,
+        );
+        assert_eq!(
+            hdr.frame_size_container_bytes(SyncWordEncoding::RawLittleEndian),
+            1024,
+        );
+    }
+
+    /// 14-bit container advance for a 1024-byte logical frame is
+    /// `ceil(1024 * 8 / 14)` container words = `ceil(8192 / 14)` =
+    /// 586 words = 1172 container bytes (the ETSI §6.1.3.1 /§6.3.x
+    /// "28-bit-word boundary" invariant — two container words per
+    /// 28 logical bits — guarantees the next syncword re-aligns).
+    #[test]
+    fn frame_size_container_bytes_14bit_1024_logical_is_1172_container() {
+        let bytes = build_be_header(1, 31, 0, 16, 1023, 0, 0, 0, 0, None, 0);
+        let hdr = parse_frame_header(&bytes).unwrap();
+        assert_eq!(hdr.frame_size_bytes, 1024);
+        assert_eq!(
+            hdr.frame_size_container_bytes(SyncWordEncoding::FourteenBitBigEndian),
+            1172,
+        );
+        assert_eq!(
+            hdr.frame_size_container_bytes(SyncWordEncoding::FourteenBitLittleEndian),
+            1172,
+        );
+    }
+
+    /// Minimum-frame (FSIZE+1 = 95) and maximum-frame (FSIZE+1 =
+    /// 16384) advances exercise the formula's bottom and top.
+    /// `ceil(95 * 8 / 14)` = `ceil(760 / 14)` = 55 words = 110
+    /// container bytes; `ceil(16384 * 8 / 14)` = `ceil(131072 / 14)`
+    /// = 9363 words = 18726 container bytes (the last container word
+    /// carries 760 mod 14 = 4 leftover bits in the minimum case
+    /// and 131072 mod 14 = 10 leftover bits in the maximum case;
+    /// each leftover bit-count is non-zero so the closed-form
+    /// ceiling rounds up to a full container word).
+    #[test]
+    fn frame_size_container_bytes_14bit_min_and_max() {
+        let bytes_min = build_be_header(1, 31, 0, 5, 94, 0, 0, 0, 0, None, 0);
+        let hdr_min = parse_frame_header(&bytes_min).unwrap();
+        assert_eq!(hdr_min.frame_size_bytes, 95);
+        assert_eq!(
+            hdr_min.frame_size_container_bytes(SyncWordEncoding::FourteenBitBigEndian),
+            110,
+        );
+
+        let bytes_max = build_be_header(1, 31, 0, 127, 16383, 0, 0, 0, 0, None, 0);
+        let hdr_max = parse_frame_header(&bytes_max).unwrap();
+        assert_eq!(hdr_max.frame_size_bytes, 16384);
+        assert_eq!(
+            hdr_max.frame_size_container_bytes(SyncWordEncoding::FourteenBitBigEndian),
+            18726,
+        );
+    }
+
+    /// Encoding-agnostic invariant: the 14-bit container advance is
+    /// always strictly greater than the raw advance (because 16
+    /// container bits carry only 14 logical bits, so any non-zero
+    /// logical span needs at least one extra container byte) and the
+    /// difference is bounded by `ceil(frame_size_bytes * 2 / 14) +
+    /// 1` — i.e. the 14/16 scaling overhead plus at most one
+    /// rounding-up word.
+    #[test]
+    fn frame_size_container_bytes_14bit_is_strictly_greater_than_raw() {
+        for fsize_m1 in [94u32, 511, 1023, 2047, 4095, 8191, 16383] {
+            let bytes = build_be_header(1, 31, 0, 16, fsize_m1, 0, 0, 0, 0, None, 0);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            let raw = hdr.frame_size_container_bytes(SyncWordEncoding::RawBigEndian);
+            let packed = hdr.frame_size_container_bytes(SyncWordEncoding::FourteenBitBigEndian);
+            assert!(
+                packed > raw,
+                "14-bit container advance must exceed raw (fsize_bytes={}, raw={}, packed={})",
+                hdr.frame_size_bytes,
+                raw,
+                packed,
+            );
+            // Upper bound: scaling factor is exactly 16/14, plus
+            // at most one extra container word (2 bytes) of
+            // round-up.
+            let ub = (raw * 16).div_ceil(14) + 2;
+            assert!(
+                packed <= ub,
+                "14-bit advance overshoots scaling bound (fsize_bytes={}, raw={}, packed={}, ub={})",
+                hdr.frame_size_bytes,
+                raw,
+                packed,
+                ub,
+            );
+        }
+    }
+
+    /// BE vs LE container-byte advance is identical: 14-bit-LE is the
+    /// pairwise byte-swap of 14-bit-BE per the wiki, so the
+    /// container-byte count is invariant under the BE/LE flip (and
+    /// likewise for the raw pair, where raw-LE = 16-bit-word-swap
+    /// of raw-BE).
+    #[test]
+    fn frame_size_container_bytes_be_le_equivalence() {
+        for fsize_m1 in [94u32, 1023, 16383] {
+            let bytes = build_be_header(1, 31, 0, 16, fsize_m1, 0, 0, 0, 0, None, 0);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(
+                hdr.frame_size_container_bytes(SyncWordEncoding::RawBigEndian),
+                hdr.frame_size_container_bytes(SyncWordEncoding::RawLittleEndian),
+            );
+            assert_eq!(
+                hdr.frame_size_container_bytes(SyncWordEncoding::FourteenBitBigEndian),
+                hdr.frame_size_container_bytes(SyncWordEncoding::FourteenBitLittleEndian),
+            );
+        }
+    }
+
+    /// The container-byte advance is always even for the 14-bit
+    /// encodings because a partial 14-bit word is padded out to a
+    /// full 16-bit (two-byte) container by the §3.3 / §6.1.3.1
+    /// "28-bit-word boundary" invariant — the next syncword
+    /// re-aligns on a two-container-word boundary so the per-frame
+    /// step lands on an even byte count.
+    #[test]
+    fn frame_size_container_bytes_14bit_is_even() {
+        for fsize_m1 in [94u32, 100, 511, 1023, 1535, 16383] {
+            let bytes = build_be_header(1, 31, 0, 16, fsize_m1, 0, 0, 0, 0, None, 0);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            let n = hdr.frame_size_container_bytes(SyncWordEncoding::FourteenBitBigEndian);
+            assert_eq!(
+                n % 2,
+                0,
+                "14-bit container advance must be even (fsize_bytes={}, advance={})",
+                hdr.frame_size_bytes,
+                n,
+            );
+        }
+    }
+
+    /// Manual closed-form cross-check: `frame_size_container_bytes`
+    /// for a 14-bit encoding must equal
+    /// `2 * ceil(frame_size_bytes * 8 / 14)` (i.e. the rounded-up
+    /// container-word count times two container bytes per word).
+    #[test]
+    fn frame_size_container_bytes_14bit_matches_closed_form() {
+        for fsize_m1 in [94u32, 200, 400, 1023, 8192, 16383] {
+            let bytes = build_be_header(1, 31, 0, 16, fsize_m1, 0, 0, 0, 0, None, 0);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            let logical_bits = (hdr.frame_size_bytes as u32) * 8;
+            let expected = 2 * logical_bits.div_ceil(14);
+            let actual = hdr.frame_size_container_bytes(SyncWordEncoding::FourteenBitBigEndian);
+            assert_eq!(
+                expected, actual,
+                "closed-form mismatch (fsize_bytes={}, expected={}, actual={})",
+                hdr.frame_size_bytes, expected, actual,
+            );
+        }
     }
 
     // ---------------------------------------------------------------

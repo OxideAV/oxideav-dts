@@ -5,6 +5,40 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 189 — 14-bit container-byte frame-advance accessor (ETSI §5.3.1 + §6.1.3.1).**
+Round 189 (2026-05-30) adds a single new accessor,
+`DtsFrameHeader::frame_size_container_bytes(SyncWordEncoding) -> u32`,
+that returns the container-byte distance from this frame's syncword
+to the next frame's syncword for each of the four wire encodings.
+For the raw 16-bit encodings (`RawBigEndian` / `RawLittleEndian`)
+the answer is just `frame_size_bytes`: per ETSI TS 102 114 V1.3.1
+§5.3.1 the `FSIZE+1` field already counts on-wire container bytes
+of the 16-bit-per-word stream. For the 14-bit-packed encodings
+(`FourteenBitBigEndian` / `FourteenBitLittleEndian`) the same
+`FSIZE+1` logical bytes are carried at 14 logical bits per 2
+container bytes (one 16-bit container word carries 14 payload bits
+per §3.2 / §6.1.3.1), so the span occupies
+`ceil(frame_size_bytes * 8 / 14)` container words =
+`2 * ceil(frame_size_bytes * 8 / 14)` container bytes. The
+formula is the analytical half of round-6 docs gap #7,
+transcribed verbatim from
+`docs/audio/dts/dts-core-extracts.md` §3.3 (which synthesises
+ETSI §5.3.1's `FSIZE` definition with the §6.1.3.1 / §6.3.x
+"28-bit-word boundary" invariant). Seven new unit tests lock the
+formula down: raw-equals-`frame_size_bytes`,
+1024-logical→1172-container, minimum 95→110 / maximum 16384→18726
+container-byte advance, strict-greater-than-raw + closed-form
+`16/14` scaling upper bound, BE/LE equivalence (both raw and
+14-bit pairs), the 14-bit advance is always even (the
+28-bit-boundary invariant forces a two-container-word step), and a
+closed-form cross-check on a spread of frame sizes. No new docs
+gap; the formula's empirical half — actually walking a 14-bit
+container stream through `iter_frames` — is still pending a
+streaming 14↔16-bit per-frame header unpacker (the parser reads
+fields from the unpacked stream, so the iterator needs that
+conversion step before it can call `parse_frame_header_14bit` on
+each frame slice).
+
 **Round 185 — `RATE` → targeted bit-rate (ETSI §5.3.1 Table 5-7).**
 Round 185 (2026-05-29) wires ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-7
 ("RATE parameter versus targeted bit-rate", transcribed in
@@ -471,19 +505,25 @@ the Table 5-7 / 5-8 / 5-9 entries already there.
 
 ### Round-6 docs gaps
 
-7. **14-bit container-byte advance rule**: the wiki snapshot
-   documents `frame_size_bytes` as the byte length of the unpacked
-   raw-16-bit stream; the corresponding container-byte advance for
-   the 14-bit-packed encodings (the byte distance from one
-   14-bit-packed sync to the next) is not enumerated. The natural
-   `frame_size_bytes * 8 / 14` (rounded up to the next even byte)
-   estimate is plausible but unverified, so the round-6
-   `iter_frames` helper refuses to walk 14-bit container streams
-   and yields `Error::UnsupportedFourteenBit` for them. Once ETSI
-   TS 102 114 §5.3 / §6 documents the rule it can be wired into
-   `iter_frames` and the gap closes. The single-frame
-   `parse_frame_header_14bit` entry point is unaffected — it
-   parses one already-sliced 14-bit frame at a time.
+7. **14-bit container-byte advance rule**: *Analytical half landed
+   in round 189.* The 14-bit-packed container-byte distance from
+   one sync to the next is now exposed through
+   `DtsFrameHeader::frame_size_container_bytes(SyncWordEncoding)`:
+   `frame_size_bytes` for the raw encodings (per ETSI §5.3.1's
+   `FSIZE+1` byte definition) and
+   `2 * ceil(frame_size_bytes * 8 / 14)` for the 14-bit encodings
+   (per the §3.3 advance synthesis in
+   `docs/audio/dts/dts-core-extracts.md`, which combines §5.3.1's
+   `FSIZE` rule with the §6.1.3.1 / §6.3.x 28-bit-word-boundary
+   invariant — 14 logical bits per 16-container-bit word, with a
+   per-frame round-up to the next two-container-word boundary).
+   The `iter_frames` helper still refuses 14-bit container streams
+   and yields `Error::UnsupportedFourteenBit` because the iterator
+   would also need a streaming 14↔16-bit unpacker to land each
+   frame's header into the form `parse_frame_header_14bit` reads
+   from. That follow-up can now use the new accessor for its
+   byte-step, so the empirical half of the gap reduces to "wire the
+   advance + an inline per-frame unpacker into the iterator".
 
 ## License
 
