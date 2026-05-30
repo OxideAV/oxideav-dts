@@ -6,6 +6,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.1](https://github.com/OxideAV/oxideav-dts/releases/tag/v0.0.1) - 2026-05-30
+
+### Other
+
+- round 192: iter_frames_14bit — 14-bit container-stream frame walker
+- round 189: frame_size_container_bytes() — 14-bit advance per ETSI §5.3.1 / §6.1.3.1
+- RATE → targeted bit-rate via ETSI §5.3.1 Table 5-7
+- round 179: iter_syncs lazy iterator + SyncWordEncoding/SyncMatch accessors
+- round 165: find_next_sync first-byte gate (252/256 short-circuit)
+- round 159: iter_frames_resync error-tolerant frame walker
+- round 151: find_all_syncs bulk-scan helper + raw-LE iter_frames coverage
+- round 148: encode_frame_header_14bit_{be,le} — all 4 sync encodings round-trip
+- round 145: raw-LE encoder + bidirectional 14<->16-bit container pack/unpack
+- round 141: encode_frame_header_be — parse↔encode round-trip on header window
+- surface header->SUBFRAMES boundary as bit/byte length
+- round 6: multi-frame iterator + resync helper
+- round 5: post-CRC 16-bit trailing window (multirate / version / copy / PCMR / sum / dialnorm)
+- round 4: oxideav-core Decoder integration + ci-standalone job
+- round 3: trailing-13-bit fields + optional header CRC
+- round 2: 14-bit sync unpacking + parse_frame_header_14bit
+- round 1: frame-header parser per ETSI TS 102 114 §5.3
+- orphan rebuild: clean-room scaffold post 2026-05-18 audit
+
 ### Added
 
 - Round 192 (2026-05-30) — 14-bit container-byte frame iterator
