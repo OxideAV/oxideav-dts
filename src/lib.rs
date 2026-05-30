@@ -277,6 +277,12 @@
 //!   walker + resync helpers. `find_next_sync` / `iter_frames` /
 //!   `FrameIterator` / `FrameView` / `SyncMatch` added in round 6;
 //!   `find_all_syncs` added in round 151.
+//! - [`iter_frames_14bit`] / [`FrameIterator14`] / [`FrameView14`] —
+//!   14-bit-packed container-stream frame walker (added in round 192).
+//!   Walks the same kind of self-delimited Core stream as
+//!   [`iter_frames`] but in the 14-bit-per-container-word domain; uses
+//!   the round-189 [`DtsFrameHeader::frame_size_container_bytes`]
+//!   accessor for the per-frame container-byte advance.
 //! - [`iter_syncs`] / [`SyncIterator`] — lazy streaming counterpart
 //!   to [`find_all_syncs`] (added in round 179).
 //! - [`iter_frames_resync`] / [`FrameIteratorResync`] /
@@ -318,8 +324,9 @@ pub use crate::header::{
     FrameType, LfeMode, SyncWordEncoding, TargetedBitRate,
 };
 pub use crate::iter::{
-    find_all_syncs, find_next_sync, iter_frames, iter_frames_resync, iter_syncs, FrameIterator,
-    FrameIteratorResync, FrameView, ResyncCause, ResyncEvent, SyncIterator, SyncMatch,
+    find_all_syncs, find_next_sync, iter_frames, iter_frames_14bit, iter_frames_resync, iter_syncs,
+    FrameIterator, FrameIterator14, FrameIteratorResync, FrameView, FrameView14, ResyncCause,
+    ResyncEvent, SyncIterator, SyncMatch,
 };
 pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder};
 
@@ -353,6 +360,13 @@ pub enum Error {
     /// 14-bit-packed bytes into the raw-BE form. This variant
     /// remains for callers that route by sync up-front.
     UnsupportedFourteenBit,
+    /// A raw 16-bit DTS sync was detected at the 14-bit-input entry
+    /// point [`crate::iter_frames_14bit`]. Symmetric counterpart to
+    /// [`Self::UnsupportedFourteenBit`]: the 14-bit iterator only
+    /// walks 14-bit-packed container streams, so a raw-16-bit sync at
+    /// the cursor is out-of-domain. Callers walking raw 16-bit input
+    /// should switch to [`crate::iter_frames`].
+    UnsupportedRaw16Bit,
     /// The decoded `NBLKS` field reported fewer than 5 blocks per
     /// frame — the wiki/spec disallow this.
     BlockCountOutOfRange {
@@ -398,6 +412,12 @@ impl core::fmt::Display for Error {
                 "oxideav-dts: 14-bit DTS sync detected at the 16-bit-input \
                  entry point; call parse_frame_header_14bit (or \
                  unpack_14bit_to_16bit + parse_frame_header) instead"
+            ),
+            Error::UnsupportedRaw16Bit => write!(
+                f,
+                "oxideav-dts: raw 16-bit DTS sync detected at the \
+                 14-bit-input entry point; call iter_frames (or \
+                 parse_frame_header) instead"
             ),
             Error::BlockCountOutOfRange { blocks } => write!(
                 f,

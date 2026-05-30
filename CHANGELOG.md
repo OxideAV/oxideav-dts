@@ -8,6 +8,49 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 192 (2026-05-30) — 14-bit container-byte frame iterator
+  (`iter_frames_14bit`). Closes the empirical half of round-6 docs
+  gap #7 by wiring the round-189
+  `DtsFrameHeader::frame_size_container_bytes` accessor into a
+  multi-frame walker that operates directly on 14-bit-packed
+  container bytes (no caller-side unpack step required). New public
+  surface:
+  - `iter_frames_14bit(bytes) -> FrameIterator14<'_>` — convenience
+    constructor mirroring `iter_frames`.
+  - `FrameIterator14<'a>` — `Iterator<Item = Result<FrameView14<'a>>>`.
+    Each step calls `find_next_sync`, accepts only 14-bit syncs
+    (raw 16-bit syncs at the cursor yield `Error::UnsupportedRaw16Bit`
+    and terminate — the symmetric counterpart to the round-6
+    `Error::UnsupportedFourteenBit` behaviour on `iter_frames`), calls
+    `parse_frame_header_14bit` at the matched offset to surface the
+    header, and advances the cursor by
+    `header.frame_size_container_bytes(encoding)` container bytes.
+    Truncated tails surface `Error::UnexpectedEof` at the boundary
+    (mirroring `iter_frames`'s contract).
+  - `FrameView14<'a>` — per-step container-domain view. Fields
+    differ in semantics from `FrameView` to avoid an overloaded
+    `len`: here `len` is the container-byte advance (= the
+    round-189 formula result) and `data` is the container-byte
+    window of the frame. The unpacked-domain logical byte count is
+    still available as `header.frame_size_bytes`.
+  - `Error::UnsupportedRaw16Bit` — new variant, symmetric
+    counterpart to `Error::UnsupportedFourteenBit`. Surfaced by
+    `iter_frames_14bit` when a raw 16-bit sync is encountered at
+    the cursor. Mapped to `oxideav_core::Error::Unsupported`
+    through the registry's `From<DtsError>` impl.
+
+  Ten new unit tests cover: single-frame BE / LE walks; back-to-back
+  BE frames with cursor + length cross-check; leading garbage before
+  the first sync; raw-16-bit sync rejection; empty buffer; no-sync
+  buffer; truncated tail reporting `UnexpectedEof`; `view.data`
+  round-trips through `parse_frame_header_14bit`; `cursor()`
+  advances by exactly `frame_size_container_bytes` per step. Two
+  new integration tests in `tests/multi_frame_iter.rs` repackage
+  the bundled ffmpeg 5-frame fixture (5 × 1024 raw-BE bytes) into
+  14-bit-packed BE and LE streams (5 × 1172 container bytes each)
+  and verify the iterator walks all five frames with the expected
+  header fields and container-byte length.
+
 - Round 189 (2026-05-30) — 14-bit container-byte frame-advance
   accessor derived from
   `docs/audio/dts/dts-core-extracts.md` §3.3 (ETSI TS 102 114 V1.3.1

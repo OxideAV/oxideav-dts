@@ -17,8 +17,9 @@
 //! `frame_size_bytes == 1024`.
 
 use oxideav_dts::{
-    find_next_sync, iter_frames, iter_frames_resync, parse_frame_header, FrameType, ResyncCause,
-    ResyncEvent, SyncWordEncoding,
+    find_next_sync, iter_frames, iter_frames_14bit, iter_frames_resync, pack_16bit_to_14bit,
+    parse_frame_header, FourteenBitByteOrder, FrameType, ResyncCause, ResyncEvent,
+    SyncWordEncoding,
 };
 
 const FIVE_FRAME_STREAM: &[u8] = include_bytes!("fixtures/dts_5_frames.bin");
@@ -201,6 +202,88 @@ fn iter_frames_resync_recovers_frames_after_corrupt_header() {
     let f5 = it.next().unwrap().expect("frame 5 ok");
     assert_eq!(f5.offset, 4096);
     assert!(it.next().is_none());
+}
+
+/// Round 192 — repack the ffmpeg 5-frame raw-BE fixture into a
+/// 14-bit-packed BE container stream and walk it through
+/// `iter_frames_14bit`. Each frame must surface with the same header
+/// fields the raw-BE iterator reports, plus a container-byte length
+/// equal to `frame_size_container_bytes(FourteenBitBigEndian)` for
+/// the round-189 formula (`2 * ceil(1024 * 8 / 14) = 1172`).
+#[test]
+fn iter_frames_14bit_walks_repackaged_ffmpeg_fixture_be() {
+    // Pack each 1024-byte raw-BE frame separately so the container
+    // stream is a straight concatenation of per-frame 14-bit packings
+    // (no padding alignment gymnastics — each frame's container span
+    // is exactly the `frame_size_container_bytes` count the parser
+    // exposes).
+    let mut stream = Vec::new();
+    for chunk in FIVE_FRAME_STREAM.chunks_exact(1024) {
+        let (packed, _) = pack_16bit_to_14bit(chunk, FourteenBitByteOrder::BigEndian);
+        // 1024 logical bytes × 8 = 8192 bits ⇒ ceil(8192 / 14) = 586
+        // container words ⇒ 1172 container bytes.
+        assert_eq!(packed.len(), 1172);
+        stream.extend_from_slice(&packed);
+    }
+    assert_eq!(stream.len(), 5 * 1172);
+
+    let frames: Vec<_> = iter_frames_14bit(&stream)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("every repackaged 14-bit frame must parse");
+    assert_eq!(frames.len(), 5);
+    for (i, frame) in frames.iter().enumerate() {
+        assert_eq!(frame.offset, i * 1172, "frame {i} container offset");
+        assert_eq!(frame.len, 1172, "frame {i} container length");
+        assert_eq!(frame.data.len(), 1172);
+        assert_eq!(
+            frame.header.sync_word_encoding,
+            SyncWordEncoding::FourteenBitBigEndian,
+        );
+        // The repacked frame must report the same `frame_size_bytes`
+        // (logical/unpacked byte count) as the original raw-BE frame.
+        assert_eq!(frame.header.frame_size_bytes, 1024);
+        assert_eq!(frame.header.blocks_per_frame, 15);
+        assert_eq!(frame.header.amode, 2);
+        assert_eq!(frame.header.sfreq_index, 13);
+        assert_eq!(frame.header.rate_index, 15);
+        // Cross-check: the container-byte advance the accessor reports
+        // equals the iterator's chosen frame length.
+        assert_eq!(
+            frame
+                .header
+                .frame_size_container_bytes(SyncWordEncoding::FourteenBitBigEndian)
+                as usize,
+            frame.len,
+        );
+    }
+}
+
+/// Same repacking exercise as above but with the LE container order.
+/// Each frame's container length is identical (1172 bytes) — the
+/// `frame_size_container_bytes` formula does not depend on
+/// endianness — and the only on-wire difference is the per-container
+/// byte-swap.
+#[test]
+fn iter_frames_14bit_walks_repackaged_ffmpeg_fixture_le() {
+    let mut stream = Vec::new();
+    for chunk in FIVE_FRAME_STREAM.chunks_exact(1024) {
+        let (packed, _) = pack_16bit_to_14bit(chunk, FourteenBitByteOrder::LittleEndian);
+        assert_eq!(packed.len(), 1172);
+        stream.extend_from_slice(&packed);
+    }
+    let frames: Vec<_> = iter_frames_14bit(&stream)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("every repackaged 14-bit-LE frame must parse");
+    assert_eq!(frames.len(), 5);
+    for (i, frame) in frames.iter().enumerate() {
+        assert_eq!(frame.offset, i * 1172);
+        assert_eq!(frame.len, 1172);
+        assert_eq!(
+            frame.header.sync_word_encoding,
+            SyncWordEncoding::FourteenBitLittleEndian,
+        );
+        assert_eq!(frame.header.frame_size_bytes, 1024);
+    }
 }
 
 /// Round 138 — `FrameView::payload()` against the real ffmpeg

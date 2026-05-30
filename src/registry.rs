@@ -27,7 +27,9 @@ impl From<DtsError> for CoreError {
         match e {
             DtsError::UnexpectedEof => CoreError::NeedMore,
             DtsError::NoSync => CoreError::InvalidData(e.to_string()),
-            DtsError::UnsupportedFourteenBit => CoreError::Unsupported(e.to_string()),
+            DtsError::UnsupportedFourteenBit | DtsError::UnsupportedRaw16Bit => {
+                CoreError::Unsupported(e.to_string())
+            }
             DtsError::BlockCountOutOfRange { .. } | DtsError::FrameSizeOutOfRange { .. } => {
                 CoreError::InvalidData(e.to_string())
             }

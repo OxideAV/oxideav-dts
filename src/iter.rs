@@ -58,7 +58,7 @@
 //!   round-6 docs gap #7.
 
 use crate::header::{detect_sync, parse_frame_header};
-use crate::{DtsFrameHeader, Error, Result, SyncWordEncoding};
+use crate::{parse_frame_header_14bit, DtsFrameHeader, Error, Result, SyncWordEncoding};
 
 /// Result of a [`find_next_sync`] lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -679,6 +679,184 @@ impl<'a> Iterator for SyncIterator<'a> {
 /// against [`find_all_syncs`].
 pub fn iter_syncs(bytes: &[u8]) -> SyncIterator<'_> {
     SyncIterator::new(bytes)
+}
+
+// ---------------------------------------------------------------------
+// Round 192 — 14-bit container-byte frame iterator (`iter_frames_14bit`)
+//
+// The fail-fast [`FrameIterator`] from round 6 walks raw-16-bit streams
+// only; a 14-bit sync at the cursor yields `Error::UnsupportedFourteenBit`
+// and terminates because the iterator's `frame_size_bytes` advance only
+// makes sense in the unpacked domain. Round 189 added the analytical
+// half — [`DtsFrameHeader::frame_size_container_bytes`] — which converts
+// the unpacked-domain frame size to a container-domain byte count for
+// the 14-bit encodings. Round 192 wires that accessor into a dedicated
+// 14-bit frame iterator: each step calls [`parse_frame_header_14bit`]
+// at the matched container offset (which internally unpacks just enough
+// containers to read the 13/15-byte unpacked header window), then steps
+// the cursor by `frame_size_container_bytes(encoding)` container bytes.
+//
+// We deliberately introduce a separate [`FrameView14`] type rather than
+// reusing [`FrameView`] because the semantics of `len` differ: in the
+// 14-bit case `len` is a container-byte advance derived from the
+// 14-bit `frame_size_container_bytes` formula (not the raw
+// `header.frame_size_bytes` field), and `data` borrows the
+// container-byte window — not the unpacked logical bytes. Sharing the
+// `FrameView` type would require silently overloading `len`'s meaning,
+// which is exactly the kind of footgun the wiki/`docs/` ambiguity asks
+// us to avoid.
+// ---------------------------------------------------------------------
+
+/// One step of a [`FrameIterator14`] over a 14-bit-packed DTS Core
+/// container stream.
+///
+/// Field semantics differ from [`FrameView`] in two specific ways:
+///
+/// - `len` is the **container-byte** advance produced by
+///   [`DtsFrameHeader::frame_size_container_bytes`] — not the
+///   `header.frame_size_bytes` field (which is the unpacked logical
+///   byte count). The cursor steps by `len` container bytes to land on
+///   the next sync.
+/// - `data` is the container-byte window of the frame (`bytes[offset..
+///   offset + len]`), not the unpacked logical bytes. Callers that
+///   want to decode the SUBFRAMES region must run
+///   [`crate::unpack_14bit_to_16bit`] on `data` first.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameView14<'a> {
+    /// Parsed header. `header.sync_word_encoding` is one of
+    /// [`SyncWordEncoding::FourteenBitBigEndian`] /
+    /// [`SyncWordEncoding::FourteenBitLittleEndian`] (the iterator
+    /// only walks 14-bit streams).
+    pub header: DtsFrameHeader,
+    /// Absolute container-byte offset of the frame's first sync byte
+    /// within the input passed to [`iter_frames_14bit`].
+    pub offset: usize,
+    /// Container-byte length of the frame, equal to
+    /// `header.frame_size_container_bytes(header.sync_word_encoding)`.
+    /// Always even (per ETSI §6.1.3.1's 28-bit / two-container-word
+    /// boundary invariant) and strictly greater than the unpacked
+    /// `header.frame_size_bytes` count (because 14 logical bits per
+    /// 16 container bits scales the span up by 16/14 ≈ 1.143).
+    pub len: usize,
+    /// Borrowed container bytes (`bytes[offset..offset + len]`).
+    pub data: &'a [u8],
+}
+
+/// Iterator that walks a 14-bit-packed DTS Core container stream
+/// frame by frame.
+///
+/// Each [`Iterator::next`] step:
+/// 1. Calls [`find_next_sync`] from the current cursor and accepts
+///    only 14-bit syncs ([`SyncWordEncoding::FourteenBitBigEndian`] /
+///    [`SyncWordEncoding::FourteenBitLittleEndian`]). A raw 16-bit
+///    sync at the cursor yields a single [`Error::UnsupportedRaw16Bit`]
+///    item (the symmetric counterpart to the round-6 [`FrameIterator`]
+///    behaviour on 14-bit syncs) and the iterator terminates.
+/// 2. Calls [`parse_frame_header_14bit`] at the located offset. The
+///    parser internally unpacks the first ~18 container bytes (=
+///    9 containers = 126 payload bits ≥ the 120-bit worst-case header
+///    window) and reads the 13 or 15-byte unpacked header window. A
+///    parse failure (truncated header, NBLKS or FSIZE out of range)
+///    is returned as the next item's `Err` variant; subsequent calls
+///    then return `None`.
+/// 3. On success, computes the container-byte advance via
+///    [`DtsFrameHeader::frame_size_container_bytes`] (the round-189
+///    analytical formula:
+///    `2 * ceil(frame_size_bytes * 8 / 14)` for the 14-bit
+///    encodings), yields a [`FrameView14`] borrowing the frame's
+///    container bytes from the input, and advances the cursor by
+///    that count so the following step parses the next sync.
+///
+/// Just like [`FrameIterator`], this iterator resyncs after leading
+/// garbage by calling [`find_next_sync`] up-front rather than
+/// assuming `bytes[0]` is the first sync byte. A stream with
+/// intermixed BE / LE 14-bit syncs walks correctly because each step
+/// re-reads the matched encoding from the [`SyncMatch`].
+///
+/// See [`FrameIterator`] for the raw-16-bit counterpart and the
+/// round-6 docs gap #7 for the formula's derivation.
+#[derive(Debug)]
+pub struct FrameIterator14<'a> {
+    bytes: &'a [u8],
+    cursor: usize,
+    done: bool,
+}
+
+impl<'a> FrameIterator14<'a> {
+    /// Construct an iterator positioned at byte 0 of `bytes`.
+    pub fn new(bytes: &'a [u8]) -> Self {
+        FrameIterator14 {
+            bytes,
+            cursor: 0,
+            done: false,
+        }
+    }
+
+    /// Current container-byte cursor. After a successful step the
+    /// cursor points at the next frame's expected sync byte (or one
+    /// past end-of-buffer if the previous frame was the last). After
+    /// a failure the cursor stays at the point of failure.
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+}
+
+impl<'a> Iterator for FrameIterator14<'a> {
+    type Item = Result<FrameView14<'a>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        let sync_match = find_next_sync(self.bytes, self.cursor)?;
+        match sync_match.encoding {
+            SyncWordEncoding::FourteenBitBigEndian | SyncWordEncoding::FourteenBitLittleEndian => {}
+            // Symmetric counterpart to the round-6 `iter_frames`
+            // behaviour on 14-bit syncs: this iterator only walks
+            // 14-bit container streams, so a raw 16-bit sync is
+            // out-of-domain. Surface the mismatch and terminate.
+            _ => {
+                self.done = true;
+                return Some(Err(Error::UnsupportedRaw16Bit));
+            }
+        }
+        let off = sync_match.offset;
+        let enc = sync_match.encoding;
+        let parse_result = parse_frame_header_14bit(&self.bytes[off..]);
+        let hdr = match parse_result {
+            Ok(h) => h,
+            Err(e) => {
+                self.done = true;
+                self.cursor = off;
+                return Some(Err(e));
+            }
+        };
+        // Round-189 analytical formula: container-byte advance for the
+        // 14-bit encodings is `2 * ceil(frame_size_bytes * 8 / 14)`.
+        let len = hdr.frame_size_container_bytes(enc) as usize;
+        if off + len > self.bytes.len() {
+            self.done = true;
+            self.cursor = off;
+            return Some(Err(Error::UnexpectedEof));
+        }
+        let view = FrameView14 {
+            header: hdr,
+            offset: off,
+            len,
+            data: &self.bytes[off..off + len],
+        };
+        self.cursor = off + len;
+        Some(Ok(view))
+    }
+}
+
+/// Convenience constructor — equivalent to [`FrameIterator14::new`].
+///
+/// Walks a 14-bit-packed DTS Core container stream (BE or LE — each
+/// frame's encoding is re-read from the matched sync, so mixed-encoding
+/// inputs walk correctly). For raw 16-bit streams use [`iter_frames`].
+pub fn iter_frames_14bit(bytes: &[u8]) -> FrameIterator14<'_> {
+    FrameIterator14::new(bytes)
 }
 
 #[cfg(test)]
@@ -1960,5 +2138,233 @@ mod tests {
         let streamed: Vec<SyncMatch> = iter_syncs(&buf).collect();
         let reference = reference_find_all_syncs(&buf);
         assert_eq!(streamed, reference);
+    }
+
+    // ---------------------------------------------------------------
+    // Round 192 — iter_frames_14bit (14-bit container-stream walker)
+    //
+    // Each test builds a raw-BE frame (95 bytes, the minimum FSIZE+1
+    // the spec allows), packs it through `pack_16bit_to_14bit` into a
+    // 14-bit-packed container buffer, and exercises the iterator
+    // against the resulting bytes. The container-byte advance is
+    // verified to equal `frame_size_container_bytes(encoding)`
+    // (= 110 bytes for FSIZE+1 = 95: ceil(95 * 8 / 14) * 2 = 110).
+    // ---------------------------------------------------------------
+
+    use crate::{pack_16bit_to_14bit, FourteenBitByteOrder};
+
+    /// Build a 95-byte raw-BE single-frame buffer: FTYPE=0
+    /// (termination), SHORT=0, CRC_PRESENT=0, NBLKS=5, FSIZE-1=94 (=>
+    /// frame_size_bytes = 95), all other fields zero. Mirrors the
+    /// hand-built buffers used by the round-138 payload tests above.
+    fn build_minimum_raw_be_frame() -> Vec<u8> {
+        fn push(bv: &mut Vec<bool>, value: u32, width: u32) {
+            for i in (0..width).rev() {
+                bv.push(((value >> i) & 1) == 1);
+            }
+        }
+        let mut bv: Vec<bool> = Vec::new();
+        push(&mut bv, 0x7FFE_8001, 32);
+        push(&mut bv, 0, 1); // ftype = termination
+        push(&mut bv, 0, 5);
+        push(&mut bv, 0, 1); // crc_present
+        push(&mut bv, 5, 7); // nblks
+        push(&mut bv, 94, 14); // fsize-1 = 94 -> frame_size = 95
+        push(&mut bv, 0, 6); // amode
+        push(&mut bv, 0, 4); // sfreq
+        push(&mut bv, 0, 5); // rate
+        push(&mut bv, 0, 13);
+        push(&mut bv, 0, 16); // post-CRC window
+        while bv.len() % 8 != 0 {
+            bv.push(false);
+        }
+        let mut buf = vec![0u8; 95];
+        for (i, chunk) in bv.chunks(8).enumerate() {
+            let mut b: u8 = 0;
+            for (k, bit) in chunk.iter().enumerate() {
+                if *bit {
+                    b |= 1 << (7 - k);
+                }
+            }
+            buf[i] = b;
+        }
+        // Fill SUBFRAMES region with a distinctive pattern so the
+        // container-domain frame slice can be cross-checked through
+        // a round-trip unpack later.
+        for byte in buf.iter_mut().skip(13) {
+            *byte = 0xC1;
+        }
+        buf
+    }
+
+    /// `iter_frames_14bit` parses a single 14-bit-BE frame and
+    /// reports the round-189 container-byte advance.
+    #[test]
+    fn iter_frames_14bit_walks_single_be_frame() {
+        let raw = build_minimum_raw_be_frame();
+        let (packed, _bits) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        // 95 logical bytes => ceil(95 * 8 / 14) = 55 container words
+        // => 110 container bytes.
+        assert_eq!(packed.len(), 110);
+        let mut it = iter_frames_14bit(&packed);
+        let view = it.next().expect("frame must yield").expect("must parse");
+        assert_eq!(view.offset, 0);
+        assert_eq!(view.len, 110);
+        assert_eq!(view.data.len(), 110);
+        assert_eq!(
+            view.header.sync_word_encoding,
+            SyncWordEncoding::FourteenBitBigEndian
+        );
+        assert_eq!(view.header.frame_size_bytes, 95);
+        assert_eq!(view.header.blocks_per_frame, 5);
+        assert_eq!(view.header.frame_type, FrameType::Termination);
+        // No further frames.
+        assert!(it.next().is_none());
+    }
+
+    /// Same single-frame round-trip via the LE container order.
+    #[test]
+    fn iter_frames_14bit_walks_single_le_frame() {
+        let raw = build_minimum_raw_be_frame();
+        let (packed, _bits) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::LittleEndian);
+        assert_eq!(packed.len(), 110);
+        let view = iter_frames_14bit(&packed)
+            .next()
+            .expect("frame must yield")
+            .expect("must parse");
+        assert_eq!(view.offset, 0);
+        assert_eq!(view.len, 110);
+        assert_eq!(
+            view.header.sync_word_encoding,
+            SyncWordEncoding::FourteenBitLittleEndian
+        );
+        assert_eq!(view.header.frame_size_bytes, 95);
+    }
+
+    /// Two back-to-back 14-bit-BE frames: the iterator must advance
+    /// by exactly `frame_size_container_bytes(enc) = 110` between
+    /// frames and yield both.
+    #[test]
+    fn iter_frames_14bit_walks_two_back_to_back_be_frames() {
+        let raw = build_minimum_raw_be_frame();
+        let (packed_one, _) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        // Concatenate: two back-to-back container-packed frames.
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&packed_one);
+        stream.extend_from_slice(&packed_one);
+        assert_eq!(stream.len(), 220);
+
+        let frames: Vec<_> = iter_frames_14bit(&stream)
+            .collect::<Result<Vec<_>>>()
+            .expect("both frames must parse");
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].offset, 0);
+        assert_eq!(frames[0].len, 110);
+        assert_eq!(frames[1].offset, 110);
+        assert_eq!(frames[1].len, 110);
+        // Same encoding through both steps.
+        assert_eq!(
+            frames[1].header.sync_word_encoding,
+            SyncWordEncoding::FourteenBitBigEndian
+        );
+    }
+
+    /// Leading garbage before the first 14-bit sync must resync
+    /// rather than terminate, matching `iter_frames`'s contract for
+    /// raw streams.
+    #[test]
+    fn iter_frames_14bit_handles_leading_garbage_before_first_sync() {
+        let raw = build_minimum_raw_be_frame();
+        let (packed, _) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        let mut buf: Vec<u8> = vec![0xAA; 17];
+        buf.extend_from_slice(&packed);
+        let view = iter_frames_14bit(&buf)
+            .next()
+            .expect("first frame must yield")
+            .expect("must parse after resync");
+        assert_eq!(view.offset, 17);
+        assert_eq!(view.len, 110);
+    }
+
+    /// A raw 16-bit sync at the cursor is out-of-domain for this
+    /// iterator: it yields `Error::UnsupportedRaw16Bit` and
+    /// terminates, mirroring the round-6 `iter_frames` behaviour on
+    /// 14-bit syncs in the other direction.
+    #[test]
+    fn iter_frames_14bit_rejects_raw_16bit_sync() {
+        let mut buf = vec![0u8; 32];
+        buf[0..4].copy_from_slice(&RAW_BE_SYNC);
+        let mut it = iter_frames_14bit(&buf);
+        match it.next() {
+            Some(Err(Error::UnsupportedRaw16Bit)) => {}
+            other => panic!("expected UnsupportedRaw16Bit, got {other:?}"),
+        }
+        assert!(it.next().is_none(), "iterator terminates after rejection");
+    }
+
+    /// An empty buffer yields no frames.
+    #[test]
+    fn iter_frames_14bit_empty_buffer_yields_nothing() {
+        let buf: [u8; 0] = [];
+        let mut it = iter_frames_14bit(&buf);
+        assert!(it.next().is_none());
+    }
+
+    /// A buffer that contains no sync at all yields no frames.
+    #[test]
+    fn iter_frames_14bit_no_sync_yields_nothing() {
+        let buf = vec![0xAAu8; 256];
+        let mut it = iter_frames_14bit(&buf);
+        assert!(it.next().is_none());
+    }
+
+    /// A truncated 14-bit-BE frame where the declared container span
+    /// runs past end-of-buffer must report `Error::UnexpectedEof` on
+    /// the truncation, just like `iter_frames` for raw-16-bit.
+    #[test]
+    fn iter_frames_14bit_truncated_tail_reports_eof() {
+        let raw = build_minimum_raw_be_frame();
+        let (packed, _) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        // Truncate to 100 container bytes (< the 110 the header
+        // declares for FSIZE+1 = 95).
+        let truncated = &packed[..100];
+        let mut it = iter_frames_14bit(truncated);
+        match it.next() {
+            Some(Err(Error::UnexpectedEof)) => {}
+            other => panic!("expected UnexpectedEof on truncation, got {other:?}"),
+        }
+    }
+
+    /// Cross-check: feeding the iterator's `data` slice (the
+    /// container-byte window) back into [`parse_frame_header_14bit`]
+    /// recovers the same header. This proves the iterator's window
+    /// is correctly sized for the parser's input contract.
+    #[test]
+    fn iter_frames_14bit_data_slice_round_trips_through_parser() {
+        let raw = build_minimum_raw_be_frame();
+        let (packed, _) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        let view = iter_frames_14bit(&packed).next().unwrap().unwrap();
+        let reparsed = parse_frame_header_14bit(view.data).unwrap();
+        assert_eq!(reparsed, view.header);
+    }
+
+    /// `FrameIterator14::cursor()` advances by exactly
+    /// `frame_size_container_bytes` after a successful step (BE
+    /// container).
+    #[test]
+    fn iter_frames_14bit_cursor_advances_by_container_byte_count() {
+        let raw = build_minimum_raw_be_frame();
+        let (packed, _) = pack_16bit_to_14bit(&raw, FourteenBitByteOrder::BigEndian);
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&packed);
+        stream.extend_from_slice(&packed);
+
+        let mut it = iter_frames_14bit(&stream);
+        assert_eq!(it.cursor(), 0);
+        it.next().unwrap().unwrap();
+        assert_eq!(it.cursor(), 110);
+        it.next().unwrap().unwrap();
+        assert_eq!(it.cursor(), 220);
+        assert!(it.next().is_none());
     }
 }

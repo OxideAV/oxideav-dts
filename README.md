@@ -5,6 +5,41 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 192 — 14-bit container-byte frame iterator `iter_frames_14bit`.**
+Round 192 (2026-05-30) closes the empirical half of round-6 docs gap
+#7 by wiring the round-189 `frame_size_container_bytes` accessor into
+a multi-frame walker that operates directly on 14-bit-packed
+container bytes. The new `iter_frames_14bit(bytes)` returns a
+`FrameIterator14<'_>` whose `Iterator::next` step calls
+`find_next_sync` to handle leading garbage, accepts only the two
+14-bit syncs (`FourteenBitBigEndian` / `FourteenBitLittleEndian`),
+calls the existing `parse_frame_header_14bit` to recover the typed
+header from each frame's container window, and advances the cursor
+by `header.frame_size_container_bytes(encoding)` container bytes —
+the round-189 formula `2 * ceil(frame_size_bytes * 8 / 14)`. The
+per-step `FrameView14` is a deliberate separate type (not
+`FrameView`) because the `len` and `data` fields carry container-
+domain semantics here (container-byte advance + container-byte
+window) rather than the unpacked-domain semantics they carry in
+`FrameView`. A raw 16-bit sync at the iterator's cursor surfaces the
+new `Error::UnsupportedRaw16Bit` variant (symmetric counterpart to
+the round-6 `Error::UnsupportedFourteenBit` on `iter_frames`) and
+terminates. Twelve new tests lock the iterator's contract down: ten
+unit tests (single-frame BE / LE walks; back-to-back BE frames with
+cursor + length cross-check; leading garbage before first sync;
+raw-16-bit sync rejection; empty buffer; no-sync buffer; truncated
+tail reporting `UnexpectedEof`; `view.data` round-trips through
+`parse_frame_header_14bit`; `cursor()` advances by exactly
+`frame_size_container_bytes` per step) plus two integration tests
+that repackage the bundled ffmpeg 5-frame fixture (5 × 1024 raw-BE
+bytes) into 14-bit-packed BE and LE streams (5 × 1172 container
+bytes each) and verify all five frames walk with the expected
+header fields and container-byte length. The fail-fast
+`iter_frames` from round 6 is unchanged — it still rejects 14-bit
+syncs with `UnsupportedFourteenBit` because raw streams and
+container streams live in distinct domains; callers route by sync
+encoding up-front.
+
 **Round 189 — 14-bit container-byte frame-advance accessor (ETSI §5.3.1 + §6.1.3.1).**
 Round 189 (2026-05-30) adds a single new accessor,
 `DtsFrameHeader::frame_size_container_bytes(SyncWordEncoding) -> u32`,
@@ -505,25 +540,27 @@ the Table 5-7 / 5-8 / 5-9 entries already there.
 
 ### Round-6 docs gaps
 
-7. **14-bit container-byte advance rule**: *Analytical half landed
-   in round 189.* The 14-bit-packed container-byte distance from
-   one sync to the next is now exposed through
-   `DtsFrameHeader::frame_size_container_bytes(SyncWordEncoding)`:
-   `frame_size_bytes` for the raw encodings (per ETSI §5.3.1's
-   `FSIZE+1` byte definition) and
-   `2 * ceil(frame_size_bytes * 8 / 14)` for the 14-bit encodings
-   (per the §3.3 advance synthesis in
-   `docs/audio/dts/dts-core-extracts.md`, which combines §5.3.1's
-   `FSIZE` rule with the §6.1.3.1 / §6.3.x 28-bit-word-boundary
-   invariant — 14 logical bits per 16-container-bit word, with a
-   per-frame round-up to the next two-container-word boundary).
-   The `iter_frames` helper still refuses 14-bit container streams
-   and yields `Error::UnsupportedFourteenBit` because the iterator
-   would also need a streaming 14↔16-bit unpacker to land each
-   frame's header into the form `parse_frame_header_14bit` reads
-   from. That follow-up can now use the new accessor for its
-   byte-step, so the empirical half of the gap reduces to "wire the
-   advance + an inline per-frame unpacker into the iterator".
+7. **14-bit container-byte advance rule**: *Resolved in round 192.*
+   The analytical half landed in round 189 as
+   `DtsFrameHeader::frame_size_container_bytes(SyncWordEncoding)`
+   (`frame_size_bytes` for the raw encodings per ETSI §5.3.1's
+   `FSIZE+1` byte definition; `2 * ceil(frame_size_bytes * 8 / 14)`
+   for the 14-bit encodings per §3.3 of `dts-core-extracts.md`,
+   combining §5.3.1's `FSIZE` rule with the §6.1.3.1 / §6.3.x
+   28-bit-word-boundary invariant). The empirical half landed in
+   round 192 as `iter_frames_14bit(bytes) -> FrameIterator14<'_>`:
+   a multi-frame walker that operates directly on 14-bit-packed
+   container bytes, calling `parse_frame_header_14bit` at each sync
+   to recover the header (the parser internally unpacks just enough
+   containers to read the 13/15-byte unpacked header window) and
+   advancing by `frame_size_container_bytes(encoding)` container
+   bytes per step. The fail-fast `iter_frames` from round 6 still
+   refuses 14-bit syncs with `Error::UnsupportedFourteenBit`
+   because raw streams and container streams live in distinct
+   domains; the symmetric reciprocal — raw 16-bit syncs at the
+   cursor of `iter_frames_14bit` — surfaces the new
+   `Error::UnsupportedRaw16Bit` variant. Callers route by encoding
+   up-front.
 
 ## License
 
