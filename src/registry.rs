@@ -40,6 +40,14 @@ impl From<DtsError> for CoreError {
             // [`crate::encode_frame_header_be`] from inside the
             // decoder path.
             DtsError::FieldOutOfRange { .. } => CoreError::InvalidData(e.to_string()),
+            // Round 195 side-info decoder failures: bit-stream-format
+            // errors (reserved BHUFF/SHUFF/SCALES values or unmatched
+            // Huffman codeword) map to `InvalidData` so the surrounding
+            // demux/decoder path treats the packet as corrupt rather
+            // than as an unrecoverable codec-level limitation.
+            DtsError::InvalidSideInfo { .. } | DtsError::HuffmanDecodeFailed { .. } => {
+                CoreError::InvalidData(e.to_string())
+            }
         }
     }
 }

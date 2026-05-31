@@ -313,6 +313,7 @@
 mod bitreader;
 mod header;
 mod iter;
+mod side_info;
 mod unpack14;
 
 #[cfg(feature = "registry")]
@@ -327,6 +328,9 @@ pub use crate::iter::{
     find_all_syncs, find_next_sync, iter_frames, iter_frames_14bit, iter_frames_resync, iter_syncs,
     FrameIterator, FrameIterator14, FrameIteratorResync, FrameView, FrameView14, ResyncCause,
     ResyncEvent, SyncIterator, SyncMatch,
+};
+pub use crate::side_info::{
+    decode_abits_at, decode_scales_at, AbitsCodebook, ScalesCodebook, RMS_6BIT, RMS_7BIT,
 };
 pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder};
 
@@ -398,6 +402,30 @@ pub enum Error {
         /// disagreement with `crc_present`, not the integer payload).
         max: u32,
     },
+    /// A Primary Audio Coding Side Information field
+    /// (§5.4.1 Table 5-28) carried a value the ETSI spec marks as
+    /// reserved/invalid: a `BHUFF` / `SHUFF` selector equal to `7`,
+    /// or a `SCALES` accumulator that walked outside the documented
+    /// range of the §D.1.1 / §D.1.2 RMS square-root table (e.g.
+    /// index 63 in the 6-bit table, or indices 125..=127 in the
+    /// 7-bit table, both written as "invalid" in the staged PDF).
+    InvalidSideInfo {
+        /// Static name of the offending side-info field: `"BHUFF"`,
+        /// `"SHUFF"`, or `"SCALES"`.
+        field: &'static str,
+        /// The reserved value the bit stream carried.
+        value: u32,
+    },
+    /// The bit stream's prefix did not match any entry in the named
+    /// Annex D Huffman codebook (`A12`, `B12`, `C12`, `D12`, `E12`,
+    /// `A5`, `B5`, `C5`, `A7`, `B7`) within the maximum documented
+    /// code length. Surfaced by [`crate::decode_abits`] and
+    /// [`crate::decode_scales`] when the input is structurally
+    /// corrupt or the wrong codebook was selected upstream.
+    HuffmanDecodeFailed {
+        /// Static name of the codebook that failed to match.
+        table: &'static str,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -433,6 +461,18 @@ impl core::fmt::Display for Error {
                 f,
                 "oxideav-dts: field `{field}` value {value} exceeds the wiki \
                  bit-table maximum {max}"
+            ),
+            Error::InvalidSideInfo { field, value } => write!(
+                f,
+                "oxideav-dts: side-info field `{field}` value {value} is \
+                 reserved/invalid per ETSI TS 102 114 §5.4.1 (Table 5-24/5-25 \
+                 selector 7, or §D.1.1/§D.1.2 RMS table index marked invalid)"
+            ),
+            Error::HuffmanDecodeFailed { table } => write!(
+                f,
+                "oxideav-dts: bit stream did not match any entry in Annex D \
+                 Huffman codebook `{table}` within the documented maximum \
+                 code length"
             ),
         }
     }

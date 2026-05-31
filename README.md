@@ -5,6 +5,50 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 195 — §5.4.1 ABITS / SCALES (a.k.a. ALLOC / SCFAC) side-info decoders.**
+Round 195 (2026-05-31) lands the side-information half of the core
+subframe decode path: extracting the per-channel × per-subband
+ABITS bit-allocation index field and the per-channel × per-subband
+SCALES scale-factor field from a packed bit stream, given the
+channel-wide `BHUFF[ch]` / `SHUFF[ch]` codebook selectors read
+earlier from the AUDIO CODING HEADER. Three new public entry points:
+`AbitsCodebook::from_bhuff(u8)` / `ScalesCodebook::from_shuff(u8)`
+(Table 5-25 / Table 5-24 selectors), and the byte-slice + bit-offset
+single-field decoders `decode_abits_at(bytes, bit_offset, codebook)`
+(returns `(abits, bits_consumed)`) and
+`decode_scales_at(bytes, bit_offset, codebook, n_scale_sum)`
+(returns `(scale, updated_n_scale_sum, bits_consumed)`). Backing
+tables: Annex D §D.5.6 five 12-level Huffman codebooks A12/B12/C12/
+D12/E12 (BHUFF=0..4), Annex D §D.5.3 + §D.5.4 small-Huffman
+codebooks A5/B5/C5 + A7/B7 routed to SA129..SE129 difference
+symbols (SHUFF=0..4), and the §D.1.1 / §D.1.2 RMS square-root
+quantisation tables (`RMS_6BIT: [u32; 64]` /
+`RMS_7BIT: [u32; 128]`) as `pub const` arrays. Two new error
+variants — `Error::InvalidSideInfo { field, value }` (reserved
+BHUFF/SHUFF/SCALES values) and `Error::HuffmanDecodeFailed { table }`
+(defensive bound — the Annex D codebooks are all complete prefix
+codes by Kraft equality, so this fires only on EOF or stream-format
+corruption). Nineteen unit tests in `src/side_info.rs` plus three
+integration tests in `tests/side_info_decode.rs` lock down the
+behavioural contract: BHUFF/SHUFF reserved-value rejection,
+exhaustive 7-code dispatch, every ABITS Huffman symbol round-trip
+across all five 12-level codebooks, Kraft completeness across all
+ten transcribed codebooks, RMS table length + anchor-value
+cross-check against the staged PDF, SA129 difference accumulation
+across `(+2, +1, 0, -1, -2)` from `n_scale_sum=10`, SD129 7-level
+table with ±3 range, negative-accumulator + reserved-index
+rejection, and a 5-subband end-to-end block walked through the
+public API. Scope: single-field decode + tables only; the full
+subframe walker (which also requires the §5.3.x AUDIO CODING
+HEADER fields SUBFS/PCHS/SUBS/VQSUB/JOINX and the SCALES loop over
+`nPCHS × nSUBS[ch]`) is a follow-up. The 129-entry SA129..SE129
+full mappings (Table 5-24's nominal codebook names, not
+transcribed under those names in the staged Annex D revision)
+remain a docs-completeness gap; this round routes SHUFF=0..4
+through the small-Huffman §D.5.3 / §D.5.4 codebooks the staged
+PDF does enumerate, treating their symbols as scale-factor index
+differences per the §5.4.1 pseudocode.
+
 **Round 192 — 14-bit container-byte frame iterator `iter_frames_14bit`.**
 Round 192 (2026-05-30) closes the empirical half of round-6 docs gap
 #7 by wiring the round-189 `frame_size_container_bytes` accessor into
@@ -537,6 +581,23 @@ the Table 5-7 / 5-8 / 5-9 entries already there.
    version-dependent sign convention).
    `DtsFrameHeader::dialog_normalization_db` returns `None`
    until the table lands.
+
+### Round-195 docs gaps
+
+8. **SA129..SE129 full 129-entry codebooks**: Table 5-24 names the
+   five scale-factor codebooks the SHUFF=0..4 entries select but the
+   staged Annex D revision (V1.3.1, 2011-08) does not transcribe them
+   under those `SA129..SE129` names. Round 195 routes SHUFF=0..4
+   through the staged §D.5.3 / §D.5.4 small-Huffman codebooks
+   (A5/B5/C5 for SHUFF=0..2, A7/B7 for SHUFF=3..4), which match the
+   ±2 (5-level) and ±3 (7-level) difference-symbol ranges Table 5-28
+   expects of difference-encoded SCALES. Confirming the full
+   129-level mapping (or transcribing the explicit SA129..SE129
+   tables from a different revision of TS 102 114) is a
+   docs-completeness follow-up. For now,
+   `ScalesCodebook::is_huffman_encoded()` partitions the SHUFF=0..4
+   set as the difference-encoded path per §5.4.1's
+   `if (nQSelect < 5)  nScaleSum += nScale;`.
 
 ### Round-6 docs gaps
 

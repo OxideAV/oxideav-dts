@@ -6,6 +6,90 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round 195 (2026-05-31) — §5.4.1 ABITS / SCALES (a.k.a. ALLOC /
+  SCFAC) Primary Audio Coding Side Information bit-stream decoders,
+  with the Annex D §D.5.6 / §D.5.3 / §D.5.4 small-Huffman codebooks
+  and §D.1.1 / §D.1.2 RMS square-root tables they dispatch through.
+  All tables transcribed verbatim from the locally staged ETSI
+  TS 102 114 V1.3.1 PDF (Annex D pp.191-205 + Table 5-28
+  pp.28-30 + Tables 5-22..5-27 pp.26-27). New public surface:
+  - `AbitsCodebook` enum + `AbitsCodebook::from_bhuff(u8)` —
+    resolves the 3-bit `BHUFF[ch]` field to one of the seven
+    documented variants per Table 5-25 (`A12`, `B12`, `C12`, `D12`,
+    `E12`, `Linear4Bit`, `Linear5Bit`). `BHUFF == 7` is rejected as
+    the new `Error::InvalidSideInfo { field: "BHUFF" }`.
+  - `ScalesCodebook` enum + `ScalesCodebook::from_shuff(u8)` —
+    resolves `SHUFF[ch]` per Table 5-24 (`Sa129..Se129`,
+    `Linear6Bit`, `Linear7Bit`). `SHUFF == 7` rejected as
+    `Error::InvalidSideInfo { field: "SHUFF" }`. Two predicate
+    accessors mirror the §5.4.1 dispatch:
+    `is_huffman_encoded()` distinguishes difference-coded vs
+    absolute-coded paths, `uses_7bit_rms_table()` distinguishes the
+    §D.1.2 vs §D.1.1 square-root lookup.
+  - `decode_abits_at(bytes, bit_offset, codebook) -> (u8, usize)`
+    — extracts one ABITS field from a byte slice at an arbitrary
+    bit offset, returning the decoded index plus
+    `bits_consumed` so the caller can chain calls through a
+    §5.4.1 inner loop.
+  - `decode_scales_at(bytes, bit_offset, codebook, n_scale_sum) ->
+    (u32, i32, usize)` — extracts one SCALES field, returning the
+    table-looked-up scale-factor value, the updated `n_scale_sum`
+    accumulator (so the difference-encoded path's running sum
+    chains across calls), and `bits_consumed`.
+  - `RMS_6BIT: [u32; 64]` — §D.1.1 6-bit RMS square-root
+    quantisation levels (index 63 is the spec-reserved "invalid"
+    slot).
+  - `RMS_7BIT: [u32; 128]` — §D.1.2 7-bit RMS levels (indexes
+    125..=127 are spec-reserved).
+  - `Error::InvalidSideInfo { field, value }` — reserved BHUFF /
+    SHUFF / SCALES values (selector 7, or a SCALES accumulator
+    walking into a spec-invalid table slot). Mapped to
+    `oxideav_core::Error::InvalidData` through the registry's
+    `From<DtsError>` impl.
+  - `Error::HuffmanDecodeFailed { table }` — bit stream did not
+    match any entry in the named Annex D codebook within the
+    maximum documented code length (defensive bound; the Annex D
+    codebooks are all complete prefix codes by Kraft's inequality,
+    so this fires only on EOF or stream-format corruption).
+
+  Nineteen new in-module unit tests in `src/side_info.rs` cover:
+  BHUFF / SHUFF reserved-value rejection, all-7-codes exhaustive
+  dispatch (BHUFF + SHUFF), 7-bit-RMS-table predicate, all 60
+  ABITS Huffman symbols round-trip across A12/B12/C12/D12/E12,
+  linear-4-bit and linear-5-bit raw-field decode, EOF surface,
+  Kraft-equality completeness check across every codebook
+  (A12..E12 + A5/B5/C5 + A7/B7), RMS table lengths + anchor-value
+  cross-check against the staged PDF, linear-6-bit and
+  linear-7-bit absolute lookups, SA129 difference accumulation
+  across a (+1, +1, -1) sequence, SD129 7-level table with ±3
+  range, negative-accumulator rejection, and reserved-index
+  rejection in both 6-bit and 7-bit RMS tables. Three new
+  integration tests in `tests/side_info_decode.rs` exercise the
+  public `decode_abits_at` / `decode_scales_at` surface
+  end-to-end: a 5-subband ABITS block walked through BHUFF=A12 (24
+  total bits, [1, 5, 12, 1, 8]), a 5-subband SCALES block walked
+  through SHUFF=SA129 with a hand-built difference sequence
+  (+2, +1, 0, -1, -2) starting from `n_scale_sum=10` and
+  cross-checked against the §D.1.1 lookups, and a linear-7-bit
+  block that demonstrates the absolute-overwrite contract
+  (`n_scale_sum` is overwritten by each call, not accumulated).
+
+  Scope: this round only lands the **single-field** decode
+  primitives plus their backing tables. Wiring them into a
+  complete subframe walker (which also requires the AUDIO CODING
+  HEADER §5.3.x fields SUBFS, PCHS, SUBS, VQSUB, JOINX,
+  BHUFF/THUFF/SHUFF, plus the side-info loop over
+  `nPCHS × nSUBS[ch]`) is a follow-up. The 129-entry full
+  SA129..SE129 mappings (referenced by Table 5-24 but not
+  transcribed under that name in the staged Annex D revision)
+  remain a docs-completeness follow-up; round 195 routes
+  SHUFF=0..4 through the small-Huffman §D.5.3 / §D.5.4 codebooks
+  the staged PDF does enumerate, treating their symbols as
+  scale-factor index differences per the §5.4.1 pseudocode.
+
+
 ## [0.0.1](https://github.com/OxideAV/oxideav-dts/releases/tag/v0.0.1) - 2026-05-30
 
 ### Other

@@ -85,6 +85,14 @@ impl<'a> BitReader<'a> {
     pub(crate) fn position_bits(&self) -> usize {
         self.pos
     }
+
+    /// Current absolute bit position, counted from the MSB of
+    /// `bytes[0]`. Round-195 side-info decoders use this to report
+    /// `bits_consumed` back to the caller (so the caller can advance
+    /// its own bit cursor through the side-information block).
+    pub(crate) fn absolute_bit_position(&self) -> usize {
+        self.pos
+    }
 }
 
 #[cfg(test)]
