@@ -5,6 +5,42 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 208 — `PreCalCosMod()` 544-entry cosine-modulation matrix (ETSI Annex C §C.2.5).**
+Round 208 (2026-06-02) lands the first §C.2.5 synthesis-QMF building
+block — the 544-entry cosine-modulation coefficient array `raCosMod`
+that drives the §C.2.5 `QMFInterpolation` 32-band synthesis filter
+bank. The matrix is allocated once per decoder instance (per the
+spec's "computed once" remark) and reused on every per-channel
+synthesis call; the new `precal_cos_mod()` function returns the
+populated `[f64; COS_MOD_LEN]` directly, with `COS_MOD_LEN = 544`
+plus per-block start constants `COS_MOD_BLOCK{1..4}_START`
+(`0 / 256 / 512 / 528`) surfacing the spec's four-block packing
+(Block 1: `cos((2i+1)(2k+1) π/64)` 16×16; Block 2:
+`cos(i(2k+1) π/32)` 16×16; Block 3: `+0.25 / (2·cos((2k+1) π/128))`
+16; Block 4: `−0.25 / (2·sin((2k+1) π/128))` 16). The transliteration
+is verbatim from the spec's `PreCalCosMod()` pseudocode as
+transcribed in `docs/audio/dts/dts-core-extracts.md` §2.3 (which
+quotes ETSI TS 102 114 V1.3.1 Annex C §C.2.5, PDF p.184). Twenty
+new lib-level tests in `src/cos_mod.rs` lock the matrix down:
+length + block-boundary constants, anchor values
+(`ra[0] == cos(π/64)`, `ra[256] == 1.0`,
+`ra[512] == 0.25 / (2·cos(π/128))`, `ra[528] == −0.25 / (2·sin(π/128))`),
+exhaustive 256-entry walks of Block 1 and Block 2 against the
+closed-form, 16-entry walks of Block 3 and Block 4, the
+sign-and-monotonicity properties (Block 3 strictly positive and
+monotone-increasing in k, Block 4 strictly negative with
+monotone-decreasing magnitude), Block 2's i=0 column equals 1 for
+every k, Block 1's last row-zero entry matches the closed form,
+all 544 entries finite, Block 1 + Block 2 bounded by `[-1, +1]`,
+and bit-identical determinism across two independent invocations.
+Scope: this round only lands the cosine-modulation matrix; the
+downstream `QMFInterpolation` synthesis loop (and the §D.8 512-tap
+`raCoeffLossy` / `raCoeffLossLess` FIR coefficient tables it
+multiplies in) remains a follow-up — the §D.8 tables are
+referenced in the staged PDF (p.238) but not yet transcribed
+under `docs/audio/dts/`, so the synthesis loop awaits that
+docs-staging pass.
+
 **Round 202 — `SFREQ` / `AMODE` / `PCMR` value-table resolvers (ETSI §5.3.1 Tables 5-5 / 5-4 / 5-17).**
 Round 202 (2026-06-01) closes the three sample-rate / channel-count /
 source-PCM-resolution `Option`-resolver gaps that have been documented
@@ -627,6 +663,20 @@ those tables are not in `docs/`:
    version-dependent sign convention).
    `DtsFrameHeader::dialog_normalization_db` returns `None`
    until the table lands.
+
+### Round-208 docs gaps
+
+9. **Annex §D.8 32-band synthesis FIR coefficient tables
+   (`raCoeffLossy` / `raCoeffLossLess`, 512 taps each)**: the staged
+   ETSI TS 102 114 V1.3.1 PDF lists these on page 238 but
+   `docs/audio/dts/dts-core-extracts.md` only references them by name
+   (§2.4 names them as the `FILTS == 0` / `FILTS == 1` selector
+   targets inside `QMFInterpolation`); the two 512-coefficient tables
+   themselves are not yet transcribed under `docs/audio/dts/`. The
+   round-208 `precal_cos_mod()` matrix does not depend on §D.8, but
+   wiring the full 32-band synthesis QMF (`QMFInterpolation`) does.
+   The same docs collaborator pass that lands the Table 5-20 DIALNORM
+   transcription is the natural place for the §D.8 transcription.
 
 ### Round-195 docs gaps
 

@@ -300,6 +300,13 @@
 //! - [`iter_frames_resync`] / [`FrameIteratorResync`] /
 //!   [`ResyncEvent`] / [`ResyncCause`] — error-tolerant walker that
 //!   skips past false-positive sync candidates (added in round 159).
+//! - [`precal_cos_mod`] / [`COS_MOD_LEN`] / [`COS_MOD_BLOCK1_START`] /
+//!   [`COS_MOD_BLOCK2_START`] / [`COS_MOD_BLOCK3_START`] /
+//!   [`COS_MOD_BLOCK4_START`] — the 544-entry cosine-modulation
+//!   matrix used by the §C.2.5 32-band synthesis QMF (added in
+//!   round 208). Per-block start indices match the four-block
+//!   decomposition of `PreCalCosMod()` in
+//!   `docs/audio/dts/dts-core-extracts.md` §2.3.
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -323,6 +330,7 @@
 #![warn(missing_docs)]
 
 mod bitreader;
+mod cos_mod;
 mod header;
 mod iter;
 mod side_info;
@@ -331,6 +339,10 @@ mod unpack14;
 #[cfg(feature = "registry")]
 mod registry;
 
+pub use crate::cos_mod::{
+    precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START, COS_MOD_BLOCK3_START,
+    COS_MOD_BLOCK4_START, COS_MOD_LEN,
+};
 pub use crate::header::{
     encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,
     encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, AmodeArrangement,

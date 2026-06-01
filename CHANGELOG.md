@@ -8,6 +8,58 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 208 (2026-06-02) — `PreCalCosMod()` 544-entry
+  cosine-modulation coefficient array `raCosMod` for the §C.2.5
+  32-band synthesis QMF, transliterated verbatim from the spec
+  pseudocode transcribed in `docs/audio/dts/dts-core-extracts.md`
+  §2.3 (which quotes ETSI TS 102 114 V1.3.1 Annex C §C.2.5, PDF
+  p.184). New public surface:
+  - `precal_cos_mod() -> [f64; COS_MOD_LEN]` — builder that returns
+    the populated 544-entry array. Deterministic: every byte-
+    identical run produces the same array (verified by a
+    `to_bits()` cross-check between two independent invocations).
+  - `COS_MOD_LEN: usize = 544` — total length.
+  - `COS_MOD_BLOCK1_START: usize = 0` /
+    `COS_MOD_BLOCK2_START: usize = 256` /
+    `COS_MOD_BLOCK3_START: usize = 512` /
+    `COS_MOD_BLOCK4_START: usize = 528` — start indices of the four
+    blocks of the spec's `PreCalCosMod()` pseudocode (`j`-counter
+    transitions). Decomposes as 256 + 256 + 16 + 16.
+  - The four blocks: Block 1 (256 entries) is
+    `cos((2i+1)(2k+1) π/64)` for `k, i ∈ 0..16` (the `(2k+1)`
+    half-band cosine-modulation kernel); Block 2 (256 entries) is
+    `cos(i(2k+1) π/32)` (the dual second-kind cosine block);
+    Block 3 (16 entries) is `+0.25 / (2·cos((2k+1) π/128))` (history
+    `SUM`-side scaling); Block 4 (16 entries) is
+    `−0.25 / (2·sin((2k+1) π/128))` (history `DIFF`-side scaling).
+
+  Twenty new in-module unit tests in `src/cos_mod.rs` cover: length
+  matches 544, block-boundary constants reproduce the four-block
+  decomposition, Block 1 anchor `ra[0] = cos(π/64)`, Block 2 anchor
+  `ra[256] = 1.0`, Block 3 anchor
+  `ra[512] = 0.25 / (2·cos(π/128))`, Block 4 anchor
+  `ra[528] = −0.25 / (2·sin(π/128))`, exhaustive 256-entry walks of
+  Block 1 + Block 2 against the closed-form, exhaustive 16-entry
+  walks of Block 3 + Block 4, Block 3 strict positivity, Block 4
+  strict negativity, Block 3 monotone-increasing in k, Block 4
+  monotone-decreasing magnitude in k, Block 2 row-zero column
+  always 1 (since `cos(0) = 1`), Block 1's last row-zero entry
+  matches `cos(31 π / 64)`, every entry finite (no NaN / ±∞),
+  Block 1 + Block 2 entries bounded by `[-1, +1]`, the
+  packing-density round-trip (16 rows × 16 cols = 256 per Block 1),
+  and bit-identical determinism across two independent
+  `precal_cos_mod()` calls.
+
+  Scope: this round lands the cosine-modulation matrix builder
+  only. The §C.2.5 `QMFInterpolation` synthesis loop (which
+  consumes `raCosMod` plus the §D.8 512-tap `raCoeffLossy` /
+  `raCoeffLossLess` FIR coefficient tables selected by the frame
+  `FILTS` flag) is a follow-up — the §D.8 tables are referenced in
+  the staged ETSI PDF (p.238) but not yet transcribed under
+  `docs/audio/dts/`. The full filterbank reconstruction is blocked
+  on that docs-staging pass, filed as round-208 docs gap #9 in
+  `README.md`.
+
 - Round 202 (2026-06-01) — `SFREQ` / `AMODE` / `PCMR` value-table
   resolvers (ETSI TS 102 114 V1.3.1 §5.3.1 Tables 5-5 / 5-4 / 5-17,
   PDF pp.18-23). Closes the three sample-rate / channel-count /
