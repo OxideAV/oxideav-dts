@@ -5,6 +5,41 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 202 — `SFREQ` / `AMODE` / `PCMR` value-table resolvers (ETSI §5.3.1 Tables 5-5 / 5-4 / 5-17).**
+Round 202 (2026-06-01) closes the three sample-rate / channel-count /
+source-PCM-resolution `Option`-resolver gaps that have been documented
+in README "Docs gaps" since round 1: `DtsFrameHeader::sample_rate_hz()`
+now resolves the nine valid `SFREQ` codes to their `Source Sampling
+Frequency` from ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-5 (8/16/32/
+11.025/22.05/44.1/12/24/48 kHz) and returns `None` for the seven
+reserved codes (`0b0000`, `0b0100`, `0b0101`, `0b1001`, `0b1010`,
+`0b1110`, `0b1111`); `DtsFrameHeader::channel_count()` resolves the
+sixteen standard `AMODE` codes to the CHS column of Table 5-4
+(`1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 6, 6, 6, 7, 8, 8`) and returns `None`
+for the user-defined codes `16..=63`; and
+`DtsFrameHeader::source_pcm_bits_per_sample()` resolves the six valid
+`PCMR` codes to 16/16/20/20/24/24 bps per Table 5-17 and returns
+`None` for the two reserved codes (`0b100`, `0b111`). Three new typed
+accessors (`sample_frequency()` / `amode_arrangement()` /
+`source_pcm_resolution()`) carry the richer `Fixed` / `Invalid` and
+`Valid { bits, es }` / `Invalid` and `Mono` / `DualMono` / `Stereo` / …
+/ `UserDefined(u8)` variants the `Option` accessors collapse. Backing
+tables transcribed verbatim from the staged ETSI PDF (Tables 5-4 /
+5-5 / 5-17, PDF pp.18-23) into `src/header.rs`. Seven new lib-level
+tests (exhaustive 16-code SFREQ walk, 64-code AMODE walk, 8-code PCMR
+walk, plus a CHS-column reproduction check and a synthetic-header
+parser round-trip that mirrors the bundled black-box fixture
+geometry) lock the table-row-by-table-row mapping down; the
+integration tests in `tests/black_box_ffmpeg.rs` now assert
+`sample_rate_hz() == Some(48_000)`, `channel_count() == Some(2)`,
+`source_pcm_bits_per_sample() == Some(16)` for the bundled ffmpeg
+48 kHz / stereo / 16-bit / 768 kb/s frame across the three documented
+sync encodings (raw-BE, 14-bit-BE, 14-bit-LE). The `DIALNORM`-code-
+to-dB mapping (Table 5-20) remains a docs-completeness follow-up — the
+staged PDF interleaves the `VERNUM == 6` and `VERNUM == 7` sign
+conventions, so the row-by-row code→dB columns need a tighter
+transcription pass before `dialog_normalization_db()` can resolve.
+
 **Round 195 — §5.4.1 ABITS / SCALES (a.k.a. ALLOC / SCFAC) side-info decoders.**
 Round 195 (2026-05-31) lands the side-information half of the core
 subframe decode path: extracting the per-channel × per-subband
@@ -504,8 +539,9 @@ exposes:
   bad sync, NBLKS < 5, frame size < 95, truncated header — at the
   packet boundary); `receive_frame` returns
   `Error::Unsupported` because PCM output remains gated on the
-  SFREQ/AMODE value tables (and the subband/QMF decode path) landing
-  in `docs/` (see below). The RATE table landed in round 185.
+  §5.4-onwards subframe / subband / QMF-synthesis decode path. The
+  RATE / SFREQ / AMODE / PCMR header-level value tables landed in
+  rounds 185 / 202.
 - `probe_dts(&[u8]) -> Confidence` — standalone confidence helper:
   returns `1.0` on a valid frame header at offset 0, `0.5` on a
   truncated buffer (sync present but body short), `0.0` on
@@ -528,9 +564,15 @@ layout but only says *"See table below"* for the value tables of
 three fields. The wiki page itself was mirrored as-is, so some of
 those tables are not in `docs/`:
 
-1. **Sample-frequency index → Hz**: SFREQ is a 4-bit code; the
-   mapping table (16 entries) is missing. `DtsFrameHeader::sample_rate_hz()`
-   returns `None` until it lands.
+1. **Sample-frequency index → Hz**: *Resolved in round 202.* ETSI
+   TS 102 114 V1.3.1 §5.3.1 Table 5-5 (staged at
+   `docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf` p.19)
+   enumerates the nine valid `SFREQ` codes (8/16/32/11.025/22.05/
+   44.1/12/24/48 kHz) and the seven reserved ones.
+   `DtsFrameHeader::sample_rate_hz()` now resolves the valid codes
+   and returns `None` for the reserved ones;
+   `DtsFrameHeader::sample_frequency()` preserves the `Fixed` vs
+   `Invalid` distinction.
 2. **Transmission-bitrate index → bps**: *Resolved in round 185.*
    ETSI TS 102 114 §5.3.1 Table 5-7 (transcribed in
    `docs/audio/dts/dts-core-extracts.md` §1) gives the 25 fixed
@@ -542,17 +584,17 @@ those tables are not in `docs/`:
    (Tables 5-8 `DYNF` / 5-9 `TIMEF` from the same clause are
    present/not-present flags already surfaced as `dynamic_range` /
    `time_stamp`.)
-3. **AMODE → channel-count / layout**: AMODE 0..=15 is documented
-   as "standard layouts" but the layout descriptions (mono, dual-
-   mono, L+R, L+R+C, …) are not in the snapshot.
-   `DtsFrameHeader::channel_count()` returns `None`.
-
-A clean-room recipe for filling the remaining SFREQ / AMODE gaps:
-cite the ETSI TS 102 114 §5.3.1 sample-frequency and channel-mode
-value tables verbatim (the spec is staged at
-`docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf`) and
-transcribe them into `docs/audio/dts/dts-core-extracts.md` alongside
-the Table 5-7 / 5-8 / 5-9 entries already there.
+3. **AMODE → channel-count / layout**: *Resolved in round 202.*
+   ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-4 (staged at
+   `docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf` p.18)
+   enumerates the sixteen standard arrangements (codes `0..=15`,
+   CHS column `1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 6, 6, 6, 7, 8, 8`)
+   and the user-defined range `16..=63`.
+   `DtsFrameHeader::channel_count()` now resolves the sixteen
+   standard codes to their CHS values and returns `None` for the
+   user-defined codes; `DtsFrameHeader::amode_arrangement()`
+   returns the full `AmodeArrangement` variant (per-channel layout
+   per Table 5-4's `Arrangement` column).
 
 ### Round-3 docs gaps
 
@@ -568,13 +610,17 @@ the Table 5-7 / 5-8 / 5-9 entries already there.
 
 ### Round-5 docs gaps
 
-5. **PCMR (source-PCM-resolution) index → bits-per-sample**: the
-   wiki snapshot enumerates the field as 3 bits ("Source PCM
-   resolution") without listing the eight code values. ETSI TS
-   102 114 §5.3.1 documents this as (typically) a 3-bit width
-   plus a top "ES" flag mapping to 16 / 20 / 24 bps with
-   optional encoder-side ES indication. `DtsFrameHeader::source_pcm_bits_per_sample`
-   returns `None` until the table lands.
+5. **PCMR (source-PCM-resolution) index → bits-per-sample**:
+   *Resolved in round 202.* ETSI TS 102 114 V1.3.1 §5.3.1
+   Table 5-17 (staged at
+   `docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf` p.23)
+   enumerates the six valid codes — `(16, 0)` / `(16, 1)` /
+   `(20, 0)` / `(20, 1)` / `(24, 1)` / `(24, 0)` at codes
+   `{0, 1, 2, 3, 5, 6}` — and marks `{4, 7}` Invalid.
+   `DtsFrameHeader::source_pcm_bits_per_sample()` now resolves
+   the six valid codes and returns `None` for the two reserved
+   ones; `DtsFrameHeader::source_pcm_resolution()` preserves
+   both the bits-per-sample value and the auxiliary DTS-ES flag.
 6. **DIALNORM (dialog-normalization) code → dB**: the wiki
    describes the 4-bit field as "dB of recovery" without
    enumerating the code → dB mapping (the spec also documents a

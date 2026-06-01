@@ -60,10 +60,12 @@ fn parses_real_ffmpeg_frame_header() {
     // against ffprobe's external read of this same frame (768 kb/s).
     assert_eq!(hdr.bit_rate_bps(), Some(768_000));
     assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Fixed(768_000));
-    // The SFREQ (sample-rate) and AMODE (channel-count) tables are
-    // still missing from `docs/`, so those resolvers stay None.
-    assert_eq!(hdr.sample_rate_hz(), None);
-    assert_eq!(hdr.channel_count(), None);
+    // Round 202: SFREQ (Table 5-5) / AMODE (Table 5-4) / PCMR
+    // (Table 5-17) resolvers now wired up against the staged ETSI
+    // PDF. ffprobe reports this fixture as 48 kHz stereo with 16-bit
+    // source PCM, which matches the resolver outputs exactly.
+    assert_eq!(hdr.sample_rate_hz(), Some(48_000));
+    assert_eq!(hdr.channel_count(), Some(2));
 
     // Round 3: trailing-13-bit field as observed in the real
     // ffmpeg frame. Bytes 9..11 carry 0xE0 0x01 = 1110_0000
@@ -104,9 +106,10 @@ fn parses_real_ffmpeg_frame_header() {
     assert!(!hdr.front_sum);
     assert!(!hdr.surround_sum);
     assert_eq!(hdr.dialog_normalization, 0);
-    // The PCMR-bits-per-sample and DIALNORM-dB resolvers wait on
-    // the docs tables landing.
-    assert_eq!(hdr.source_pcm_bits_per_sample(), None);
+    // Round 202: PCMR (Table 5-17) resolves to 16-bit source PCM
+    // for this fixture (PCMR field = 0b000 in the post-CRC window).
+    // The DIALNORM-dB resolver still waits on Table 5-20 transcription.
+    assert_eq!(hdr.source_pcm_bits_per_sample(), Some(16));
     assert_eq!(hdr.dialog_normalization_db(), None);
 }
 
@@ -149,8 +152,10 @@ fn parses_14bit_be_repacked_ffmpeg_frame_header() {
     // container path (RATE 15 → 768 000 bps per Table 5-7).
     assert_eq!(hdr.bit_rate_bps(), Some(768_000));
     assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Fixed(768_000));
-    assert_eq!(hdr.sample_rate_hz(), None);
-    assert_eq!(hdr.channel_count(), None);
+    // Round 202: SFREQ / AMODE resolvers identical across all three
+    // documented encodings (48 kHz stereo from Tables 5-5 / 5-4).
+    assert_eq!(hdr.sample_rate_hz(), Some(48_000));
+    assert_eq!(hdr.channel_count(), Some(2));
     // Round 3: trailing-field equivalence with the raw-BE parse.
     assert_eq!(hdr.lfe, LfeMode::None);
     assert!(hdr.predictor_history);
@@ -186,6 +191,10 @@ fn parses_14bit_le_repacked_ffmpeg_frame_header() {
     // container path (RATE 15 → 768 000 bps per Table 5-7).
     assert_eq!(hdr.bit_rate_bps(), Some(768_000));
     assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Fixed(768_000));
+    // Round 202: SFREQ / AMODE resolvers identical across all three
+    // documented encodings (48 kHz stereo).
+    assert_eq!(hdr.sample_rate_hz(), Some(48_000));
+    assert_eq!(hdr.channel_count(), Some(2));
     // Round 3.
     assert_eq!(hdr.lfe, LfeMode::None);
     assert!(hdr.predictor_history);

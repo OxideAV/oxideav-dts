@@ -266,6 +266,254 @@ fn targeted_bit_rate_from_index(rate_index: u8) -> TargetedBitRate {
     }
 }
 
+// ---------------------------------------------------------------
+// Core audio sampling frequency — ETSI TS 102 114 V1.3.1 §5.3.1
+// Table 5-5 (PDF p.19).
+// ---------------------------------------------------------------
+//
+// SFREQ is a 4-bit field; six of the sixteen codes are documented as
+// "Invalid". The "Source Sampling Frequency" column of Table 5-5 is
+// the rate of the *original* PCM input to the encoder; for the
+// resampled-base-band core (>48 kHz inputs are split into core +
+// extended bands) the spec further notes that the encoder can only
+// process Fs_core ≤ 48 kHz, so the table's >48 kHz rows describe the
+// source rate, not the core-stream rate. This module surfaces the
+// SFREQ→Hz mapping exactly as Table 5-5 lists it.
+
+/// Core-audio sampling frequency decoded from the 4-bit `SFREQ`
+/// header field per **ETSI TS 102 114 V1.3.1 §5.3.1, Table 5-5**
+/// (PDF p.19). Seven of the sixteen codes are documented as
+/// *Invalid*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SampleFrequency {
+    /// One of the nine fixed source-sampling-frequency codes from
+    /// Table 5-5 (in Hertz; e.g. `SFREQ == 0b1101` → `48_000`).
+    Fixed(u32),
+    /// A reserved / invalid `SFREQ` code: codes `0b0000`, `0b0100`,
+    /// `0b0101`, `0b1001`, `0b1010`, `0b1110`, `0b1111` per Table 5-5.
+    Invalid,
+}
+
+/// Sampling-frequency-in-Hertz values for the nine fixed `SFREQ` codes
+/// of ETSI §5.3.1 Table 5-5. Indexed by `SFREQ` directly; `Invalid`
+/// entries are `0` and never reached through [`sample_frequency_from_index`].
+/// The nine non-zero values are (in code order, excluding invalid
+/// rows): 8 000 / 16 000 / 32 000 / 11 025 / 22 050 / 44 100 / 12 000
+/// / 24 000 / 48 000 — matching the spec's listed `Source Sampling
+/// Frequency` column verbatim.
+const SAMPLE_FREQUENCY_TABLE: [u32; 16] = [
+    0,      // 0b0000 Invalid
+    8_000,  // 0b0001 8 kHz
+    16_000, // 0b0010 16 kHz
+    32_000, // 0b0011 32 kHz
+    0,      // 0b0100 Invalid
+    0,      // 0b0101 Invalid
+    11_025, // 0b0110 11,025 kHz
+    22_050, // 0b0111 22,05 kHz
+    44_100, // 0b1000 44,1 kHz
+    0,      // 0b1001 Invalid
+    0,      // 0b1010 Invalid
+    12_000, // 0b1011 12 kHz
+    24_000, // 0b1100 24 kHz
+    48_000, // 0b1101 48 kHz
+    0,      // 0b1110 Invalid
+    0,      // 0b1111 Invalid
+];
+
+/// Resolve a raw 4-bit `SFREQ` index to its [`SampleFrequency`] per
+/// Table 5-5. The ten fixed rows map to `Fixed(hz)`; the six other
+/// codes map to `Invalid`.
+fn sample_frequency_from_index(sfreq_index: u8) -> SampleFrequency {
+    if sfreq_index >= 16 {
+        return SampleFrequency::Invalid;
+    }
+    let hz = SAMPLE_FREQUENCY_TABLE[sfreq_index as usize];
+    if hz == 0 {
+        SampleFrequency::Invalid
+    } else {
+        SampleFrequency::Fixed(hz)
+    }
+}
+
+// ---------------------------------------------------------------
+// Audio Channel Arrangement (AMODE) — ETSI TS 102 114 V1.3.1
+// §5.3.1 Table 5-4 (PDF p.18).
+// ---------------------------------------------------------------
+//
+// AMODE is a 6-bit field. Codes `0b000000..=0b001111` (0..=15) are
+// the sixteen standard arrangements; codes `0b010000..=0b111111`
+// (16..=63) are *User defined* (per Table 5-4's last row). The
+// arrangement column names channels using the spec's NOTE legend
+// (L = left, R = right, C = centre, S = surround, F = front,
+// R = rear, T = total, OV = overhead, A = first mono, B = second
+// mono). The CHS column is the channel count for each row.
+//
+// The LFE channel is **not** part of AMODE — it is gated by the
+// separate 2-bit LFE field (already surfaced via [`LfeMode`]).
+//
+// The CHS-by-AMODE-code mapping below is transcribed verbatim from
+// Table 5-4 (in code order, 0..=15):
+//   0=1, 1=2, 2=2, 3=2, 4=2, 5=3, 6=3, 7=4,
+//   8=4, 9=5, 10=6, 11=6, 12=6, 13=7, 14=8, 15=8.
+
+/// Standard audio channel arrangement decoded from the 6-bit `AMODE`
+/// header field per **ETSI TS 102 114 V1.3.1 §5.3.1, Table 5-4**
+/// (PDF p.18). Codes `0..=15` are the sixteen standard arrangements;
+/// `16..=63` are *User defined* and surfaced as
+/// [`Self::UserDefined`] with the raw code preserved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AmodeArrangement {
+    /// `0b000000` — A (mono, 1 channel).
+    Mono,
+    /// `0b000001` — A + B (dual mono, 2 channels).
+    DualMono,
+    /// `0b000010` — L + R (stereo, 2 channels).
+    Stereo,
+    /// `0b000011` — (L+R) + (L-R) (sum-difference, 2 channels).
+    SumDifference,
+    /// `0b000100` — LT + RT (left/right total, 2 channels).
+    LtRt,
+    /// `0b000101` — C + L + R (3 channels).
+    ClR,
+    /// `0b000110` — L + R + S (3 channels).
+    LrS,
+    /// `0b000111` — C + L + R + S (4 channels).
+    ClRS,
+    /// `0b001000` — L + R + SL + SR (4 channels).
+    LrSlSr,
+    /// `0b001001` — C + L + R + SL + SR (5 channels).
+    ClRSlSr,
+    /// `0b001010` — CL + CR + L + R + SL + SR (6 channels).
+    ClCrLRSlSr,
+    /// `0b001011` — C + L + R + LR + RR + OV (6 channels).
+    ClRLrRrOv,
+    /// `0b001100` — CF + CR + LF + RF + LR + RR (6 channels).
+    CfCrLfRfLrRr,
+    /// `0b001101` — CL + C + CR + L + R + SL + SR (7 channels).
+    ClCCrLRSlSr,
+    /// `0b001110` — CL + CR + L + R + SL1 + SL2 + SR1 + SR2
+    /// (8 channels).
+    ClCrLRSl1Sl2Sr1Sr2,
+    /// `0b001111` — CL + C + CR + L + R + SL + S + SR (8 channels).
+    ClCCrLRSlSSr,
+    /// `0b010000..=0b111111` — user-defined arrangement. The raw
+    /// 6-bit AMODE code is preserved; the channel count is not
+    /// derivable from the spec table.
+    UserDefined(u8),
+}
+
+impl AmodeArrangement {
+    /// Channel count (CHS column of Table 5-4) for the sixteen
+    /// standard arrangements. Returns `None` for [`Self::UserDefined`]
+    /// codes (the spec does not enumerate a CHS for those).
+    pub fn channel_count(self) -> Option<u8> {
+        match self {
+            AmodeArrangement::Mono => Some(1),
+            AmodeArrangement::DualMono
+            | AmodeArrangement::Stereo
+            | AmodeArrangement::SumDifference
+            | AmodeArrangement::LtRt => Some(2),
+            AmodeArrangement::ClR | AmodeArrangement::LrS => Some(3),
+            AmodeArrangement::ClRS | AmodeArrangement::LrSlSr => Some(4),
+            AmodeArrangement::ClRSlSr => Some(5),
+            AmodeArrangement::ClCrLRSlSr
+            | AmodeArrangement::ClRLrRrOv
+            | AmodeArrangement::CfCrLfRfLrRr => Some(6),
+            AmodeArrangement::ClCCrLRSlSr => Some(7),
+            AmodeArrangement::ClCrLRSl1Sl2Sr1Sr2 | AmodeArrangement::ClCCrLRSlSSr => Some(8),
+            AmodeArrangement::UserDefined(_) => None,
+        }
+    }
+}
+
+/// Resolve a raw 6-bit `AMODE` index to its [`AmodeArrangement`] per
+/// Table 5-4. Codes `0..=15` are the sixteen standard arrangements;
+/// codes `16..=63` are user-defined (preserved as
+/// [`AmodeArrangement::UserDefined`]).
+fn amode_arrangement_from_index(amode: u8) -> AmodeArrangement {
+    match amode {
+        0 => AmodeArrangement::Mono,
+        1 => AmodeArrangement::DualMono,
+        2 => AmodeArrangement::Stereo,
+        3 => AmodeArrangement::SumDifference,
+        4 => AmodeArrangement::LtRt,
+        5 => AmodeArrangement::ClR,
+        6 => AmodeArrangement::LrS,
+        7 => AmodeArrangement::ClRS,
+        8 => AmodeArrangement::LrSlSr,
+        9 => AmodeArrangement::ClRSlSr,
+        10 => AmodeArrangement::ClCrLRSlSr,
+        11 => AmodeArrangement::ClRLrRrOv,
+        12 => AmodeArrangement::CfCrLfRfLrRr,
+        13 => AmodeArrangement::ClCCrLRSlSr,
+        14 => AmodeArrangement::ClCrLRSl1Sl2Sr1Sr2,
+        15 => AmodeArrangement::ClCCrLRSlSSr,
+        // Codes 16..=63 are the user-defined range per Table 5-4's
+        // final row. Codes >63 cannot reach this function because the
+        // AMODE field is only 6 bits wide; we mask defensively.
+        code => AmodeArrangement::UserDefined(code & 0b0011_1111),
+    }
+}
+
+// ---------------------------------------------------------------
+// Source PCM Resolution (PCMR) — ETSI TS 102 114 V1.3.1
+// §5.3.1 Table 5-17 (PDF p.23).
+// ---------------------------------------------------------------
+//
+// PCMR is a 3-bit field. Table 5-17 lists six valid codes plus an
+// "Others" row marked invalid. Each valid code carries a (bits, ES)
+// pair where ES is a single auxiliary flag indicating that the L/R
+// surround channels of the source were mastered in DTS-ES format.
+// Code-to-(bits, ES) (from Table 5-17, in code order 0..=7):
+//   0b000=(16,0), 0b001=(16,1), 0b010=(20,0), 0b011=(20,1),
+//   0b110=(24,0), 0b101=(24,1), others=Invalid.
+
+/// Source-PCM-resolution decoded from the 3-bit `PCMR` header field
+/// per **ETSI TS 102 114 V1.3.1 §5.3.1, Table 5-17** (PDF p.23).
+/// The `es` flag indicates that the L/R surround channels were
+/// mastered in DTS-ES format (ES=1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SourcePcmResolution {
+    /// One of the six valid Table 5-17 rows: `bits` per source PCM
+    /// sample plus the auxiliary `es` flag.
+    Valid {
+        /// Source-PCM bits-per-sample (16, 20, or 24).
+        bits: u8,
+        /// DTS-ES indicator (ES column of Table 5-17).
+        es: bool,
+    },
+    /// A reserved / invalid `PCMR` code: codes `0b100` (4) and
+    /// `0b111` (7) per Table 5-17's "Others" row.
+    Invalid,
+}
+
+/// Resolve a raw 3-bit `PCMR` index to its [`SourcePcmResolution`]
+/// per Table 5-17. The six valid codes map to `Valid { bits, es }`;
+/// codes `4` and `7` map to `Invalid`.
+fn source_pcm_resolution_from_index(pcmr_index: u8) -> SourcePcmResolution {
+    match pcmr_index & 0b111 {
+        0b000 => SourcePcmResolution::Valid {
+            bits: 16,
+            es: false,
+        },
+        0b001 => SourcePcmResolution::Valid { bits: 16, es: true },
+        0b010 => SourcePcmResolution::Valid {
+            bits: 20,
+            es: false,
+        },
+        0b011 => SourcePcmResolution::Valid { bits: 20, es: true },
+        0b110 => SourcePcmResolution::Valid {
+            bits: 24,
+            es: false,
+        },
+        0b101 => SourcePcmResolution::Valid { bits: 24, es: true },
+        _ => SourcePcmResolution::Invalid,
+    }
+}
+
 /// Parsed DTS Core frame-sync header.
 ///
 /// Round 1 surfaces only the structural fields whose semantics are
@@ -293,10 +541,14 @@ pub struct DtsFrameHeader {
     /// Frame size in bytes (`FSIZE-1 + 1`, 95..=16384).
     pub frame_size_bytes: u16,
     /// Channel-configuration code (AMODE, 0..=63). 0..=15 are
-    /// standard layouts; 16..=63 are user-defined per the wiki.
+    /// standard layouts (per ETSI §5.3.1 Table 5-4 — resolved by
+    /// [`Self::amode_arrangement`] / [`Self::channel_count`]);
+    /// 16..=63 are user-defined.
     pub amode: u8,
-    /// Sample-frequency index (SFREQ, 0..=15). The Hz mapping is
-    /// not yet in `docs/`; see [`Self::sample_rate_hz`].
+    /// Sample-frequency index (SFREQ, 0..=15) per ETSI §5.3.1
+    /// Table 5-5. Resolved by [`Self::sample_rate_hz`] /
+    /// [`Self::sample_frequency`] (six codes are documented as
+    /// `Invalid` per the spec).
     pub sfreq_index: u8,
     /// Transmission-bitrate index (RATE, 0..=31). Resolves to a
     /// targeted bit-rate via ETSI §5.3.1 Table 5-7 — see
@@ -358,11 +610,11 @@ pub struct DtsFrameHeader {
     /// snapshot does not document the per-code semantics; raw value
     /// preserved.
     pub copy_history: u8,
-    /// Source-PCM-resolution index (`PCMR`, 3 bits, 0..=7). The
-    /// resolution-bits-per-sample mapping (typically 16 / 20 / 24
-    /// per ETSI TS 102 114 §5.3) is not in the wiki snapshot, so
-    /// [`Self::source_pcm_bits_per_sample`] returns `None` until the
-    /// table lands in `docs/`.
+    /// Source-PCM-resolution index (`PCMR`, 3 bits, 0..=7) per ETSI
+    /// §5.3.1 Table 5-17. Resolved by
+    /// [`Self::source_pcm_bits_per_sample`] /
+    /// [`Self::source_pcm_resolution`] (six codes are valid, two
+    /// (`0b100` / `0b111`) are documented as `Invalid`).
     pub source_pcm_resolution_index: u8,
     /// Front-channel sum/difference flag (`FRONT_SUM`, 1 bit). For
     /// stereo encodings, signals that the front L/R channels were
@@ -383,15 +635,36 @@ pub struct DtsFrameHeader {
 }
 
 impl DtsFrameHeader {
-    /// Resolve [`Self::sfreq_index`] to a sample-rate in Hertz.
+    /// Resolve [`Self::sfreq_index`] to a sample-rate in Hertz per
+    /// ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-5 (PDF p.19).
     ///
-    /// Returns `None` for now: the index→Hz table is missing from
-    /// `docs/audio/dts/`. The wiki snapshot says "See table below"
-    /// but the table itself was not mirrored. Once a clean-room
-    /// source for the table lands the resolver will be filled in.
+    /// Returns `Some(hz)` for the nine valid `SFREQ` codes (e.g.
+    /// code `0b1101` → `Some(48_000)`), and `None` for the seven
+    /// codes Table 5-5 lists as *Invalid* (`0b0000`, `0b0100`,
+    /// `0b0101`, `0b1001`, `0b1010`, `0b1110`, `0b1111`). Callers
+    /// that need to distinguish "valid rate" from "invalid code"
+    /// should use [`Self::sample_frequency`].
+    ///
+    /// Per Table 5-5's note, the value is the **source** sampling
+    /// frequency. For inputs ≤ 48 kHz the source rate equals the
+    /// core rate; for >48 kHz inputs the encoder splits the spectrum
+    /// into a core band ≤ 48 kHz plus extended bands carrying the
+    /// remainder.
     pub fn sample_rate_hz(&self) -> Option<u32> {
-        let _ = self.sfreq_index;
-        None
+        match self.sample_frequency() {
+            SampleFrequency::Fixed(hz) => Some(hz),
+            SampleFrequency::Invalid => None,
+        }
+    }
+
+    /// Resolve [`Self::sfreq_index`] to its [`SampleFrequency`] per
+    /// ETSI TS 102 114 §5.3.1 Table 5-5.
+    ///
+    /// Richer counterpart to [`Self::sample_rate_hz`]: preserves the
+    /// `Fixed` / `Invalid` distinction the `Option<u32>` accessor
+    /// collapses to `None`.
+    pub fn sample_frequency(&self) -> SampleFrequency {
+        sample_frequency_from_index(self.sfreq_index)
     }
 
     /// Resolve [`Self::rate_index`] to its targeted transmission
@@ -422,30 +695,60 @@ impl DtsFrameHeader {
     }
 
     /// Resolve [`Self::amode`] to a count of audio channels (LFE
-    /// excluded; round 3 surfaces the LFE field separately via
-    /// [`Self::lfe`] / [`LfeMode::is_present`]).
+    /// excluded; the LFE field is surfaced separately via
+    /// [`Self::lfe`] / [`LfeMode::is_present`]) per ETSI TS 102 114
+    /// V1.3.1 §5.3.1 Table 5-4 (PDF p.18).
     ///
-    /// Returns `None` for now: the AMODE→channel-layout table is
-    /// missing from `docs/audio/dts/`. The wiki snapshot only says
-    /// "0..=15 standard, 16..=63 user-defined" without spelling
-    /// out the layouts.
+    /// Returns `Some(chs)` for the sixteen standard AMODE codes
+    /// (e.g. code `2` → `Some(2)` for L+R stereo), and `None` for
+    /// codes `16..=63` which Table 5-4's final row marks *User
+    /// defined* — those codes carry no fixed channel-count in the
+    /// spec table. Callers that want to inspect the full arrangement
+    /// (per-channel placement, sum/difference encoding, etc.) should
+    /// use [`Self::amode_arrangement`].
     pub fn channel_count(&self) -> Option<u8> {
-        let _ = self.amode;
-        None
+        self.amode_arrangement().channel_count()
+    }
+
+    /// Resolve [`Self::amode`] to its [`AmodeArrangement`] per ETSI
+    /// TS 102 114 §5.3.1 Table 5-4.
+    ///
+    /// Richer counterpart to [`Self::channel_count`]: returns the
+    /// full arrangement enum (named per Table 5-4) so callers can
+    /// branch on the playback layout (mono / dual-mono / stereo /
+    /// sum-difference / LtRt / various multichannel arrangements)
+    /// rather than just the channel count. User-defined codes
+    /// (`16..=63`) round-trip the raw 6-bit value through
+    /// [`AmodeArrangement::UserDefined`].
+    pub fn amode_arrangement(&self) -> AmodeArrangement {
+        amode_arrangement_from_index(self.amode)
     }
 
     /// Resolve [`Self::source_pcm_resolution_index`] to the source
-    /// PCM bits-per-sample value the encoder declared.
+    /// PCM bits-per-sample value the encoder declared per ETSI
+    /// TS 102 114 V1.3.1 §5.3.1 Table 5-17 (PDF p.23).
     ///
-    /// Returns `None` for now: the PCMR-index→bits table is missing
-    /// from `docs/audio/dts/`. The wiki snapshot names the field as
-    /// "Source PCM resolution" (3 bits) without enumerating the
-    /// per-code mapping; ETSI TS 102 114 §5.3.1 documents it
-    /// (and the most-significant-bit "ES" flag the spec adds on
-    /// top of the 3-bit width).
+    /// Returns `Some(bits)` for the six valid `PCMR` codes (e.g.
+    /// code `0b000` → `Some(16)`), and `None` for the two codes
+    /// Table 5-17's "Others" row marks *Invalid* (`0b100` and
+    /// `0b111`). The auxiliary DTS-ES flag is dropped by this
+    /// accessor; callers that need both halves should use
+    /// [`Self::source_pcm_resolution`].
     pub fn source_pcm_bits_per_sample(&self) -> Option<u8> {
-        let _ = self.source_pcm_resolution_index;
-        None
+        match self.source_pcm_resolution() {
+            SourcePcmResolution::Valid { bits, .. } => Some(bits),
+            SourcePcmResolution::Invalid => None,
+        }
+    }
+
+    /// Resolve [`Self::source_pcm_resolution_index`] to its
+    /// [`SourcePcmResolution`] per ETSI TS 102 114 §5.3.1 Table 5-17.
+    ///
+    /// Richer counterpart to [`Self::source_pcm_bits_per_sample`]:
+    /// preserves the DTS-ES (`es`) flag that Table 5-17 stores
+    /// alongside the bits-per-sample column.
+    pub fn source_pcm_resolution(&self) -> SourcePcmResolution {
+        source_pcm_resolution_from_index(self.source_pcm_resolution_index)
     }
 
     /// Resolve [`Self::dialog_normalization`] to a dB value.
@@ -1884,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_frame_header_14bit_value_resolvers_still_none() {
+    fn parse_frame_header_14bit_value_resolvers_resolve_through_14bit_path() {
         let packed = build_14bit_packed_header(
             FourteenBitByteOrder::BigEndian,
             1,
@@ -1900,17 +2203,17 @@ mod tests {
             0,
         );
         let hdr = parse_frame_header_14bit(&packed).unwrap();
-        // The SFREQ/AMODE tables remain missing from docs/, so those
-        // resolvers still return None. RATE code 25 (0b11001) is an
-        // invalid code per Table 5-7, so bit_rate_bps() is None for a
-        // now-documented reason (not a missing table).
-        assert_eq!(hdr.sample_rate_hz(), None);
+        // Round 202: SFREQ=13 → 48 kHz; AMODE=9 → ClRSlSr (5 channels);
+        // PCMR=0 → 16-bit. RATE code 25 (0b11001) is documented as
+        // invalid per Table 5-7, so bit_rate_bps() stays None (for a
+        // now-documented reason — invalid code, not a missing table).
+        // The DIALNORM-dB resolver still waits on Table 5-20.
+        assert_eq!(hdr.sample_rate_hz(), Some(48_000));
         assert_eq!(hdr.bit_rate_bps(), None);
         assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Invalid);
-        assert_eq!(hdr.channel_count(), None);
-        // Round 5: the PCMR and DIALNORM resolvers also remain
-        // None until the docs tables land.
-        assert_eq!(hdr.source_pcm_bits_per_sample(), None);
+        assert_eq!(hdr.channel_count(), Some(5));
+        assert_eq!(hdr.amode_arrangement(), AmodeArrangement::ClRSlSr);
+        assert_eq!(hdr.source_pcm_bits_per_sample(), Some(16));
         assert_eq!(hdr.dialog_normalization_db(), None);
     }
 
@@ -1921,19 +2224,21 @@ mod tests {
     }
 
     #[test]
-    fn value_resolvers_return_none_until_tables_land() {
+    fn value_resolvers_resolve_per_round_202_tables() {
         let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0), 0);
         let hdr = parse_frame_header(&bytes).unwrap();
-        // SFREQ (sample-rate) and AMODE (channel) tables are still
-        // missing; those resolvers return None.
-        assert_eq!(hdr.sample_rate_hz(), None);
-        assert_eq!(hdr.channel_count(), None);
+        // Round 202: SFREQ=13 → 48 kHz (Table 5-5); AMODE=9 →
+        // ClRSlSr / 5-channel arrangement (Table 5-4); PCMR=0 →
+        // 16-bit (Table 5-17).
+        assert_eq!(hdr.sample_rate_hz(), Some(48_000));
+        assert_eq!(hdr.channel_count(), Some(5));
+        assert_eq!(hdr.amode_arrangement(), AmodeArrangement::ClRSlSr);
+        assert_eq!(hdr.source_pcm_bits_per_sample(), Some(16));
         // RATE code 25 (0b11001) is an invalid Table 5-7 code →
         // bit_rate_bps() None, targeted_bit_rate() Invalid.
         assert_eq!(hdr.bit_rate_bps(), None);
         assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Invalid);
-        // Round 5 resolvers wait on their own docs gaps too.
-        assert_eq!(hdr.source_pcm_bits_per_sample(), None);
+        // The DIALNORM-dB resolver still waits on Table 5-20.
         assert_eq!(hdr.dialog_normalization_db(), None);
     }
 
@@ -2156,9 +2461,8 @@ mod tests {
     }
 
     /// Walk every 3-bit PCMR code (0..=7) and confirm the parser
-    /// preserves the raw index. The resolver
-    /// `source_pcm_bits_per_sample()` is still `None` because the
-    /// code→bits-per-sample table is missing from `docs/`.
+    /// preserves the raw index and that the round-202 resolver
+    /// follows Table 5-17.
     #[test]
     fn pcmr_index_round_trips_for_every_3bit_code() {
         for code in 0..=7u32 {
@@ -2171,11 +2475,18 @@ mod tests {
                 hdr.source_pcm_resolution_index, code as u8,
                 "PCMR code {code}"
             );
-            assert_eq!(
-                hdr.source_pcm_bits_per_sample(),
-                None,
-                "PCMR resolver must remain None until docs land",
-            );
+            // Round 202: resolver follows Table 5-17 (codes 4 and 7
+            // are Invalid; the other six map to (bits, es) pairs).
+            let exp = source_pcm_resolution_from_index(code as u8);
+            assert_eq!(hdr.source_pcm_resolution(), exp);
+            match exp {
+                SourcePcmResolution::Valid { bits, .. } => {
+                    assert_eq!(hdr.source_pcm_bits_per_sample(), Some(bits));
+                }
+                SourcePcmResolution::Invalid => {
+                    assert_eq!(hdr.source_pcm_bits_per_sample(), None);
+                }
+            }
         }
     }
 
@@ -3336,5 +3647,326 @@ mod tests {
         // emits exactly 13 bytes for crc_present == false).
         assert_eq!(&unpacked[..raw_be.len()], &raw_be[..]);
         assert_eq!(&unpacked[..4], &[0x7F, 0xFE, 0x80, 0x01]);
+    }
+
+    // ---------------------------------------------------------------
+    // Round 202 — SFREQ / AMODE / PCMR resolvers
+    // (ETSI §5.3.1 Tables 5-5 / 5-4 / 5-17).
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn sample_frequency_from_index_covers_table_5_5_verbatim() {
+        // Per ETSI TS 102 114 §5.3.1 Table 5-5: nine valid rows, seven
+        // invalid rows. Each row checked individually so any future
+        // table edit fails this test loudly.
+        assert_eq!(
+            sample_frequency_from_index(0b0000),
+            SampleFrequency::Invalid
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b0001),
+            SampleFrequency::Fixed(8_000)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b0010),
+            SampleFrequency::Fixed(16_000)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b0011),
+            SampleFrequency::Fixed(32_000)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b0100),
+            SampleFrequency::Invalid
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b0101),
+            SampleFrequency::Invalid
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b0110),
+            SampleFrequency::Fixed(11_025)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b0111),
+            SampleFrequency::Fixed(22_050)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b1000),
+            SampleFrequency::Fixed(44_100)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b1001),
+            SampleFrequency::Invalid
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b1010),
+            SampleFrequency::Invalid
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b1011),
+            SampleFrequency::Fixed(12_000)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b1100),
+            SampleFrequency::Fixed(24_000)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b1101),
+            SampleFrequency::Fixed(48_000)
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b1110),
+            SampleFrequency::Invalid
+        );
+        assert_eq!(
+            sample_frequency_from_index(0b1111),
+            SampleFrequency::Invalid
+        );
+    }
+
+    #[test]
+    fn sample_frequency_table_has_exactly_nine_valid_codes() {
+        let valid: usize = (0u8..16)
+            .filter(|&code| matches!(sample_frequency_from_index(code), SampleFrequency::Fixed(_)))
+            .count();
+        // Table 5-5 enumerates nine valid rows: 8/16/32/11.025/22.05/44.1/12/24/48 kHz.
+        assert_eq!(valid, 9);
+    }
+
+    #[test]
+    fn sample_rate_hz_returns_some_for_valid_and_none_for_invalid() {
+        // Build a synthetic header for each of the sixteen SFREQ codes
+        // and verify sample_rate_hz() round-trips through the parser.
+        for code in 0..16u32 {
+            let header_bytes = build_be_header(
+                /* ftype */ 1, /* sample_count_m1 */ 31, /* crc_present */ 0,
+                /* nblks */ 15, /* fsize_m1 */ 1023, /* amode */ 2,
+                /* sfreq */ code, /* rate */ 15, /* extra_bits */ 0,
+                /* header_crc */ None, /* post_crc */ 0,
+            );
+            let hdr = parse_frame_header(&header_bytes).unwrap_or_else(|e| {
+                panic!("parse_frame_header failed for sfreq={code:04b}: {e:?}")
+            });
+            assert_eq!(hdr.sfreq_index, code as u8);
+            match sample_frequency_from_index(code as u8) {
+                SampleFrequency::Fixed(hz) => {
+                    assert_eq!(hdr.sample_rate_hz(), Some(hz));
+                    assert_eq!(hdr.sample_frequency(), SampleFrequency::Fixed(hz));
+                }
+                SampleFrequency::Invalid => {
+                    assert_eq!(hdr.sample_rate_hz(), None);
+                    assert_eq!(hdr.sample_frequency(), SampleFrequency::Invalid);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn amode_arrangement_from_index_covers_table_5_4_verbatim() {
+        // Per ETSI TS 102 114 §5.3.1 Table 5-4: sixteen standard
+        // arrangements at codes 0..=15, plus a user-defined band at
+        // codes 16..=63.
+        assert_eq!(amode_arrangement_from_index(0), AmodeArrangement::Mono);
+        assert_eq!(amode_arrangement_from_index(1), AmodeArrangement::DualMono);
+        assert_eq!(amode_arrangement_from_index(2), AmodeArrangement::Stereo);
+        assert_eq!(
+            amode_arrangement_from_index(3),
+            AmodeArrangement::SumDifference
+        );
+        assert_eq!(amode_arrangement_from_index(4), AmodeArrangement::LtRt);
+        assert_eq!(amode_arrangement_from_index(5), AmodeArrangement::ClR);
+        assert_eq!(amode_arrangement_from_index(6), AmodeArrangement::LrS);
+        assert_eq!(amode_arrangement_from_index(7), AmodeArrangement::ClRS);
+        assert_eq!(amode_arrangement_from_index(8), AmodeArrangement::LrSlSr);
+        assert_eq!(amode_arrangement_from_index(9), AmodeArrangement::ClRSlSr);
+        assert_eq!(
+            amode_arrangement_from_index(10),
+            AmodeArrangement::ClCrLRSlSr
+        );
+        assert_eq!(
+            amode_arrangement_from_index(11),
+            AmodeArrangement::ClRLrRrOv
+        );
+        assert_eq!(
+            amode_arrangement_from_index(12),
+            AmodeArrangement::CfCrLfRfLrRr
+        );
+        assert_eq!(
+            amode_arrangement_from_index(13),
+            AmodeArrangement::ClCCrLRSlSr
+        );
+        assert_eq!(
+            amode_arrangement_from_index(14),
+            AmodeArrangement::ClCrLRSl1Sl2Sr1Sr2
+        );
+        assert_eq!(
+            amode_arrangement_from_index(15),
+            AmodeArrangement::ClCCrLRSlSSr
+        );
+        // Codes 16..=63 are user-defined; spot-check a few.
+        for code in [16u8, 17, 31, 32, 47, 62, 63] {
+            assert_eq!(
+                amode_arrangement_from_index(code),
+                AmodeArrangement::UserDefined(code),
+                "user-defined code {code} must round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn amode_channel_count_matches_table_5_4_chs_column() {
+        // Per Table 5-4 CHS column (in code order 0..=15):
+        // 1,2,2,2,2,3,3,4,4,5,6,6,6,7,8,8.
+        let expected: [u8; 16] = [1, 2, 2, 2, 2, 3, 3, 4, 4, 5, 6, 6, 6, 7, 8, 8];
+        for (code, exp) in expected.iter().enumerate() {
+            assert_eq!(
+                amode_arrangement_from_index(code as u8).channel_count(),
+                Some(*exp),
+                "channel_count for AMODE={code:02} (binary={code:06b})"
+            );
+        }
+        // User-defined codes have no fixed CHS in the spec.
+        for code in [16u8, 32, 63] {
+            assert_eq!(
+                amode_arrangement_from_index(code).channel_count(),
+                None,
+                "user-defined AMODE={code} must report None CHS"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_count_returns_some_for_standard_and_none_for_user_defined() {
+        // Walk all 64 possible AMODE codes through the parser and
+        // check the channel_count() round-trip.
+        for code in 0..64u32 {
+            let header_bytes = build_be_header(
+                /* ftype */ 1, /* sample_count_m1 */ 31, /* crc_present */ 0,
+                /* nblks */ 15, /* fsize_m1 */ 1023, /* amode */ code,
+                /* sfreq */ 13, /* rate */ 15, /* extra_bits */ 0,
+                /* header_crc */ None, /* post_crc */ 0,
+            );
+            let hdr = parse_frame_header(&header_bytes)
+                .unwrap_or_else(|e| panic!("parse_frame_header failed for amode={code}: {e:?}"));
+            assert_eq!(hdr.amode, code as u8);
+            assert_eq!(
+                hdr.amode_arrangement(),
+                amode_arrangement_from_index(code as u8)
+            );
+            let exp = amode_arrangement_from_index(code as u8).channel_count();
+            assert_eq!(hdr.channel_count(), exp, "channel_count for amode={code}");
+        }
+    }
+
+    #[test]
+    fn source_pcm_resolution_from_index_covers_table_5_17_verbatim() {
+        // Per ETSI TS 102 114 §5.3.1 Table 5-17: six valid (bits, es)
+        // pairs at codes {0,1,2,3,5,6}; codes {4,7} are invalid.
+        assert_eq!(
+            source_pcm_resolution_from_index(0b000),
+            SourcePcmResolution::Valid {
+                bits: 16,
+                es: false
+            }
+        );
+        assert_eq!(
+            source_pcm_resolution_from_index(0b001),
+            SourcePcmResolution::Valid { bits: 16, es: true }
+        );
+        assert_eq!(
+            source_pcm_resolution_from_index(0b010),
+            SourcePcmResolution::Valid {
+                bits: 20,
+                es: false
+            }
+        );
+        assert_eq!(
+            source_pcm_resolution_from_index(0b011),
+            SourcePcmResolution::Valid { bits: 20, es: true }
+        );
+        assert_eq!(
+            source_pcm_resolution_from_index(0b100),
+            SourcePcmResolution::Invalid
+        );
+        assert_eq!(
+            source_pcm_resolution_from_index(0b101),
+            SourcePcmResolution::Valid { bits: 24, es: true }
+        );
+        assert_eq!(
+            source_pcm_resolution_from_index(0b110),
+            SourcePcmResolution::Valid {
+                bits: 24,
+                es: false
+            }
+        );
+        assert_eq!(
+            source_pcm_resolution_from_index(0b111),
+            SourcePcmResolution::Invalid
+        );
+    }
+
+    #[test]
+    fn source_pcm_bits_per_sample_returns_some_for_valid_and_none_for_invalid() {
+        // The PCMR field lives 6 bits deep in the 16-bit post-CRC
+        // window (the wiki layout: MSB→LSB is
+        // multirate_inter[1] | version[4] | copy_history[2] |
+        // PCMR[3] | front_sum[1] | surround_sum[1] | dialnorm[4]).
+        // PCMR therefore occupies bits 6..=8 (1-indexed from LSB:
+        // positions 8..=6 from MSB).
+        for code in 0..8u32 {
+            let post_crc = code << 6; // place PCMR at bits 8..=6 (MSB→LSB).
+            let header_bytes = build_be_header(
+                /* ftype */ 1, /* sample_count_m1 */ 31, /* crc_present */ 0,
+                /* nblks */ 15, /* fsize_m1 */ 1023, /* amode */ 2,
+                /* sfreq */ 13, /* rate */ 15, /* extra_bits */ 0,
+                /* header_crc */ None, /* post_crc */ post_crc,
+            );
+            let hdr = parse_frame_header(&header_bytes)
+                .unwrap_or_else(|e| panic!("parse_frame_header failed for pcmr={code}: {e:?}"));
+            assert_eq!(hdr.source_pcm_resolution_index, code as u8);
+            assert_eq!(
+                hdr.source_pcm_resolution(),
+                source_pcm_resolution_from_index(code as u8)
+            );
+            match source_pcm_resolution_from_index(code as u8) {
+                SourcePcmResolution::Valid { bits, .. } => {
+                    assert_eq!(hdr.source_pcm_bits_per_sample(), Some(bits));
+                }
+                SourcePcmResolution::Invalid => {
+                    assert_eq!(hdr.source_pcm_bits_per_sample(), None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ffmpeg_fixture_resolves_to_48k_stereo_16bit() {
+        // The bundled ffmpeg-encoded fixture in tests/black_box_ffmpeg.rs
+        // has sfreq_index=13 (48 kHz), amode=2 (stereo), and
+        // source_pcm_resolution_index=0 (16-bit, ES=0). Mirror the
+        // resolution path here so the unit-test layer fails as loudly
+        // as the integration-test layer would.
+        let header_bytes = build_be_header(
+            /* ftype */ 1, /* sample_count_m1 */ 31, /* crc_present */ 0,
+            /* nblks */ 15, /* fsize_m1 */ 1023,
+            /* amode */ 2, // Stereo (L+R).
+            /* sfreq */ 13, // 48 kHz.
+            /* rate */ 15, // 768 kb/s.
+            /* extra_bits */ 0, /* header_crc */ None,
+            /* post_crc */ 0, // PCMR=0 → 16-bit, ES=0.
+        );
+        let hdr = parse_frame_header(&header_bytes).unwrap();
+        assert_eq!(hdr.sample_rate_hz(), Some(48_000));
+        assert_eq!(hdr.channel_count(), Some(2));
+        assert_eq!(hdr.amode_arrangement(), AmodeArrangement::Stereo);
+        assert_eq!(hdr.source_pcm_bits_per_sample(), Some(16));
+        assert_eq!(
+            hdr.source_pcm_resolution(),
+            SourcePcmResolution::Valid {
+                bits: 16,
+                es: false
+            }
+        );
     }
 }

@@ -8,6 +8,50 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 202 (2026-06-01) — `SFREQ` / `AMODE` / `PCMR` value-table
+  resolvers (ETSI TS 102 114 V1.3.1 §5.3.1 Tables 5-5 / 5-4 / 5-17,
+  PDF pp.18-23). Closes the three sample-rate / channel-count /
+  source-PCM-resolution `Option`-resolver gaps that have been
+  documented in README "Docs gaps" since round 1 (#1, #3, #5):
+  - `SampleFrequency` enum + `DtsFrameHeader::sample_frequency()` /
+    `DtsFrameHeader::sample_rate_hz()` resolve `SFREQ` to one of
+    nine fixed source-sampling-frequency values (8/16/32/11.025/
+    22.05/44.1/12/24/48 kHz) or `Invalid` for the seven reserved
+    codes (`0b0000`, `0b0100`, `0b0101`, `0b1001`, `0b1010`,
+    `0b1110`, `0b1111`), per Table 5-5.
+  - `AmodeArrangement` enum + `DtsFrameHeader::amode_arrangement()` /
+    `DtsFrameHeader::channel_count()` resolve `AMODE` to the
+    sixteen standard arrangements at codes `0..=15`
+    (`Mono` / `DualMono` / `Stereo` / `SumDifference` / `LtRt` /
+    `ClR` / `LrS` / `ClRS` / `LrSlSr` / `ClRSlSr` / `ClCrLRSlSr` /
+    `ClRLrRrOv` / `CfCrLfRfLrRr` / `ClCCrLRSlSr` /
+    `ClCrLRSl1Sl2Sr1Sr2` / `ClCCrLRSlSSr`) with the CHS column
+    surfaced via `AmodeArrangement::channel_count()`, plus
+    `UserDefined(u8)` for codes `16..=63` (Table 5-4's user-defined
+    band).
+  - `SourcePcmResolution` enum + `DtsFrameHeader::source_pcm_resolution()`
+    / `DtsFrameHeader::source_pcm_bits_per_sample()` resolve `PCMR`
+    to one of six valid `(bits, es)` pairs (16/16/20/20/24/24 bits
+    with the auxiliary DTS-ES flag) at codes `{0,1,2,3,5,6}` or
+    `Invalid` for the two reserved codes `{4, 7}` per Table 5-17.
+  Seven new lib-level tests in `src/header.rs` lock the
+  table-row-by-table-row mapping down: exhaustive 16-code SFREQ
+  walk, 64-code AMODE walk (sixteen standard + 48 user-defined),
+  8-code PCMR walk, plus a Table 5-4 CHS-column reproduction
+  test and a `ffmpeg_fixture_resolves_to_48k_stereo_16bit` end-to-
+  end check that exercises the new resolvers against the same
+  synthetic header geometry as the bundled black-box fixture. The
+  black-box integration tests in `tests/black_box_ffmpeg.rs` now
+  assert `sample_rate_hz() == Some(48_000)`, `channel_count() == Some(2)`,
+  and `source_pcm_bits_per_sample() == Some(16)` across the three
+  documented sync encodings (raw-BE, 14-bit-BE, 14-bit-LE) of the
+  same ffmpeg-encoded 48 kHz / stereo / 768 kb/s frame. The
+  `DIALNORM`-code-to-dB mapping (Table 5-20) remains a docs-
+  completeness follow-up — the table's row order in the staged
+  PDF straddles the `VERNUM == 6` and `VERNUM == 7` sign-convention
+  columns and needs a tighter transcription before
+  `dialog_normalization_db()` can resolve.
+
 - Round 195 (2026-05-31) — §5.4.1 ABITS / SCALES (a.k.a. ALLOC /
   SCFAC) Primary Audio Coding Side Information bit-stream decoders,
   with the Annex D §D.5.6 / §D.5.3 / §D.5.4 small-Huffman codebooks

@@ -84,13 +84,15 @@ oxideav_core::register!("dts", register);
 
 /// Decoder factory for the DTS Core profile.
 ///
-/// Round-4 returns a handle whose [`Decoder::send_packet`] parses the
-/// frame header eagerly (so structural failures — bad sync, NBLKS
-/// below 5, frame size below 95 bytes, truncated header — surface at
-/// the packet boundary) and whose [`Decoder::receive_frame`] returns
-/// [`CoreError::Unsupported`] because the SFREQ/RATE/AMODE value
-/// tables required to emit a PCM frame are still gated on a `docs/`
-/// follow-up (see `README.md` "Docs gaps").
+/// Returns a handle whose [`Decoder::send_packet`] parses the frame
+/// header eagerly (so structural failures — bad sync, NBLKS below 5,
+/// frame size below 95 bytes, truncated header — surface at the
+/// packet boundary) and whose [`Decoder::receive_frame`] returns
+/// [`CoreError::Unsupported`] because the subframe / subband /
+/// QMF-synthesis decode path required to emit a PCM frame is still
+/// gated on follow-up rounds (the RATE / SFREQ / AMODE / PCMR
+/// header-level value tables landed in rounds 185 / 202, but the
+/// actual subframe walker remains incomplete).
 pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
     Ok(Box::new(DtsDecoderHandle {
         codec_id: params.codec_id.clone(),
@@ -154,16 +156,18 @@ impl Decoder for DtsDecoderHandle {
                 Err(CoreError::NeedMore)
             };
         }
-        // The SFREQ→Hz, RATE→bps, AMODE→channel-layout tables are not
-        // in `docs/audio/dts/` yet (see README "Docs gaps"). Without
-        // them we cannot emit a PCM frame even if subband decoding
-        // were wired up. Surface the gap as `Unsupported` so callers
-        // can distinguish "decoder hasn't seen a packet" (NeedMore)
-        // from "decoder rejects this build of the codec stack"
-        // (Unsupported).
+        // The RATE / SFREQ / AMODE / PCMR header-level value tables
+        // landed in rounds 185 (RATE) and 202 (SFREQ / AMODE / PCMR),
+        // but the actual subframe / subband / QMF-synthesis decode
+        // path required to emit a PCM frame is still incomplete (the
+        // §5.4.1 side-info decoders landed in round 195; the
+        // §5.4-onwards subframe walker is the next stage). Surface
+        // that gap as `Unsupported` so callers can distinguish
+        // "decoder hasn't seen a packet" (NeedMore) from "decoder
+        // rejects this build of the codec stack" (Unsupported).
         Err(CoreError::unsupported(
-            "oxideav-dts: PCM output gated on SFREQ/RATE/AMODE value \
-             tables landing in docs/audio/dts/ (see README docs gaps)",
+            "oxideav-dts: PCM output gated on the §5.4-onwards \
+             subframe / subband / QMF-synthesis decode path",
         ))
     }
 

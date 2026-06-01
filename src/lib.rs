@@ -230,14 +230,18 @@
 //! table landed in round 185 from ETSI TS 102 114 §5.3.1 Table 5-7
 //! (`docs/audio/dts/dts-core-extracts.md` §1): [`TargetedBitRate`] /
 //! [`DtsFrameHeader::targeted_bit_rate`] /
-//! [`DtsFrameHeader::bit_rate_bps`] now resolve. The remaining value
-//! tables (sample frequency / channel-configuration / source PCM
-//! resolution / dialog normalization) are still missing, so
-//! [`DtsFrameHeader::sample_rate_hz`],
-//! [`DtsFrameHeader::channel_count`],
-//! [`DtsFrameHeader::source_pcm_bits_per_sample`], and
-//! [`DtsFrameHeader::dialog_normalization_db`] return `None` until
-//! they land in `docs/`. See `README.md`'s "Docs gaps" section.
+//! [`DtsFrameHeader::bit_rate_bps`] now resolve. Round 202 landed
+//! the sample-frequency, channel-configuration, and source-PCM-
+//! resolution tables (ETSI §5.3.1 Tables 5-5 / 5-4 / 5-17 from the
+//! staged PDF): [`SampleFrequency`] / [`DtsFrameHeader::sample_rate_hz`]
+//! / [`DtsFrameHeader::sample_frequency`], [`AmodeArrangement`] /
+//! [`DtsFrameHeader::channel_count`] /
+//! [`DtsFrameHeader::amode_arrangement`], and [`SourcePcmResolution`]
+//! / [`DtsFrameHeader::source_pcm_bits_per_sample`] /
+//! [`DtsFrameHeader::source_pcm_resolution`] now resolve. The
+//! dialog-normalization table (Table 5-20) is still pending, so
+//! [`DtsFrameHeader::dialog_normalization_db`] returns `None` until
+//! it lands in `docs/`. See `README.md`'s "Docs gaps" section.
 //!
 //! ## What does *not* belong here
 //!
@@ -253,6 +257,14 @@
 //! - [`FrameType`] — termination vs normal.
 //! - [`TargetedBitRate`] — `RATE`-field resolution (fixed / open /
 //!   invalid) per ETSI §5.3.1 Table 5-7 (added in round 185).
+//! - [`SampleFrequency`] — `SFREQ`-field resolution (fixed / invalid)
+//!   per ETSI §5.3.1 Table 5-5 (added in round 202).
+//! - [`AmodeArrangement`] — `AMODE`-field resolution (sixteen
+//!   standard arrangements + user-defined codes) per ETSI §5.3.1
+//!   Table 5-4 (added in round 202).
+//! - [`SourcePcmResolution`] — `PCMR`-field resolution (valid
+//!   bits + ES flag, or invalid) per ETSI §5.3.1 Table 5-17 (added
+//!   in round 202).
 //! - [`parse_frame_header`] — non-allocating single-frame parser
 //!   for the two raw 16-bit syncs.
 //! - [`parse_frame_header_14bit`] — single-frame parser for the two
@@ -321,8 +333,9 @@ mod registry;
 
 pub use crate::header::{
     encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,
-    encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, DtsFrameHeader,
-    FrameType, LfeMode, SyncWordEncoding, TargetedBitRate,
+    encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, AmodeArrangement,
+    DtsFrameHeader, FrameType, LfeMode, SampleFrequency, SourcePcmResolution, SyncWordEncoding,
+    TargetedBitRate,
 };
 pub use crate::iter::{
     find_all_syncs, find_next_sync, iter_frames, iter_frames_14bit, iter_frames_resync, iter_syncs,
