@@ -54,6 +54,10 @@ impl From<DtsError> for CoreError {
             // future subframe walker plumbs the variant through
             // `send_packet`, surface it as `InvalidData`.
             DtsError::SumDiffLengthMismatch { .. } => CoreError::InvalidData(e.to_string()),
+            // Round 223 §C.2.3 joint-subband shape-mismatch is a
+            // caller-side slice-shape violation analogous to the
+            // sum/diff variant. Same `InvalidData` mapping rationale.
+            DtsError::JointSubbandShapeMismatch { .. } => CoreError::InvalidData(e.to_string()),
         }
     }
 }

@@ -317,6 +317,16 @@
 //!   round 214). Single-pair, subband-pair, and dispatch-predicate
 //!   primitives transcribed verbatim from ETSI TS 102 114 V1.3.1
 //!   Annex C §C.2.4 (PDF p.184).
+//! - [`joint_subband_decode_range_i32`] /
+//!   [`joint_subband_decode_range_f64`] /
+//!   [`joint_subband_required`] / [`joint_source_channel`] — §C.2.3
+//!   joint-subband copy + per-subband scale, the destination
+//!   channel's high-end-subband reconstruction step from the source
+//!   channel `JOINX[ch] - 1` over the subband range
+//!   `[nSUBS[ch], nSUBS[nSourceCh])` (added in round 223). i32 and
+//!   f64 variants, dispatch predicate, and source-channel resolver,
+//!   transcribed verbatim from ETSI TS 102 114 V1.3.1 Annex C §C.2.3
+//!   (PDF p.184).
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -343,6 +353,7 @@ mod bitreader;
 mod cos_mod;
 mod header;
 mod iter;
+mod joint_subband;
 mod side_info;
 mod sum_diff;
 mod unpack14;
@@ -364,6 +375,10 @@ pub use crate::iter::{
     find_all_syncs, find_next_sync, iter_frames, iter_frames_14bit, iter_frames_resync, iter_syncs,
     FrameIterator, FrameIterator14, FrameIteratorResync, FrameView, FrameView14, ResyncCause,
     ResyncEvent, SyncIterator, SyncMatch,
+};
+pub use crate::joint_subband::{
+    joint_source_channel, joint_subband_decode_range_f64, joint_subband_decode_range_i32,
+    joint_subband_required,
 };
 pub use crate::side_info::{
     decode_abits_at, decode_scales_at, AbitsCodebook, ScalesCodebook, RMS_6BIT, RMS_7BIT,
@@ -479,6 +494,24 @@ pub enum Error {
         /// Length of the right-channel slice.
         right_len: usize,
     },
+    /// The slice arguments to a §C.2.3 joint-subband decoder
+    /// ([`crate::joint_subband_decode_range_i32`] or
+    /// [`crate::joint_subband_decode_range_f64`]) violated one of the
+    /// §C.2.3 pseudocode's structural invariants: `n_subs_dst >
+    /// n_subs_src` (the imported range would run backwards), a
+    /// per-channel subband array shorter than `n_subs_src` (no
+    /// storage for the imported range), a `scales` slice whose length
+    /// disagrees with `n_subs_src - n_subs_dst`, or a per-subband
+    /// destination/source sample-length disagreement. `dst_len` /
+    /// `src_len` carry the lengths that disagreed (the meaning is
+    /// context-dependent: see the documented invariants on each
+    /// constructor site).
+    JointSubbandShapeMismatch {
+        /// Length-like value on the destination side of the disagreement.
+        dst_len: usize,
+        /// Length-like value on the source side of the disagreement.
+        src_len: usize,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -534,6 +567,12 @@ impl core::fmt::Display for Error {
                 f,
                 "oxideav-dts: §C.2.4 sum/difference decode requires matched \
                  left/right slice lengths; got left={left_len} right={right_len}"
+            ),
+            Error::JointSubbandShapeMismatch { dst_len, src_len } => write!(
+                f,
+                "oxideav-dts: §C.2.3 joint-subband decode shape mismatch; got \
+                 dst-side={dst_len} src-side={src_len} (see ETSI TS 102 114 \
+                 §C.2.3 for the structural invariants)"
             ),
         }
     }

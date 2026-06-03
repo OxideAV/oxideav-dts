@@ -5,6 +5,57 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 223 — §C.2.3 Joint Subband Coding (ETSI Annex C §C.2.3).**
+Round 223 (2026-06-03) lands the §C.2.3 joint-subband decode, the
+per-channel reconstruction step that copies the high-end subband
+samples of a source channel into a destination channel and scales
+them by the destination channel's per-subband `JOIN_SCALES[ch][n]`
+factor. Encoder side: when joint-subband coding is active for channel
+`ch`, the encoder drops the destination channel's high subbands from
+the wire (only the source channel's high subbands are coded); the
+decoder re-synthesises the destination's high subbands at unpack
+time. Source: ETSI TS 102 114 V1.3.1 (2011-08) Annex C (informative)
+§C.2.3 (staged PDF p.184). The spec's normative pseudocode walks
+`ch ∈ [0, nPCHS)`; when `JOINX[ch] > 0` the destination's subband
+range `n ∈ [nSUBS[ch], nSUBS[nSourceCh])` (with `nSourceCh = JOINX[ch]
+- 1`) is overwritten by `JOIN_SCALES[ch][n] *
+aPrmCh[nSourceCh].aSubband[n].aSample[nSample]` across every
+`nSample ∈ [0, 8*nSSC)`. Four new public entry points:
+`joint_subband_decode_range_i32` / `joint_subband_decode_range_f64`
+are slice-of-slices copy + scale primitives that walk the §C.2.3
+inner loop across the imported subband range and overwrite the
+destination samples per the spec; `joint_source_channel(joinx)`
+resolves the one-based `JOINX[ch]` field to the zero-based source-
+channel index (`0` → `None` per the `JOINX[ch] > 0` gate; `joinx
+> 0` → `Some(joinx - 1)` per the spec's inline comment); and
+`joint_subband_required(joinx)` is the dispatch predicate that
+returns `true` when `joinx > 0`. One new error variant,
+`Error::JointSubbandShapeMismatch { dst_len, src_len }`, fires when
+any §C.2.3 structural invariant is violated (`n_subs_dst >
+n_subs_src`, dst/src per-channel array shorter than `n_subs_src`,
+`scales.len() != n_subs_src - n_subs_dst`, or a per-subband
+destination/source sample-length disagreement). Twenty new lib-
+level tests in `src/joint_subband.rs` plus three doc-tests lock the
+decode behaviour down: one-based → zero-based source-channel
+resolution across `joinx ∈ 1..=u8::MAX`, the `joinx == 0`
+disabled-channel case, copy-and-scale on a two-subband × three-sample
+fixture, the leave-untouched property below `n_subs_dst`, the
+empty-range no-op (`n_subs_dst == n_subs_src`), zero-scale zeroing,
+negative-scale sign-inversion, the wrapping-multiply property at
+`i32::MIN × -1` (mirroring the spec's C `int` semantics),
+write-only-inside-range at `(n_dst, n_src) = (2, 4)`, and each error
+path (`n_subs_dst > n_subs_src`, dst outer too short, src outer too
+short, scales-length disagreement, inner sample-length disagreement)
+for both i32 and f64. A `(n_dst, n_src, n_samples) = (2, 5, 8)`
+end-to-end sweep cross-checks the helper against an independent
+hand-computed expected. Scope: this round lands the per-channel
+copy + scale and the dispatch predicate / source-channel resolver
+only; wiring it into a complete subframe walker (which also needs
+the `JOINX[ch]` / `nSUBS[ch]` / `JOIN_SCALES[ch][n]` decoders from
+the AUDIO CODING HEADER plus the §5.4-onwards subband / QMF-
+synthesis decode path that remains gated on the §D.8 FIR coefficient
+tables) is a follow-up.
+
 **Round 214 — §C.2.4 Sum/Difference Decoding (ETSI Annex C §C.2.4).**
 Round 214 (2026-06-03) lands the §C.2.4 sum/difference matrix decoder,
 the inverse of the encoder-side joint sum/difference coding that the

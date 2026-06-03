@@ -8,6 +8,58 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 223 (2026-06-03) — §C.2.3 Joint Subband Coding (ETSI
+  TS 102 114 V1.3.1 Annex C §C.2.3, PDF p.184). Four new public
+  entry points implement the spec's normative per-channel
+  joint-subband copy-and-scale, the destination channel's
+  high-end-subband reconstruction step that imports subbands
+  `[nSUBS[ch], nSUBS[nSourceCh])` from source channel `nSourceCh =
+  JOINX[ch] - 1` and scales each sample by the per-subband
+  `JOIN_SCALES[ch][n]` factor:
+  - `joint_subband_decode_range_i32(dst_subs, src_subs, scales,
+    n_subs_dst, n_subs_src)` /
+    `joint_subband_decode_range_f64(...)` — the §C.2.3 inner loop
+    over slice-of-slices. For each `n ∈ [n_subs_dst, n_subs_src)`
+    the destination subband is overwritten with `scales[n -
+    n_subs_dst] * src_subbands[n]`, sample-by-sample. The i32
+    variant uses `wrapping_mul` to mirror the spec's C `int`
+    overflow semantics.
+  - `joint_source_channel(joinx) -> Option<u8>` — resolves the
+    one-based `JOINX[ch]` field to the zero-based source-channel
+    index per the spec's inline comment ("counts channels as
+    1,2,3,4,5, so minus 1"): `0 → None` (joint-subband disabled);
+    `joinx > 0 → Some(joinx - 1)`.
+  - `joint_subband_required(joinx) -> bool` — the dispatch
+    predicate (`joinx > 0`).
+  - One new `Error` variant: `Error::JointSubbandShapeMismatch
+    { dst_len, src_len }`, fired when any §C.2.3 structural
+    invariant is violated (`n_subs_dst > n_subs_src`, dst/src outer
+    too short for `n_subs_src`, scales-length disagreement with
+    `n_subs_src - n_subs_dst`, or a per-subband sample-length
+    mismatch).
+
+  Twenty new in-module unit tests in `src/joint_subband.rs` plus
+  three new doc-tests lock the decode behaviour down: one-based →
+  zero-based source-channel resolution across `joinx ∈ 1..=u8::MAX`,
+  the `joinx == 0` disabled case, copy-and-scale on a two-subband ×
+  three-sample fixture, leave-untouched property below
+  `n_subs_dst`, empty-range no-op (`n_subs_dst == n_subs_src`),
+  zero-scale zeroing, negative-scale sign-inversion, wrapping-
+  multiply at `i32::MIN × -1`, write-only-inside-range invariant at
+  `(n_dst, n_src) = (2, 4)`, and the error paths
+  (`n_subs_dst > n_subs_src`, dst outer too short, src outer too
+  short, scales-length disagreement, inner sample-length
+  disagreement) for both i32 and f64. A `(n_dst, n_src, n_samples)
+  = (2, 5, 8)` end-to-end sweep cross-checks the helper against a
+  hand-computed expected.
+
+  Scope: this round lands the per-channel copy + scale only. Wiring
+  it into a complete subframe walker (which still needs the AUDIO
+  CODING HEADER's per-channel `JOINX[ch]`, `nSUBS[ch]`, and
+  `JOIN_SCALES[ch][n]` decoders, plus the §5.4-onwards subframe
+  walk and the §C.2.5 QMF-synthesis path that remains gated on the
+  §D.8 FIR coefficient tables) is a follow-up.
+
 - Round 214 (2026-06-03) — §C.2.4 Sum/Difference Decoding (ETSI
   TS 102 114 V1.3.1 Annex C §C.2.4, PDF p.184). Six new public entry
   points implement the spec's normative sum/difference matrix decoder
