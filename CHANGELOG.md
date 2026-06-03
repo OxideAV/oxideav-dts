@@ -8,6 +8,66 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 228 (2026-06-04) — §C.2.2 Inverse ADPCM (ETSI TS 102 114
+  V1.3.1 Annex C §C.2.2, PDF p.183). New `src/inverse_adpcm.rs`
+  lands the per-subband inverse-ADPCM predictor, the fixed-order
+  4-tap FIR over the reconstructed signal that the §5.4.1 `PMODE`
+  side-info flag gates per subband. Six new public entry points plus
+  the `NumADPCMCoeff = 4` spec invariant exposed as a constant:
+  - `inverse_adpcm_decode_i32(history, coeffs, samples)` /
+    `inverse_adpcm_decode_f64(...)` — the §C.2.2 predictor itself.
+    On entry `samples` carries the dequantised residuals; on return
+    each `samples[m]` has been overwritten with
+    `samples[m] + Σ_{n=0..3} coeffs[n] * past[n]` where `past[n]`
+    is the sample at logical index `m - n - 1`, sourced from the
+    `history` buffer for the negative-index range and from earlier
+    `samples` slots for the non-negative range. The i32 variant
+    uses `wrapping_add` / `wrapping_mul` to mirror the spec's C
+    `int` semantics. The predictor walks strictly left-to-right
+    because each freshly-written `samples[m]` is the `n = 0`
+    history slot consumed at step `m + 1`.
+  - `update_history_i32(history, samples)` /
+    `update_history_f64(...)` — slide the rolling four-sample
+    history buffer forward by the just-reconstructed block: long
+    blocks (`samples.len() >= 4`) overwrite `history` with the
+    final four samples; short blocks shift `history` left by
+    `samples.len()` slots and append the residual. This convenience
+    helper makes the spec's "It must updated each time before
+    reverse ADPCM is run for a block of samples for each subband"
+    sentence concrete.
+  - `inverse_adpcm_required(pmode) -> bool` — the dispatch predicate
+    (`pmode == 1`); the §C.2.2 narrative gates the predictor on a
+    per-subband `PMODE == 1`.
+  - `NUM_ADPCM_COEFF: usize = 4` — the spec's `NumADPCMCoeff`
+    constant exposed for callers that want to size history /
+    coefficient buffers by the same invariant the spec writes
+    against.
+  - One new `Error` variant: `Error::InverseAdpcmShapeMismatch
+    { history_len, coeffs_len }`, fired when either the history or
+    coefficient slice has any length other than 4.
+
+  Twenty-six new in-module unit tests in `src/inverse_adpcm.rs` plus
+  two doc-tests lock the predictor down: zero-coeff identity, the
+  four-tap history-slot mapping (`coeff[0]` taps `raSample[-1]`,
+  `coeff[3]` taps `raSample[-4]`), the freshly-written-sample-feeds-
+  next-step ordering, the four-tap walk-off at `m == 4` (no
+  history is consulted from sample index 4 onwards), wrapping
+  arithmetic at `i32::MAX * 2` and `i32::MIN * -1`, sign correctness
+  for negative coefficients, empty-block no-op, the four
+  history-vs-coeffs length-mismatch error paths, the floating-point
+  variant's exact-arithmetic property at `coeff = 0.5`, the
+  history-update helper's three regimes (long block / exact-four /
+  short block), the `pmode == 1` dispatch predicate across all 256
+  possible byte values, and a two-block continuation property test
+  that confirms decoding a residual stream as two consecutive
+  blocks (with history slid between them) is identical to decoding
+  it as a single long block.
+
+  No external library source consulted. No web search. Wall
+  respected per IMPLEMENTOR_ROUND.md guardrails. Trace material
+  read: ETSI TS 102 114 V1.3.1 Annex C §C.2.2 only (PDF p.183);
+  no other section, no other docs file.
+
 - Round 223 (2026-06-03) — §C.2.3 Joint Subband Coding (ETSI
   TS 102 114 V1.3.1 Annex C §C.2.3, PDF p.184). Four new public
   entry points implement the spec's normative per-channel

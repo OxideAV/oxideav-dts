@@ -327,6 +327,15 @@
 //!   f64 variants, dispatch predicate, and source-channel resolver,
 //!   transcribed verbatim from ETSI TS 102 114 V1.3.1 Annex C §C.2.3
 //!   (PDF p.184).
+//! - [`inverse_adpcm_decode_i32`] / [`inverse_adpcm_decode_f64`] /
+//!   [`update_history_i32`] / [`update_history_f64`] /
+//!   [`inverse_adpcm_required`] / [`NUM_ADPCM_COEFF`] — §C.2.2
+//!   inverse-ADPCM predictor (added in round 228). Fixed-order
+//!   (4-tap) FIR over the reconstructed signal, run per-subband
+//!   whenever `PMODE == 1`. i32 and f64 decode variants, the
+//!   rolling four-sample history slide between decode blocks, and
+//!   the dispatch predicate, transcribed verbatim from ETSI TS 102
+//!   114 V1.3.1 Annex C §C.2.2 (PDF p.183).
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -352,6 +361,7 @@
 mod bitreader;
 mod cos_mod;
 mod header;
+mod inverse_adpcm;
 mod iter;
 mod joint_subband;
 mod side_info;
@@ -370,6 +380,10 @@ pub use crate::header::{
     encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, AmodeArrangement,
     DtsFrameHeader, FrameType, LfeMode, SampleFrequency, SourcePcmResolution, SyncWordEncoding,
     TargetedBitRate,
+};
+pub use crate::inverse_adpcm::{
+    inverse_adpcm_decode_f64, inverse_adpcm_decode_i32, inverse_adpcm_required, update_history_f64,
+    update_history_i32, NUM_ADPCM_COEFF,
 };
 pub use crate::iter::{
     find_all_syncs, find_next_sync, iter_frames, iter_frames_14bit, iter_frames_resync, iter_syncs,
@@ -512,6 +526,20 @@ pub enum Error {
         /// Length-like value on the source side of the disagreement.
         src_len: usize,
     },
+    /// A slice argument to a §C.2.2 inverse-ADPCM decoder
+    /// ([`crate::inverse_adpcm_decode_i32`] or
+    /// [`crate::inverse_adpcm_decode_f64`]) had a length that disagrees
+    /// with the spec's fixed `NumADPCMCoeff = 4` invariant. The
+    /// predictor requires a four-sample history (carrying
+    /// `raSample[-4..0]`) and four ADPCM coefficients
+    /// (`raADPCMCoeff[0..4]`); either slice having any other length is
+    /// out-of-domain.
+    InverseAdpcmShapeMismatch {
+        /// Caller-supplied history-buffer length (spec requires 4).
+        history_len: usize,
+        /// Caller-supplied coefficient-array length (spec requires 4).
+        coeffs_len: usize,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -573,6 +601,15 @@ impl core::fmt::Display for Error {
                 "oxideav-dts: §C.2.3 joint-subband decode shape mismatch; got \
                  dst-side={dst_len} src-side={src_len} (see ETSI TS 102 114 \
                  §C.2.3 for the structural invariants)"
+            ),
+            Error::InverseAdpcmShapeMismatch {
+                history_len,
+                coeffs_len,
+            } => write!(
+                f,
+                "oxideav-dts: §C.2.2 inverse-ADPCM decode requires a 4-sample \
+                 history and 4 ADPCM coefficients (NumADPCMCoeff = 4); got \
+                 history_len={history_len} coeffs_len={coeffs_len}"
             ),
         }
     }

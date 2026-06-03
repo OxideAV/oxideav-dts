@@ -5,6 +5,61 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 228 — §C.2.2 Inverse ADPCM (ETSI Annex C §C.2.2).**
+Round 228 (2026-06-04) lands the §C.2.2 inverse-ADPCM predictor, the
+per-subband reconstruction step that runs whenever the §5.4.1 `PMODE`
+side-info flag is set on a subband. Source: ETSI TS 102 114 V1.3.1
+(2011-08) Annex C (informative) §C.2.2 (staged PDF p.183). The spec's
+normative pseudocode walks `m ∈ [0, nNumSample)` per output sample;
+each iteration accumulates the residual with a four-tap dot product of
+the ADPCM coefficients (`raADPCMCoeff[0..4]`) against the four
+preceding reconstructed samples (`raSample[m-1..m-4]`), where the
+negative-index slots `raSample[-1..-4]` are seeded from the prior
+decode block's tail. Six new public entry points plus a constant: the
+predictor variants `inverse_adpcm_decode_i32` / `inverse_adpcm_decode_f64`
+take `(history, coeffs, samples)` and overwrite the residuals in
+`samples` with the reconstructed signal in place; the rolling-history
+helpers `update_history_i32` / `update_history_f64` slide the last four
+reconstructed samples into the history buffer for the next block (with
+short-block fallback that shifts existing history left by
+`samples.len()`); `inverse_adpcm_required(pmode)` is the dispatch
+predicate (`pmode == 1`); and `NUM_ADPCM_COEFF: usize = 4` exposes the
+spec's `NumADPCMCoeff` invariant for buffer sizing. One new error
+variant, `Error::InverseAdpcmShapeMismatch { history_len, coeffs_len }`,
+fires when either argument's length disagrees with the spec's fixed
+four-tap shape. The i32 variant uses `wrapping_add` / `wrapping_mul`
+to mirror the spec's C `int` semantics. The predictor walks
+strictly left-to-right: each freshly-written `samples[m]` is the
+`n = 0` history slot consumed at step `m + 1`. Twenty-six new
+in-module unit tests in `src/inverse_adpcm.rs` plus two doc-tests lock
+the predictor down: zero-coefficient identity, the four-tap
+history-slot mapping (`coeff[0]` taps `raSample[-1]`, `coeff[3]` taps
+`raSample[-4]`, confirmed at `m = 0` with the four-decimal-digit
+`(1, 10, 100, 1000)` coefficients against the four-decimal-digit
+`(1, 2, 3, 4)` history seeded to produce `1234`), the
+freshly-written-sample-feeds-next-step ordering (geometric-sequence
+property: residual `1`, coeff `(2, 0, 0, 0)` → `(1, 2, 4, 8)`), the
+four-tap walk-off at `m == 4` (the all-zero block remains all-zero
+when no positive samples can flow in from the residuals), wrapping
+arithmetic at `i32::MAX * 2` and `i32::MIN * -1`, sign correctness for
+negative coefficients, empty-block no-op, the four history-vs-coeffs
+length-mismatch error paths (short / long history, short / long coeffs),
+the floating-point variant's exact-arithmetic property at
+`coeff = 0.5`, the history-update helper's three regimes (long block
+takes the four-sample tail, exact-four-sample block replaces history
+wholesale, short block shifts history left by `samples.len()` and
+appends the residual), the `pmode == 1` dispatch predicate across all
+256 byte values, and a two-block continuation property that confirms
+decoding a 12-sample residual stream as two blocks `(0..7) + (7..12)`
+with history slid between them is identical to decoding it as a single
+12-sample block. Scope: this round lands the per-subband predictor
+primitive and the dispatch predicate / rolling-history helpers only;
+wiring it into a complete subframe walker (which needs the per-subband
+`PMODE` decoder and the ADPCM-coefficient extractor from §5.4.1
+Primary Audio Coding Side Information that remain in the side-info
+docs gap) is a follow-up. The §C.2.5 32-band synthesis QMF entry point
+is also unblocked but still needs the §D.8 FIR coefficient tables.
+
 **Round 223 — §C.2.3 Joint Subband Coding (ETSI Annex C §C.2.3).**
 Round 223 (2026-06-03) lands the §C.2.3 joint-subband decode, the
 per-channel reconstruction step that copies the high-end subband

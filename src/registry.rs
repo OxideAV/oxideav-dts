@@ -58,6 +58,12 @@ impl From<DtsError> for CoreError {
             // caller-side slice-shape violation analogous to the
             // sum/diff variant. Same `InvalidData` mapping rationale.
             DtsError::JointSubbandShapeMismatch { .. } => CoreError::InvalidData(e.to_string()),
+            // Round 228 §C.2.2 inverse-ADPCM shape-mismatch is the
+            // same flavour of caller-side slice-shape violation: the
+            // history or coefficient slice has a length other than
+            // the spec's `NumADPCMCoeff = 4`. `InvalidData` for parity
+            // with the sum/diff and joint-subband mappings.
+            DtsError::InverseAdpcmShapeMismatch { .. } => CoreError::InvalidData(e.to_string()),
         }
     }
 }
