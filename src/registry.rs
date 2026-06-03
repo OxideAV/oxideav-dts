@@ -48,6 +48,12 @@ impl From<DtsError> for CoreError {
             DtsError::InvalidSideInfo { .. } | DtsError::HuffmanDecodeFailed { .. } => {
                 CoreError::InvalidData(e.to_string())
             }
+            // Round 214 §C.2.4 sum/difference length-mismatch is a
+            // caller-side slice-shape violation; the runtime decoder
+            // path doesn't construct mismatched slices today, but if a
+            // future subframe walker plumbs the variant through
+            // `send_packet`, surface it as `InvalidData`.
+            DtsError::SumDiffLengthMismatch { .. } => CoreError::InvalidData(e.to_string()),
         }
     }
 }

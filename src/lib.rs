@@ -307,6 +307,16 @@
 //!   round 208). Per-block start indices match the four-block
 //!   decomposition of `PreCalCosMod()` in
 //!   `docs/audio/dts/dts-core-extracts.md` §2.3.
+//! - [`sum_difference_decode_i32`] / [`sum_difference_decode_f64`] /
+//!   [`sum_difference_decode_subband_pair_i32`] /
+//!   [`sum_difference_decode_subband_pair_f64`] /
+//!   [`front_sum_difference_required`] /
+//!   [`surround_sum_difference_required`] — §C.2.4 sum/difference
+//!   matrix decoder for the front-channel (`SUMF` or `AMODE == 3`)
+//!   and surround-channel (`SUMS`) joint encodings (added in
+//!   round 214). Single-pair, subband-pair, and dispatch-predicate
+//!   primitives transcribed verbatim from ETSI TS 102 114 V1.3.1
+//!   Annex C §C.2.4 (PDF p.184).
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -334,6 +344,7 @@ mod cos_mod;
 mod header;
 mod iter;
 mod side_info;
+mod sum_diff;
 mod unpack14;
 
 #[cfg(feature = "registry")]
@@ -356,6 +367,11 @@ pub use crate::iter::{
 };
 pub use crate::side_info::{
     decode_abits_at, decode_scales_at, AbitsCodebook, ScalesCodebook, RMS_6BIT, RMS_7BIT,
+};
+pub use crate::sum_diff::{
+    front_sum_difference_required, sum_difference_decode_f64, sum_difference_decode_i32,
+    sum_difference_decode_subband_pair_f64, sum_difference_decode_subband_pair_i32,
+    surround_sum_difference_required,
 };
 pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder};
 
@@ -451,6 +467,18 @@ pub enum Error {
         /// Static name of the codebook that failed to match.
         table: &'static str,
     },
+    /// The left and right slice arguments to a §C.2.4 sum/difference
+    /// decoder ([`crate::sum_difference_decode_i32`],
+    /// [`crate::sum_difference_decode_f64`], or one of their
+    /// subband-pair counterparts) had different lengths. The §C.2.4
+    /// pseudocode requires a one-to-one pairing of left- and right-
+    /// channel samples.
+    SumDiffLengthMismatch {
+        /// Length of the left-channel slice.
+        left_len: usize,
+        /// Length of the right-channel slice.
+        right_len: usize,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -498,6 +526,14 @@ impl core::fmt::Display for Error {
                 "oxideav-dts: bit stream did not match any entry in Annex D \
                  Huffman codebook `{table}` within the documented maximum \
                  code length"
+            ),
+            Error::SumDiffLengthMismatch {
+                left_len,
+                right_len,
+            } => write!(
+                f,
+                "oxideav-dts: §C.2.4 sum/difference decode requires matched \
+                 left/right slice lengths; got left={left_len} right={right_len}"
             ),
         }
     }

@@ -5,6 +5,54 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 214 — §C.2.4 Sum/Difference Decoding (ETSI Annex C §C.2.4).**
+Round 214 (2026-06-03) lands the §C.2.4 sum/difference matrix decoder,
+the inverse of the encoder-side joint sum/difference coding that the
+`FRONT_SUM` (`SUMF`) and `SURROUND_SUM` (`SUMS`) header flags signal,
+and that `AMODE == 3` (Sum/Difference channel arrangement) implies for
+the front pair regardless of the `SUMF` bit. Source: ETSI TS 102 114
+V1.3.1 (2011-08) Annex C (informative) §C.2.4 (staged PDF p.184). The
+spec's normative pseudocode is two parallel loops over all active
+subbands × all sub-sub-frame samples, applying the matrix
+`(L', R') = (L + R, L − R)` with the pre-update value of `L` consumed
+for both outputs. Six new public entry points: `sum_difference_decode_i32`
+/ `sum_difference_decode_f64` are single-pair primitives that
+in-place decode one `(left, right)` sample slice through the matrix;
+`sum_difference_decode_subband_pair_i32` /
+`sum_difference_decode_subband_pair_f64` walk the same matrix across
+the §C.2.4 outer subband loop (slice-of-slices, one inner slice per
+active subband); `front_sum_difference_required(front_sum, amode)` is
+the dispatch predicate that returns `true` when `SUMF` is set OR
+`AMODE == 3` (per the §C.2.4 narrative); and
+`surround_sum_difference_required(surround_sum)` is the surround-pair
+counterpart, which reduces to the `SUMS` flag because the spec does
+not name an `AMODE` code that forces the surround decode. One new
+error variant, `Error::SumDiffLengthMismatch { left_len, right_len }`,
+fires when the left and right slices passed to any of the four
+decoders have different lengths (the §C.2.4 pseudocode requires a
+one-to-one sample pairing). Twenty-four new lib-level tests in
+`src/sum_diff.rs` plus two doc-tests lock the matrix behaviour down:
+the encoder-decoder round-trip property
+`decode(encode(L, R)) = (2L, 2R)` (cross-checked over a 256-element
+sweep in i32 and a dyadic-rational pair in f64), the matrix
+self-product `M² = 2 I` (applying decode twice doubles both inputs),
+the read-old / write-new ordering check (writing `*l` first would
+yield `(L+R, L)` instead of the spec-correct `(L+R, L−R)`), wrapping
+arithmetic at `i32::MAX`, empty-slice no-ops, slice-length-mismatch
+error reporting, subband-pair walks across `nSUBS = 3..=4` with
+`8 * nSSC ∈ {2, 8}`, outer-slice-count mismatch detection and
+per-subband length-mismatch detection (with the first-mismatch
+position reported), front-pair dispatch-predicate truth tables across
+the full 64-code `AMODE` range (including the eight user-defined codes
+that do not force the front decode), and the surround-pair
+dispatch-predicate behaviour. The full §C.2.4 sweep at `nSUBS = 4`,
+`8 * nSSC = 8` cross-checks the subband-pair helper against an
+independent hand-computed expected result. Scope: this round lands
+the matrix decode and the dispatch predicates only; wiring it into a
+complete subframe walker (which needs the §5.4.x AUDIO CODING HEADER
+fields plus the §5.4-onwards subband / QMF-synthesis decode path that
+remains gated on the §D.8 FIR coefficient tables) is a follow-up.
+
 **Round 208 — `PreCalCosMod()` 544-entry cosine-modulation matrix (ETSI Annex C §C.2.5).**
 Round 208 (2026-06-02) lands the first §C.2.5 synthesis-QMF building
 block — the 544-entry cosine-modulation coefficient array `raCosMod`

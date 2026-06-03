@@ -8,6 +8,58 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 214 (2026-06-03) — §C.2.4 Sum/Difference Decoding (ETSI
+  TS 102 114 V1.3.1 Annex C §C.2.4, PDF p.184). Six new public entry
+  points implement the spec's normative sum/difference matrix decoder
+  for the `FRONT_SUM` (`SUMF`) / `SURROUND_SUM` (`SUMS`) /
+  `AMODE == 3` joint-channel-coding paths:
+  - `sum_difference_decode_i32(left, right)` /
+    `sum_difference_decode_f64(left, right)` — single-pair in-place
+    decode through the matrix `(L', R') = (L + R, L − R)`. The
+    pre-update value of `L` is consumed for both outputs, matching the
+    §C.2.4 pseudocode's read-old / write-new ordering. Integer
+    arithmetic is wrapping (`i32::wrapping_add` / `wrapping_sub`) to
+    mirror the spec's C `int` semantics.
+  - `sum_difference_decode_subband_pair_i32(left_subs, right_subs)` /
+    `sum_difference_decode_subband_pair_f64(...)` — full §C.2.4 outer
+    loop (`for n=0; n<nSUBS; n++`) across slice-of-slices, one inner
+    slice per active subband.
+  - `front_sum_difference_required(front_sum, amode) -> bool` — the
+    dispatch predicate that returns `true` when `SUMF` is set OR
+    `amode == 3` (Sum/Difference channel arrangement, per the §C.2.4
+    narrative: "This decoding is also required when AMODE = 3.").
+  - `surround_sum_difference_required(surround_sum) -> bool` — the
+    surround-pair counterpart; reduces to a pass-through of `SUMS`
+    because the spec does not name an `AMODE` code that forces the
+    surround decode independent of the flag.
+  - One new `Error` variant: `Error::SumDiffLengthMismatch
+    { left_len, right_len }`, fired when the two slice arguments
+    disagree in length (the §C.2.4 pseudocode requires a one-to-one
+    sample pairing).
+
+  Twenty-four new in-module unit tests in `src/sum_diff.rs` plus two
+  new doc-tests lock the matrix behaviour down: the encoder-decoder
+  round-trip property `decode(encode(L, R)) = (2L, 2R)`, the matrix
+  self-product `M² = 2 I`, the read-old / write-new ordering check,
+  wrapping arithmetic at `i32::MAX`, empty-slice no-ops,
+  slice-length-mismatch error reporting (with the offending lengths
+  surfaced), subband-pair walks across `nSUBS = 3..=4` with
+  `8 * nSSC ∈ {2, 8}`, outer-slice-count mismatch detection,
+  per-subband length-mismatch detection (first-mismatch position
+  reported), front-pair dispatch-predicate truth tables across the
+  full 64-code `AMODE` range (the eight user-defined codes
+  `16..=63` do not force the front decode), and the surround-pair
+  dispatch-predicate behaviour. The full §C.2.4 sweep at `nSUBS = 4`,
+  `8 * nSSC = 8` cross-checks the subband-pair helper against an
+  independent hand-computed expected result.
+
+  Scope: this round lands the matrix decode and dispatch predicates
+  only. Wiring it into a complete subframe walker (which needs the
+  AUDIO CODING HEADER `SUBFS` / `nPCHS` / `nSUBS[ch]` / `JOINX[ch]`
+  fields plus the §5.4-onwards subframe / subband / QMF-synthesis
+  decode path that remains gated on the §D.8 FIR coefficient tables)
+  is a follow-up.
+
 - Round 208 (2026-06-02) — `PreCalCosMod()` 544-entry
   cosine-modulation coefficient array `raCosMod` for the §C.2.5
   32-band synthesis QMF, transliterated verbatim from the spec
