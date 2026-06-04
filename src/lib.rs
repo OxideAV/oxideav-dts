@@ -336,6 +336,14 @@
 //!   rolling four-sample history slide between decode blocks, and
 //!   the dispatch predicate, transcribed verbatim from ETSI TS 102
 //!   114 V1.3.1 Annex C §C.2.2 (PDF p.183).
+//! - [`decode_block_code`] / [`block_code_offset`] /
+//!   [`block_code_max_code`] — §C.2.1 block-code modulus /
+//!   integer-division decoder (added in round 232). Turns one
+//!   mixed-radix code word into the array of quantisation indices
+//!   the rest of the §C.2 chain consumes. Worked-example matched:
+//!   `code=64`, `n_levels=3`, four elements → `[0, -1, 0, +1]`.
+//!   Transcribed verbatim from ETSI TS 102 114 V1.3.1 Annex C §C.2.1
+//!   (PDF p.182–183).
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -359,6 +367,7 @@
 #![warn(missing_docs)]
 
 mod bitreader;
+mod block_code;
 mod cos_mod;
 mod header;
 mod inverse_adpcm;
@@ -371,6 +380,7 @@ mod unpack14;
 #[cfg(feature = "registry")]
 mod registry;
 
+pub use crate::block_code::{block_code_max_code, block_code_offset, decode_block_code};
 pub use crate::cos_mod::{
     precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START, COS_MOD_BLOCK3_START,
     COS_MOD_BLOCK4_START, COS_MOD_LEN,
@@ -540,6 +550,30 @@ pub enum Error {
         /// Caller-supplied coefficient-array length (spec requires 4).
         coeffs_len: usize,
     },
+    /// The `n_levels` argument to [`crate::decode_block_code`] was
+    /// less than 2. A one-level alphabet has only the index `0` and
+    /// the §C.2.1 mixed-radix recurrence is undefined for
+    /// `n_levels < 2` (division by zero / one would never advance).
+    BlockCodeLevelsOutOfRange {
+        /// Caller-supplied `n_levels` value (spec requires `>= 2`).
+        n_levels: u32,
+    },
+    /// A §C.2.1 block-code word produced a non-zero residual after
+    /// consuming every output element via the spec's
+    /// `nCode % nNumLevel` / `nCode /= nNumLevel` recurrence. The
+    /// spec text treats this as a fatal "ERROR: block code look-up
+    /// fail" condition (PDF p.183); the Rust API surfaces it as a
+    /// recoverable error carrying the residual + block dimensions
+    /// so the caller can distinguish bit-stream corruption from a
+    /// structural decoder bug.
+    BlockCodeResidual {
+        /// The residual code-word value after the last extraction.
+        residual: u32,
+        /// Element count passed to the decoder (`output.len()`).
+        n_elements: usize,
+        /// Quantisation-level count passed to the decoder.
+        n_levels: u32,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -610,6 +644,21 @@ impl core::fmt::Display for Error {
                 "oxideav-dts: §C.2.2 inverse-ADPCM decode requires a 4-sample \
                  history and 4 ADPCM coefficients (NumADPCMCoeff = 4); got \
                  history_len={history_len} coeffs_len={coeffs_len}"
+            ),
+            Error::BlockCodeLevelsOutOfRange { n_levels } => write!(
+                f,
+                "oxideav-dts: §C.2.1 block-code decode requires n_levels >= 2; \
+                 got n_levels={n_levels}"
+            ),
+            Error::BlockCodeResidual {
+                residual,
+                n_elements,
+                n_levels,
+            } => write!(
+                f,
+                "oxideav-dts: §C.2.1 block-code decode residual {residual} != 0 \
+                 after extracting {n_elements} element(s) from a base-{n_levels} \
+                 block (code-word out of range for the declared block dimensions)"
             ),
         }
     }

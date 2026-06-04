@@ -64,6 +64,16 @@ impl From<DtsError> for CoreError {
             // the spec's `NumADPCMCoeff = 4`. `InvalidData` for parity
             // with the sum/diff and joint-subband mappings.
             DtsError::InverseAdpcmShapeMismatch { .. } => CoreError::InvalidData(e.to_string()),
+            // Round 232 §C.2.1 block-code errors. `n_levels < 2` is a
+            // structural / caller-side violation analogous to the
+            // §C.2.2/3/4 shape-mismatch variants; a residual block code
+            // word indicates bit-stream corruption (the §C.2.1 success
+            // criterion `nCode == 0` is unmet). Both map to
+            // `InvalidData` for parity with the surrounding §C.2.x
+            // failure modes.
+            DtsError::BlockCodeLevelsOutOfRange { .. } | DtsError::BlockCodeResidual { .. } => {
+                CoreError::InvalidData(e.to_string())
+            }
         }
     }
 }

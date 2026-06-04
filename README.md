@@ -5,6 +5,52 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 232 — §C.2.1 Block Code (ETSI Annex C §C.2.1).**
+Round 232 (2026-06-04) lands the §C.2.1 block-code decoder, the
+mixed-radix unpacking step that turns one code word into the array of
+quantisation indices the rest of the §C.2 chain (inverse ADPCM, joint
+subband, sum/difference, downstream stages) consumes. Source: ETSI TS
+102 114 V1.3.1 (2011-08) Annex C (informative) §C.2.1 (staged PDF
+p.182–183). The spec gives two decoder variants (a §D.6-table
+look-up walker and a modulus / integer-division walker); this round
+implements the modulus / integer-division variant because it is fully
+specified by the spec text alone (the table look-up variant requires
+the §D.6 "rearranged" code-book rows enumerated as Table C-1, which
+are a follow-up). The new entry points are
+`decode_block_code(code, n_levels, &mut output)` for the in-place
+decode, `block_code_offset(n_levels)` for the spec's
+`(nNumLevel - 1) >> 1` mid-range offset, and
+`block_code_max_code(n_elements, n_levels)` for the largest valid
+code word `n_levels.pow(n_elements) - 1`. Two new `Error` variants:
+`BlockCodeLevelsOutOfRange { n_levels }` fires when
+`n_levels < 2` (the mixed-radix recurrence is undefined for
+single-element or zero-element alphabets), and
+`BlockCodeResidual { residual, n_elements, n_levels }` surfaces the
+§C.2.1 spec text's "ERROR: block code look-up fail" condition (a
+non-zero residual after the last element). The spec's worked
+example reproduces verbatim: `code = 64`, `n_levels = 3`, four
+elements decode to `[0, -1, 0, +1]` matching the spec's
+quotient/remainder trace at each step. Seventeen new in-module unit
+tests plus three doc-tests lock the decoder down: the spec's worked
+example end-to-end, the spec's worked example intermediate
+quotients (step-by-step `(rem, next_q)` table from PDF p.182), the
+3-level 4-element domain round-tripped exhaustively (all 81 valid
+code words), the 5-level 3-element domain round-tripped
+exhaustively (all 125 code words), the alphabet-bound invariant
+(every decoded index lands in
+`[-(n_levels-1)/2, (n_levels-1)/2]`), the all-zero-code-word edge
+case (decodes to the all-bottom-of-alphabet index array), the
+max-code-word edge case (decodes to the all-top-of-alphabet index
+array), the one-past-max residual error, the `n_levels < 2`
+rejection (both `0` and `1`), the empty-output success path
+(`code == 0`) and residual path (`code != 0`), the smallest
+non-trivial 3-level 1-element alphabet, the binary (`n_levels = 2`,
+offset 0) decode reading the code's bits LSB-first, and the
+largest §D.6 25-level 1-element alphabet (`offset = 12`). Scope:
+this round lands the modulus / integer-division decoder primitive
+only; the table look-up variant and the §C.2.1 dispatch wiring
+into a subframe walker remain follow-ups.
+
 **Round 228 — §C.2.2 Inverse ADPCM (ETSI Annex C §C.2.2).**
 Round 228 (2026-06-04) lands the §C.2.2 inverse-ADPCM predictor, the
 per-subband reconstruction step that runs whenever the §5.4.1 `PMODE`

@@ -8,6 +8,65 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 232 (2026-06-04) — §C.2.1 Block Code (ETSI TS 102 114
+  V1.3.1 Annex C §C.2.1, PDF p.182–183). New `src/block_code.rs`
+  lands the §C.2.1 modulus / integer-division block-code decoder,
+  the mixed-radix unpacking step that turns one code word into the
+  array of quantisation indices the §C.2.x decode chain consumes.
+  Three new public entry points plus two new `Error` variants:
+  - `decode_block_code(code, n_levels, &mut output)` — in-place
+    decode of one block-code word. Walks the spec's
+    `for n in 0..nNumElement { pnValue[n] = (nCode % nNumLevel) -
+    nOffset; nCode /= nNumLevel; }` recurrence and produces the
+    first-element-first quantisation-index array, returning
+    `BlockCodeResidual` when the §C.2.1 success criterion
+    `nCode == 0` after the last extraction is unmet.
+  - `block_code_offset(n_levels)` — the spec's
+    `nOffset = (nNumLevel - 1) >> 1` mid-range offset (1 for a
+    3-level alphabet, 2 for 5-level, ..., 12 for 25-level). Exposed
+    so callers can size index buffers and validate alphabet ranges
+    by the same invariant the spec writes against.
+  - `block_code_max_code(n_elements, n_levels)` — largest valid
+    code word for the declared block dimensions
+    (`n_levels.pow(n_elements) - 1`); returns `None` on overflow.
+  - `Error::BlockCodeLevelsOutOfRange { n_levels }` — `n_levels < 2`
+    rejected (the recurrence is undefined for single-element or
+    zero-element alphabets).
+  - `Error::BlockCodeResidual { residual, n_elements, n_levels }` —
+    the spec's "ERROR: block code look-up fail" condition surfaced
+    as a recoverable error.
+
+  Seventeen new in-module unit tests in `src/block_code.rs` plus
+  three doc-tests lock the decoder down: the spec's worked example
+  (PDF p.182: `code=64`, `n_levels=3`, four elements →
+  `[0, -1, 0, +1]`) end-to-end, the same worked example walked
+  step-by-step against the spec's recorded `(rem, next_q)` table,
+  the 3-level 4-element domain round-tripped exhaustively (all 81
+  valid code words), the 5-level 3-element domain round-tripped
+  exhaustively (all 125 code words), the alphabet-bound invariant
+  (every decoded index in `[-(n_levels-1)/2, (n_levels-1)/2]`),
+  the all-zero-code-word edge case (decodes to all-bottom-of-
+  alphabet), the max-valid-code edge case (decodes to all-top-of-
+  alphabet), the one-past-max residual error, the `n_levels < 2`
+  rejection (`0` and `1`), the empty-output success / residual
+  paths, the smallest 3-level 1-element alphabet, the binary
+  (`n_levels = 2`) decode reading bits LSB-first, and the largest
+  §D.6 25-level 1-element alphabet (offset = 12).
+
+  Scope: this round lands the modulus / integer-division decoder
+  primitive only. The §C.2.1 table look-up variant requires the
+  §D.6 "rearranged" code-book rows enumerated as Table C-1 (3-level
+  4-element, with parallel rearranged tables for 5/7/9/13/17/25
+  levels) which are not yet transcribed into this crate. The
+  dispatch wiring into a subframe walker — extracting the
+  `(n_elements, n_levels)` parameters per subband from the §5.4.1
+  side info — is also left to a follow-up round.
+
+  No external library source consulted. No web search. Wall
+  respected per IMPLEMENTOR_ROUND.md guardrails. Trace material
+  read: ETSI TS 102 114 V1.3.1 Annex C §C.2.1 only (staged PDF
+  p.182–183); no other section, no other docs file.
+
 - Round 228 (2026-06-04) — §C.2.2 Inverse ADPCM (ETSI TS 102 114
   V1.3.1 Annex C §C.2.2, PDF p.183). New `src/inverse_adpcm.rs`
   lands the per-subband inverse-ADPCM predictor, the fixed-order
