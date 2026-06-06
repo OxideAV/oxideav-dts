@@ -8,6 +8,42 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 244 (2026-06-07) — ADJ → Scale Factor Adjustment multiplier
+  (ETSI TS 102 114 V1.3.1 §5.4.1 Table 5-27, staged PDF p.27). Wires
+  the Core Audio Coding Header pseudocode `ADJ = ExtractBits(2);`
+  field (Table 5-21, PDF p.25) to its four-row multiplier table.
+  - New `ScaleFactorAdjustment` enum (`Adj0..=Adj3`, `#[non_exhaustive]`)
+    with `from_index(adj: u8) -> Self` (2-bit-masking, total over
+    `0..=3`), `code(self) -> u8` (inverse of `from_index`),
+    `multiplier(self) -> f32` returning the Table 5-27 values
+    `1.0000`, `1.1250`, `1.2500`, `1.4375`,
+    `multiplier_f64(self) -> f64` (same values, exactly
+    representable), and `multiplier_rational(self) -> (u8, u8)`
+    returning the numerator-over-16 exact rational form
+    (`(16, 16)`, `(18, 16)`, `(20, 16)`, `(23, 16)`).
+  - New `decode_adj_at(bytes: &[u8], bit_offset: usize) ->
+    Result<(ScaleFactorAdjustment, usize)>` bit-stream entry
+    point that reads the 2-bit `ADJ` field at an arbitrary
+    MSB-first bit offset and returns `(adjustment, bits_consumed)`.
+    Returns `Error::UnexpectedEof` when fewer than 2 bits remain
+    after `bit_offset`.
+  - New re-exports at the crate root:
+    `oxideav_dts::{ScaleFactorAdjustment, decode_adj_at}`.
+
+  Eight new in-module unit tests in `src/side_info.rs` lock the
+  table down: a row-by-row sweep across all four `(ADJ, variant,
+  value)` rows asserting `from_index`, `code` round-trip,
+  `multiplier` (`f32`), and `multiplier_f64`; a high-bit-masking
+  check (`0xFF`, `0xFC`, `0b1111`, `0b1100`); a rational-accessor
+  check confirming all four `(numerator, 16)` pairs equal the
+  `f32` multiplier exactly; a byte-aligned `decode_adj_at` walk
+  reading four ADJ pairs packed in one byte (`0x1B`); a
+  bit-offset=5 walk inside a single byte; a byte-boundary-crossing
+  walk that splits the 2-bit field across two consecutive bytes;
+  an `UnexpectedEof` check when only 1 bit remains; and a `code`
+  round-trip check across every `0..=3` wire value. Total
+  in-module test count: 328 → 336.
+
 - Round 241 (2026-06-06) — DIALNORM / UNSPEC → Dialog Normalization
   Gain in dB (ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-20, staged PDF
   p.24). Closes the round-5 DIALNORM docs gap. The 4-bit field that

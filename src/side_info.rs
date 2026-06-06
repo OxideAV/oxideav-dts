@@ -620,6 +620,162 @@ pub(crate) fn decode_scales(
     Ok((table[idx], new_scale_sum))
 }
 
+// ---------------------------------------------------------------
+// Table 5-27 — Scale Factor Adjustment Index (ADJ)
+// (§5.4.1 / §5.3.x, staged PDF p.27)
+// ---------------------------------------------------------------
+//
+// Verbatim from the staged PDF p.27, Table 5-27 "Scale Factor
+// Adjustment Index":
+//
+// | ADJ | Adjustment Value |
+// | --- | ---------------- |
+// |  0  | 1,0000           |
+// |  1  | 1,1250           |
+// |  2  | 1,2500           |
+// |  3  | 1,4375           |
+//
+// (ETSI decimal-comma convention: `1,4375` = 1.4375.) PDF p.25
+// (Core audio coding header pseudocode, Table 5-21 entry "Look up
+// ADJ table") fixes the wire width at **two bits** for every
+// occurrence — the listing reads `ADJ = ExtractBits(2);` on every
+// branch (ABITS=1 with SEL=0; ABITS=2..=5 with SEL<3; ABITS=6..=10
+// with SEL<7). The spec note under Table 5-27 reads: "This table
+// shows the scale factor adjustment index values if Huffman coding
+// is used to encode the subband quantization indexes" — the
+// multiplier is applied to the scale factor (SCALES) for that
+// (channel, subband) pair before the inverse quantiser runs.
+//
+// The two-bit wire encoding covers exactly the four documented
+// rows: `0b00`..=`0b11` map to the four `Adj0..=Adj3` variants.
+// The mapping is total over a masked 2-bit input, so
+// `from_index(0..=3)` is total and the `decode_adj_at` reader
+// always returns a typed variant inside a well-formed bit stream.
+
+/// Scale-factor adjustment multiplier decoded from the 2-bit `ADJ`
+/// header field per **ETSI TS 102 114 V1.3.1 §5.4.1, Table 5-27**
+/// (staged PDF p.27).
+///
+/// `ADJ` is read from the bit stream during Core Audio Coding
+/// Header processing (§5.3.x pseudocode, PDF p.25) whenever the
+/// per-subband `SEL[ch][n]` codebook selector falls into a Huffman
+/// range — the adjustment multiplier is applied to the SCALES
+/// value for that `(channel, subband)` before the inverse
+/// quantiser runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ScaleFactorAdjustment {
+    /// `ADJ = 0b00` — multiplier 1.0000 (Table 5-27 row 1, the
+    /// identity adjustment).
+    Adj0,
+    /// `ADJ = 0b01` — multiplier 1.1250 (Table 5-27 row 2).
+    Adj1,
+    /// `ADJ = 0b10` — multiplier 1.2500 (Table 5-27 row 3).
+    Adj2,
+    /// `ADJ = 0b11` — multiplier 1.4375 (Table 5-27 row 4).
+    Adj3,
+}
+
+impl ScaleFactorAdjustment {
+    /// Resolve a raw 2-bit `ADJ` field to a variant per Table 5-27.
+    ///
+    /// Only the low 2 bits of `adj` are consulted — the wire field
+    /// is 2 bits per Table 5-21's `ExtractBits(2)` notation
+    /// (PDF p.25), so any caller passing a wider integer is masked
+    /// down before dispatch. The mapping is total: every 2-bit
+    /// value `0..=3` corresponds to one of the four documented
+    /// rows.
+    pub fn from_index(adj: u8) -> Self {
+        match adj & 0b11 {
+            0b00 => Self::Adj0,
+            0b01 => Self::Adj1,
+            0b10 => Self::Adj2,
+            // The remaining 2-bit pattern `0b11` is the only one
+            // left, so this branch is exhaustive on a masked 2-bit
+            // input.
+            _ => Self::Adj3,
+        }
+    }
+
+    /// The 2-bit ADJ wire code (`0..=3`) corresponding to this
+    /// variant; the inverse of [`Self::from_index`].
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Adj0 => 0b00,
+            Self::Adj1 => 0b01,
+            Self::Adj2 => 0b10,
+            Self::Adj3 => 0b11,
+        }
+    }
+
+    /// Adjustment multiplier per Table 5-27 (`f32`).
+    ///
+    /// All four multipliers have exact binary representations:
+    /// `1.0`, `1.125 = 9 / 8`, `1.25 = 5 / 4`, and
+    /// `1.4375 = 23 / 16`. The constants below are therefore
+    /// representable as `f32` (and as `f64`) with no rounding.
+    pub fn multiplier(self) -> f32 {
+        match self {
+            Self::Adj0 => 1.0000,
+            Self::Adj1 => 1.1250,
+            Self::Adj2 => 1.2500,
+            Self::Adj3 => 1.4375,
+        }
+    }
+
+    /// Adjustment multiplier per Table 5-27 (`f64`).
+    ///
+    /// Provided for callers that hold SCALES in `f64`; the four
+    /// constants are exactly representable so the `f32` and `f64`
+    /// projections are numerically identical.
+    pub fn multiplier_f64(self) -> f64 {
+        match self {
+            Self::Adj0 => 1.0000,
+            Self::Adj1 => 1.1250,
+            Self::Adj2 => 1.2500,
+            Self::Adj3 => 1.4375,
+        }
+    }
+
+    /// The adjustment multiplier as a rational with denominator 16:
+    /// `(numerator, 16)`. Every Table 5-27 multiplier is a multiple
+    /// of `1/16`, so a `u8` numerator over the fixed denominator
+    /// `16` is an exact representation for integer-arithmetic
+    /// callers: `Adj0 → 16/16`, `Adj1 → 18/16`, `Adj2 → 20/16`,
+    /// `Adj3 → 23/16`.
+    pub fn multiplier_rational(self) -> (u8, u8) {
+        let num = match self {
+            Self::Adj0 => 16, // 1.0000   = 16/16
+            Self::Adj1 => 18, // 1.1250   = 18/16
+            Self::Adj2 => 20, // 1.2500   = 20/16
+            Self::Adj3 => 23, // 1.4375   = 23/16
+        };
+        (num, 16)
+    }
+}
+
+/// Public entry point: decode an `ADJ` field starting at
+/// `bit_offset` in `bytes`, returning `(adjustment, bits_consumed)`.
+///
+/// The bit offset is measured from the MSB of `bytes[0]`, matching
+/// the MSB-first convention used elsewhere in this crate. The field
+/// width is fixed at 2 bits per Table 5-21 (PDF p.25). Returns
+/// [`Error::UnexpectedEof`] when fewer than 2 bits remain after
+/// `bit_offset`.
+pub fn decode_adj_at(bytes: &[u8], bit_offset: usize) -> Result<(ScaleFactorAdjustment, usize)> {
+    let byte_offset = bit_offset / 8;
+    let intra_byte = bit_offset % 8;
+    let mut br = BitReader::from_byte_offset(bytes, byte_offset);
+    if intra_byte > 0 {
+        br.read_bits(intra_byte as u32)?;
+    }
+    let start = bit_offset;
+    let raw = br.read_bits(2)? as u8;
+    let adj = ScaleFactorAdjustment::from_index(raw);
+    let bits_consumed = br.absolute_bit_position() - start;
+    Ok((adj, bits_consumed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,5 +1130,146 @@ mod tests {
         let (val2, sum2) = decode_scales(&mut br, ScalesCodebook::Sd129, sum1).unwrap();
         assert_eq!(sum2, 0); // 3 + (-3)
         assert_eq!(val2, RMS_6BIT[0]); // RMS_6BIT[0] = 1
+    }
+
+    // -----------------------------------------------------------
+    // Table 5-27 — Scale Factor Adjustment Index (ADJ) tests
+    // -----------------------------------------------------------
+
+    #[test]
+    fn adj_table_5_27_row_by_row() {
+        // Every documented (ADJ, Adjustment Value) row from Table 5-27.
+        let rows: [(u8, ScaleFactorAdjustment, f32); 4] = [
+            (0b00, ScaleFactorAdjustment::Adj0, 1.0000),
+            (0b01, ScaleFactorAdjustment::Adj1, 1.1250),
+            (0b10, ScaleFactorAdjustment::Adj2, 1.2500),
+            (0b11, ScaleFactorAdjustment::Adj3, 1.4375),
+        ];
+        for (code, expected_variant, expected_value) in rows {
+            let v = ScaleFactorAdjustment::from_index(code);
+            assert_eq!(v, expected_variant, "from_index({code:#04b})");
+            assert_eq!(v.code(), code, "code() round-trip for {v:?}");
+            assert_eq!(
+                v.multiplier(),
+                expected_value,
+                "multiplier() (f32) for {v:?}"
+            );
+            assert_eq!(
+                v.multiplier_f64(),
+                expected_value as f64,
+                "multiplier_f64() for {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn adj_from_index_masks_high_bits() {
+        // The wire field is 2 bits; widths beyond are masked off.
+        // `0b1100` & 0b11 == 0b00 → Adj0; `0b1111` & 0b11 == 0b11 → Adj3.
+        assert_eq!(
+            ScaleFactorAdjustment::from_index(0b1100),
+            ScaleFactorAdjustment::Adj0
+        );
+        assert_eq!(
+            ScaleFactorAdjustment::from_index(0b1111),
+            ScaleFactorAdjustment::Adj3
+        );
+        assert_eq!(
+            ScaleFactorAdjustment::from_index(0xFF),
+            ScaleFactorAdjustment::Adj3
+        );
+        assert_eq!(
+            ScaleFactorAdjustment::from_index(0xFC),
+            ScaleFactorAdjustment::Adj0
+        );
+    }
+
+    #[test]
+    fn adj_multiplier_rational_matches_table_5_27() {
+        // Every Table 5-27 row, rationalised with denominator 16.
+        assert_eq!(ScaleFactorAdjustment::Adj0.multiplier_rational(), (16, 16));
+        assert_eq!(ScaleFactorAdjustment::Adj1.multiplier_rational(), (18, 16));
+        assert_eq!(ScaleFactorAdjustment::Adj2.multiplier_rational(), (20, 16));
+        assert_eq!(ScaleFactorAdjustment::Adj3.multiplier_rational(), (23, 16));
+
+        // Each rational equals the f32 multiplier exactly (every
+        // numerator is a multiple of 1/16, and 1/16 is exact in
+        // IEEE-754 binary32).
+        for v in [
+            ScaleFactorAdjustment::Adj0,
+            ScaleFactorAdjustment::Adj1,
+            ScaleFactorAdjustment::Adj2,
+            ScaleFactorAdjustment::Adj3,
+        ] {
+            let (num, den) = v.multiplier_rational();
+            assert_eq!(
+                v.multiplier(),
+                num as f32 / den as f32,
+                "rational == f32 for {v:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn decode_adj_at_byte_aligned() {
+        // Four ADJ fields packed back-to-back in one byte:
+        // 0b00 0b01 0b10 0b11 = 0b00_01_10_11 = 0x1B.
+        let stream = [0x1B];
+        let mut bit_offset = 0;
+        for expected in [
+            ScaleFactorAdjustment::Adj0,
+            ScaleFactorAdjustment::Adj1,
+            ScaleFactorAdjustment::Adj2,
+            ScaleFactorAdjustment::Adj3,
+        ] {
+            let (v, n) = decode_adj_at(&stream, bit_offset).unwrap();
+            assert_eq!(v, expected, "decode_adj_at(@{bit_offset})");
+            assert_eq!(n, 2, "bits_consumed @{bit_offset}");
+            bit_offset += n;
+        }
+        assert_eq!(bit_offset, 8);
+    }
+
+    #[test]
+    fn decode_adj_at_unaligned_bit_offset() {
+        // 5 leading filler bits, then the ADJ pair `0b10` (Adj2),
+        // then trailing bits. Layout:
+        //   bit 0..5  = 0b11111 (filler, ignored)
+        //   bit 5..7  = 0b10    (ADJ)
+        //   bit 7     = 0b1     (filler, ignored)
+        // Combined: 0b1111_1101 = 0xFD.
+        let stream = [0xFD];
+        let (v, n) = decode_adj_at(&stream, 5).unwrap();
+        assert_eq!(v, ScaleFactorAdjustment::Adj2);
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn decode_adj_at_crosses_byte_boundary() {
+        // Place the 2-bit ADJ across the byte boundary: bit 7 of
+        // byte 0 (MSB-most) carries the ADJ MSB; bit 0 of byte 1
+        // carries the ADJ LSB. Pick `0b11` (Adj3).
+        //   byte 0: 0b0000_0001 = 0x01 (ADJ MSB in bit 7)
+        //   byte 1: 0b1000_0000 = 0x80 (ADJ LSB in bit 0)
+        let stream = [0x01, 0x80];
+        let (v, n) = decode_adj_at(&stream, 7).unwrap();
+        assert_eq!(v, ScaleFactorAdjustment::Adj3);
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn decode_adj_at_reports_eof_when_buffer_short() {
+        // Only 1 bit left after `bit_offset` → EOF on the 2-bit read.
+        let stream = [0x00];
+        let err = decode_adj_at(&stream, 7).unwrap_err();
+        assert!(matches!(err, Error::UnexpectedEof));
+    }
+
+    #[test]
+    fn adj_code_round_trips_every_value() {
+        for code in 0u8..=3 {
+            let v = ScaleFactorAdjustment::from_index(code);
+            assert_eq!(v.code(), code);
+        }
     }
 }

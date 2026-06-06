@@ -5,6 +5,59 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 244 — ADJ → Scale Factor Adjustment multiplier
+(ETSI §5.4.1 Table 5-27, staged PDF p.27).**
+Round 244 (2026-06-07) lands the `ADJ` (Scale Factor Adjustment
+Index) resolver, the four-row Table 5-27 multiplier that the
+§5.4.1 SCALES pipeline applies to a `(channel, subband)` scale
+factor whenever the Core Audio Coding Header pseudocode (PDF p.25,
+Table 5-21) reads `ADJ = ExtractBits(2);`. Source: locally staged
+ETSI TS 102 114 V1.3.1 §5.4.1 Table 5-27, p.27. New public surface
+in `src/side_info.rs`:
+[`ScaleFactorAdjustment`](crate::ScaleFactorAdjustment), a
+four-variant `#[non_exhaustive]` enum (`Adj0..=Adj3`) plus
+[`from_index`](crate::ScaleFactorAdjustment::from_index) /
+[`code`](crate::ScaleFactorAdjustment::code) /
+[`multiplier`](crate::ScaleFactorAdjustment::multiplier) (`f32`) /
+[`multiplier_f64`](crate::ScaleFactorAdjustment::multiplier_f64) /
+[`multiplier_rational`](crate::ScaleFactorAdjustment::multiplier_rational)
+(`(u8, u8)` numerator-over-16 exact form), plus the bit-stream
+entry point
+[`decode_adj_at(bytes, bit_offset) -> (adjustment, bits_consumed)`](crate::decode_adj_at).
+The four multipliers are transcribed verbatim from Table 5-27
+(decimal-comma → decimal-point): `Adj0 = 1.0000`, `Adj1 = 1.1250`,
+`Adj2 = 1.2500`, `Adj3 = 1.4375`. Each value has an exact IEEE-754
+binary representation because every numerator is a multiple of
+`1/16`; the rational accessor returns `(16, 16)`, `(18, 16)`,
+`(20, 16)`, `(23, 16)` respectively for integer-arithmetic callers.
+The `from_index` resolver consults only the low 2 bits of its
+input (Table 5-21 fixes `ADJ` at 2 bits / `ExtractBits(2)`), so
+the mapping is total over a masked 2-bit input and the
+`decode_adj_at` reader always returns a typed variant inside a
+well-formed bit stream. Eight new in-module tests in
+`src/side_info.rs` lock the table down: a row-by-row sweep across
+all four `(ADJ, variant, value)` rows of Table 5-27 (asserting
+`from_index`, `code` round-trip, `multiplier` `f32`, and
+`multiplier_f64`); a high-bit-masking check covering `0xFC`,
+`0xFF`, `0b1100`, `0b1111` (every wide input collapses to the
+correct 2-bit variant); a rational-accessor check confirming all
+four numerator-over-16 pairs match the f32 value exactly; a
+byte-aligned `decode_adj_at` walk that reads four ADJ pairs
+packed back-to-back in a single byte
+(`0x1B = 0b00_01_10_11 → Adj0, Adj1, Adj2, Adj3`); a bit-offset=5
+walk that lands the ADJ pair inside one byte after 5 leading
+filler bits; a byte-boundary-crossing walk that splits the 2-bit
+field across two consecutive bytes (`0x01, 0x80` @ bit 7 → `Adj3`);
+an EOF check (a 1-bit-remaining buffer returns `UnexpectedEof` on
+the 2-bit read); and a `code` round-trip check across every
+`0..=3` wire value. New re-exports at the crate root:
+`oxideav_dts::{ScaleFactorAdjustment, decode_adj_at}`. Total
+in-module test count: 328 → 336 (`cargo test -p oxideav-dts
+--lib`). Scope: this round only lands the Table 5-27 resolver;
+the §5.4.1 subframe walker that wires the ADJ multiplier into a
+full per-channel × per-subband SCALES loop is still a separate
+follow-up.
+
 **Round 241 — DIALNORM / UNSPEC → Dialog Normalization Gain in dB
 (ETSI §5.3.1 Table 5-20).**
 Round 241 (2026-06-06) closes the round-5 DIALNORM docs gap (the
