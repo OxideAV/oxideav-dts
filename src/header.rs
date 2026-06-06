@@ -514,6 +514,89 @@ fn source_pcm_resolution_from_index(pcmr_index: u8) -> SourcePcmResolution {
     }
 }
 
+// ---------------------------------------------------------------
+// Dialog Normalization Gain (DIALNORM/UNSPEC) — ETSI TS 102 114
+// V1.3.1 §5.3.1 Table 5-20 (PDF p.24).
+// ---------------------------------------------------------------
+//
+// The 4-bit field that follows SURROUND_SUM in the post-CRC header
+// window is named `DIALNORM` when `VERNUM` is 6 or 7, and `UNSPEC`
+// otherwise. Table 5-20 documents the (VERNUM, DIALNORM) → Dialog
+// Normalization Gain (DNG, in decibels) mapping for the two named
+// VERNUM rows:
+//
+//   VERNUM=7 → codes 0..15 → DNG dB  0, -1, -2, -3, -4, -5, -6, -7,
+//                                    -8, -9,-10,-11,-12,-13,-14,-15
+//   VERNUM=6 → codes 0..15 → DNG dB-16,-17,-18,-19,-20,-21,-22,-23,
+//                                   -24,-25,-26,-27,-28,-29,-30,-31
+//
+// For every other VERNUM (`0,1,2,3,4,5,8,9,...,15`), §5.3.1 specifies
+// that the 4-bit field is `UNSPEC`, the decoder must still extract
+// the bits, and the Dialog Normalization Gain is fixed at 0 dB
+// (the spec's "DNG=0 indicates No Dialog Normalization" sentence on
+// PDF p.23). The two rows + the "all other VERNUM => DNG=0"
+// convention give a total function on every (VERNUM, DIALNORM) pair
+// the 4-bit fields can encode.
+
+/// Dialog Normalization Gain decoded from the 4-bit `DIALNORM`/`UNSPEC`
+/// header field per **ETSI TS 102 114 V1.3.1 §5.3.1, Table 5-20**
+/// (PDF p.24), routed through the 4-bit `VERNUM` field that precedes
+/// it in the post-CRC window.
+///
+/// The dB value is always non-positive: Table 5-20 enumerates 0 dB
+/// down to −31 dB across the two named VERNUM rows, and the spec's
+/// `DNG = 0` convention for all other VERNUM values makes 0 dB the
+/// only other reachable value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DialogNormalization {
+    /// `VERNUM` was 6 or 7: the 4-bit field is `DIALNORM` per
+    /// Table 5-20. The contained value is the Dialog Normalization
+    /// Gain in decibels (always ≤ 0). For example
+    /// `(VERNUM=7, DIALNORM=0)` → `Fixed(0)`,
+    /// `(VERNUM=7, DIALNORM=15)` → `Fixed(-15)`,
+    /// `(VERNUM=6, DIALNORM=0)` → `Fixed(-16)`,
+    /// `(VERNUM=6, DIALNORM=15)` → `Fixed(-31)`.
+    Fixed(i8),
+    /// `VERNUM` was outside {6, 7}: the 4-bit field is `UNSPEC` per
+    /// §5.3.1. The spec says the decoder must still extract the bits
+    /// (the parser does, into [`DtsFrameHeader::dialog_normalization`])
+    /// but must apply no dialog-normalization gain. Equivalent to
+    /// `Fixed(0)` for playback purposes — the variant preserves the
+    /// `UNSPEC` distinction for callers that care about the original
+    /// field meaning.
+    Unspecified,
+}
+
+impl DialogNormalization {
+    /// Dialog Normalization Gain in decibels.
+    ///
+    /// Returns the spec's `DNG` value: the contained `i8` for the
+    /// [`Self::Fixed`] variant, and `0` for [`Self::Unspecified`]
+    /// (per §5.3.1's "DNG=0 indicates No Dialog Normalization" for
+    /// non-{6,7} VERNUM values).
+    pub fn gain_db(self) -> i8 {
+        match self {
+            DialogNormalization::Fixed(db) => db,
+            DialogNormalization::Unspecified => 0,
+        }
+    }
+}
+
+/// Resolve a `(VERNUM, DIALNORM)` pair to its [`DialogNormalization`]
+/// per Table 5-20.
+///
+/// Only the low 4 bits of each argument are consulted — both fields
+/// are 4-bit wires in the post-CRC header window.
+fn dialog_normalization_from_codes(vernum: u8, dialnorm: u8) -> DialogNormalization {
+    let dialnorm = dialnorm & 0b1111;
+    match vernum & 0b1111 {
+        7 => DialogNormalization::Fixed(-(dialnorm as i8)),
+        6 => DialogNormalization::Fixed(-(dialnorm as i8) - 16),
+        _ => DialogNormalization::Unspecified,
+    }
+}
+
 /// Parsed DTS Core frame-sync header.
 ///
 /// Round 1 surfaces only the structural fields whose semantics are
@@ -626,11 +709,12 @@ pub struct DtsFrameHeader {
     /// Same convention as [`Self::front_sum`] but for the surround
     /// channel pair.
     pub surround_sum: bool,
-    /// Dialog-normalization code (`DIALNORM`, 4 bits, 0..=15). The
-    /// wiki snapshot describes this as "dB of recovery"; the exact
-    /// code→dB mapping (and the version-dependent sign convention)
-    /// are not enumerated, so [`Self::dialog_normalization_db`]
-    /// returns `None` until the table lands in `docs/`.
+    /// Dialog-normalization code (`DIALNORM` for `VERNUM ∈ {6, 7}`,
+    /// otherwise `UNSPEC`; 4 bits, 0..=15). Resolved to a Dialog
+    /// Normalization Gain in dB via [`Self::dialog_normalization_db`]
+    /// /[`Self::dialog_normalization_gain`] per ETSI TS 102 114 V1.3.1
+    /// §5.3.1 Table 5-20 (PDF p.24), with the spec's `UNSPEC` → 0 dB
+    /// convention applied for `VERNUM ∉ {6, 7}`.
     pub dialog_normalization: u8,
 }
 
@@ -751,15 +835,39 @@ impl DtsFrameHeader {
         source_pcm_resolution_from_index(self.source_pcm_resolution_index)
     }
 
-    /// Resolve [`Self::dialog_normalization`] to a dB value.
+    /// Resolve [`Self::dialog_normalization`] to a Dialog
+    /// Normalization Gain in decibels per **ETSI TS 102 114 V1.3.1
+    /// §5.3.1, Table 5-20** (PDF p.24), routed through
+    /// [`Self::version`] (the `VERNUM` field that precedes DIALNORM
+    /// in the post-CRC header window).
     ///
-    /// Returns `None` for now: the DIALNORM-code→dB table is missing
-    /// from `docs/audio/dts/`. The wiki snapshot calls the field "dB
-    /// of recovery" without enumerating the per-code mapping or the
-    /// version-dependent sign convention.
+    /// Always returns `Some`:
+    /// - `VERNUM == 7` → `Some(-(DIALNORM as i8))` (codes 0..=15 → 0 dB
+    ///   down to −15 dB).
+    /// - `VERNUM == 6` → `Some(-(DIALNORM as i8) - 16)` (codes 0..=15 →
+    ///   −16 dB down to −31 dB).
+    /// - Any other `VERNUM` → `Some(0)` per §5.3.1's "DNG=0 indicates
+    ///   No Dialog Normalization" for VERNUM ∉ {6, 7}. The field is
+    ///   `UNSPEC` in this branch (the parser still surfaces the raw
+    ///   bits via [`Self::dialog_normalization`]).
+    ///
+    /// Callers that need to distinguish the `Fixed` Table-5-20 mapping
+    /// from the `Unspecified` zero-gain convention should use
+    /// [`Self::dialog_normalization_gain`].
     pub fn dialog_normalization_db(&self) -> Option<i8> {
-        let _ = self.dialog_normalization;
-        None
+        Some(self.dialog_normalization_gain().gain_db())
+    }
+
+    /// Resolve [`Self::dialog_normalization`] to its
+    /// [`DialogNormalization`] per ETSI TS 102 114 §5.3.1 Table 5-20.
+    ///
+    /// Richer counterpart to [`Self::dialog_normalization_db`]:
+    /// preserves the distinction between the [`DialogNormalization::Fixed`]
+    /// row of Table 5-20 (`VERNUM ∈ {6, 7}`) and the
+    /// [`DialogNormalization::Unspecified`] `UNSPEC` convention
+    /// (all other `VERNUM` values).
+    pub fn dialog_normalization_gain(&self) -> DialogNormalization {
+        dialog_normalization_from_codes(self.version, self.dialog_normalization)
     }
 
     /// Verify the 16-bit [`Self::header_crc`] against the bits
@@ -2207,14 +2315,19 @@ mod tests {
         // PCMR=0 → 16-bit. RATE code 25 (0b11001) is documented as
         // invalid per Table 5-7, so bit_rate_bps() stays None (for a
         // now-documented reason — invalid code, not a missing table).
-        // The DIALNORM-dB resolver still waits on Table 5-20.
         assert_eq!(hdr.sample_rate_hz(), Some(48_000));
         assert_eq!(hdr.bit_rate_bps(), None);
         assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Invalid);
         assert_eq!(hdr.channel_count(), Some(5));
         assert_eq!(hdr.amode_arrangement(), AmodeArrangement::ClRSlSr);
         assert_eq!(hdr.source_pcm_bits_per_sample(), Some(16));
-        assert_eq!(hdr.dialog_normalization_db(), None);
+        // Round 241: Table 5-20. `post_crc == 0` puts VERNUM = 0 (UNSPEC)
+        // and DIALNORM = 0, so the gain is 0 dB by the §5.3.1 convention.
+        assert_eq!(hdr.dialog_normalization_db(), Some(0));
+        assert_eq!(
+            hdr.dialog_normalization_gain(),
+            DialogNormalization::Unspecified,
+        );
     }
 
     #[test]
@@ -2238,8 +2351,13 @@ mod tests {
         // bit_rate_bps() None, targeted_bit_rate() Invalid.
         assert_eq!(hdr.bit_rate_bps(), None);
         assert_eq!(hdr.targeted_bit_rate(), TargetedBitRate::Invalid);
-        // The DIALNORM-dB resolver still waits on Table 5-20.
-        assert_eq!(hdr.dialog_normalization_db(), None);
+        // Round 241: Table 5-20. `post_crc == 0` puts VERNUM = 0 (UNSPEC)
+        // and DIALNORM = 0, so the gain is 0 dB by the §5.3.1 convention.
+        assert_eq!(hdr.dialog_normalization_db(), Some(0));
+        assert_eq!(
+            hdr.dialog_normalization_gain(),
+            DialogNormalization::Unspecified,
+        );
     }
 
     /// Every fixed `RATE` code (0..=24) resolves to the Table 5-7
@@ -2491,9 +2609,11 @@ mod tests {
     }
 
     /// Walk every 4-bit DIALNORM code (0..=15) and confirm the
-    /// parser preserves the raw index. The resolver
-    /// `dialog_normalization_db()` is still `None` because the
-    /// code→dB table is missing from `docs/`.
+    /// parser preserves the raw index. With `post_crc == code`, the
+    /// VERNUM nibble at bits 14..11 of the post-CRC word is 0
+    /// (UNSPEC) and the DIALNORM nibble at bits 3..0 carries `code`.
+    /// Per Table 5-20's UNSPEC branch (§5.3.1), the gain is 0 dB for
+    /// every code.
     #[test]
     fn dialnorm_code_round_trips_for_every_4bit_value() {
         for code in 0..=15u32 {
@@ -2501,11 +2621,177 @@ mod tests {
             let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, post_crc);
             let hdr = parse_frame_header(&bytes).unwrap();
             assert_eq!(hdr.dialog_normalization, code as u8, "DIALNORM code {code}");
+            assert_eq!(hdr.version, 0, "VERNUM nibble must be 0 by construction");
+            // VERNUM=0 → UNSPEC → DNG = 0 dB regardless of DIALNORM.
             assert_eq!(
                 hdr.dialog_normalization_db(),
-                None,
-                "DIALNORM resolver must remain None until docs land",
+                Some(0),
+                "UNSPEC (VERNUM ∉ {{6,7}}) → DNG = 0 dB per §5.3.1",
             );
+            assert_eq!(
+                hdr.dialog_normalization_gain(),
+                DialogNormalization::Unspecified,
+            );
+        }
+    }
+
+    /// Round 241: every Table 5-20 row, exhaustively. For each
+    /// `VERNUM ∈ {6, 7}` and `DIALNORM ∈ 0..=15`, build the post-CRC
+    /// word that places `VERNUM` at bits 14..11 and `DIALNORM` at
+    /// bits 3..0, then parse and assert that the resolver returns the
+    /// Table 5-20 row's DNG (dB) verbatim. The remaining fourteen
+    /// `VERNUM` values are exercised by
+    /// [`dialnorm_unspec_branch_is_zero_db_for_every_other_vernum`].
+    #[test]
+    fn dialnorm_resolver_covers_table_5_20_verbatim() {
+        // VERNUM == 7: codes 0..=15 → 0 dB down to -15 dB.
+        for code in 0u32..=15 {
+            let post_crc = (7u32 << 11) | code;
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, post_crc);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(hdr.version, 7);
+            assert_eq!(hdr.dialog_normalization, code as u8);
+            let expected = -(code as i8);
+            assert_eq!(
+                hdr.dialog_normalization_db(),
+                Some(expected),
+                "VERNUM=7 DIALNORM={code} → DNG {expected} dB",
+            );
+            assert_eq!(
+                hdr.dialog_normalization_gain(),
+                DialogNormalization::Fixed(expected),
+            );
+        }
+        // VERNUM == 6: codes 0..=15 → -16 dB down to -31 dB.
+        for code in 0u32..=15 {
+            let post_crc = (6u32 << 11) | code;
+            let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, post_crc);
+            let hdr = parse_frame_header(&bytes).unwrap();
+            assert_eq!(hdr.version, 6);
+            assert_eq!(hdr.dialog_normalization, code as u8);
+            let expected = -(code as i8) - 16;
+            assert_eq!(
+                hdr.dialog_normalization_db(),
+                Some(expected),
+                "VERNUM=6 DIALNORM={code} → DNG {expected} dB",
+            );
+            assert_eq!(
+                hdr.dialog_normalization_gain(),
+                DialogNormalization::Fixed(expected),
+            );
+        }
+    }
+
+    /// Round 241: the §5.3.1 UNSPEC branch. For every `VERNUM`
+    /// outside `{6, 7}` and every 4-bit `DIALNORM` code, the resolver
+    /// returns `Some(0)` / `Unspecified` (the spec's "DNG=0 indicates
+    /// No Dialog Normalization" convention for non-named VERNUM
+    /// values, PDF p.23).
+    #[test]
+    fn dialnorm_unspec_branch_is_zero_db_for_every_other_vernum() {
+        for vernum in 0u32..=15 {
+            if vernum == 6 || vernum == 7 {
+                continue;
+            }
+            for code in 0u32..=15 {
+                let post_crc = (vernum << 11) | code;
+                let bytes = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, post_crc);
+                let hdr = parse_frame_header(&bytes).unwrap();
+                assert_eq!(hdr.version, vernum as u8);
+                assert_eq!(hdr.dialog_normalization, code as u8);
+                assert_eq!(
+                    hdr.dialog_normalization_db(),
+                    Some(0),
+                    "VERNUM={vernum} DIALNORM={code} → DNG = 0 dB (UNSPEC)",
+                );
+                assert_eq!(
+                    hdr.dialog_normalization_gain(),
+                    DialogNormalization::Unspecified,
+                );
+            }
+        }
+    }
+
+    /// Round 241: pure-function check on
+    /// [`dialog_normalization_from_codes`]. Confirms the helper
+    /// reproduces Table 5-20's boundary rows exactly and that only
+    /// the low 4 bits of each input are consulted.
+    #[test]
+    fn dialog_normalization_from_codes_boundary_rows() {
+        // VERNUM=7 boundary corners: (7, 0) → 0 dB; (7, 15) → -15 dB.
+        assert_eq!(
+            dialog_normalization_from_codes(7, 0),
+            DialogNormalization::Fixed(0),
+        );
+        assert_eq!(
+            dialog_normalization_from_codes(7, 15),
+            DialogNormalization::Fixed(-15),
+        );
+        // VERNUM=6 boundary corners: (6, 0) → -16 dB; (6, 15) → -31 dB.
+        assert_eq!(
+            dialog_normalization_from_codes(6, 0),
+            DialogNormalization::Fixed(-16),
+        );
+        assert_eq!(
+            dialog_normalization_from_codes(6, 15),
+            DialogNormalization::Fixed(-31),
+        );
+        // UNSPEC branch: a sample of non-{6,7} codes.
+        for v in [0u8, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15] {
+            assert_eq!(
+                dialog_normalization_from_codes(v, 0),
+                DialogNormalization::Unspecified,
+            );
+            assert_eq!(
+                dialog_normalization_from_codes(v, 15),
+                DialogNormalization::Unspecified,
+            );
+        }
+        // High bits of either input are masked off — the resolver
+        // consults only the documented 4-bit wire widths.
+        assert_eq!(
+            dialog_normalization_from_codes(0xF7, 0xF0),
+            DialogNormalization::Fixed(0),
+        );
+        assert_eq!(
+            dialog_normalization_from_codes(0xF6, 0xFF),
+            DialogNormalization::Fixed(-31),
+        );
+    }
+
+    /// Round 241: [`DialogNormalization::gain_db`] returns the spec's
+    /// DNG value for both variants — the contained `i8` for `Fixed`,
+    /// and `0` for `Unspecified`.
+    #[test]
+    fn dialog_normalization_gain_db_is_zero_for_unspecified() {
+        assert_eq!(DialogNormalization::Unspecified.gain_db(), 0);
+        for db in -31i8..=0 {
+            assert_eq!(DialogNormalization::Fixed(db).gain_db(), db);
+        }
+    }
+
+    /// Round 241: the resolver's range across every reachable
+    /// `(VERNUM, DIALNORM)` pair is exactly `{0, -1, ..., -31}`.
+    /// Cross-checks the Table 5-20 + UNSPEC implementation against
+    /// the spec's stated dynamic range
+    /// (§5.3.1: "Dialog Normalization Gain ... in dB").
+    #[test]
+    fn dialnorm_resolver_range_is_0_down_to_minus_31() {
+        let mut seen = [false; 32];
+        for v in 0u8..=15 {
+            for d in 0u8..=15 {
+                let db = match dialog_normalization_from_codes(v, d) {
+                    DialogNormalization::Fixed(db) => db,
+                    DialogNormalization::Unspecified => 0,
+                };
+                assert!((-31..=0).contains(&db), "DNG out of spec range");
+                let bucket = (-db) as usize;
+                seen[bucket] = true;
+            }
+        }
+        // Every dB value in [-31..=0] must be reachable.
+        for (i, hit) in seen.iter().enumerate() {
+            assert!(*hit, "DNG {} dB not reachable", -(i as i32));
         }
     }
 

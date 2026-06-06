@@ -5,6 +5,53 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 241 — DIALNORM / UNSPEC → Dialog Normalization Gain in dB
+(ETSI §5.3.1 Table 5-20).**
+Round 241 (2026-06-06) closes the round-5 DIALNORM docs gap (the
+last open `Option`-resolver gap on the post-CRC trailing window) by
+wiring ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-20 ("Dialog
+Normalization Parameter", staged PDF p.24) into the header. The
+4-bit `DIALNORM`/`UNSPEC` field is routed through `version` (the
+4-bit `VERNUM` field that precedes it in the post-CRC window) per
+the §5.3.1 narrative: `VERNUM == 7` ⇒ the field is `DIALNORM` and
+codes 0..=15 resolve to 0 dB through −15 dB; `VERNUM == 6` ⇒ the
+field is `DIALNORM` and codes 0..=15 resolve to −16 dB through
+−31 dB; every other `VERNUM` ⇒ the field is `UNSPEC` and DNG is
+fixed at 0 dB per the spec's "DNG=0 indicates No Dialog
+Normalization" sentence (PDF p.23). New public surface: the
+`DialogNormalization` enum with `Fixed(i8)` and `Unspecified`
+variants plus a `gain_db() -> i8` accessor;
+`DtsFrameHeader::dialog_normalization_gain()` returns the typed
+variant. The existing `DtsFrameHeader::dialog_normalization_db()`
+— which had returned `None` since round 5 — now returns
+`Some(db)` across every reachable `(VERNUM, DIALNORM)` pair, with
+the `Unspecified` branch resolving to `Some(0)` to surface the
+spec-prescribed playback semantics. Five new in-module tests in
+`src/header.rs` lock the table down: an exhaustive 32-row sweep of
+the two Table 5-20 named-VERNUM rows
+(`VERNUM ∈ {6, 7} × DIALNORM ∈ 0..=15` → DNG = 0, −1, …, −31);
+an exhaustive sweep of the fourteen UNSPEC-branch VERNUM values
+(`VERNUM ∈ {0,1,2,3,4,5,8,9,10,11,12,13,14,15} × DIALNORM ∈
+0..=15` → DNG = 0); a boundary-row check on the pure-function
+`dialog_normalization_from_codes` helper (`(7, 0)` → 0;
+`(7, 15)` → −15; `(6, 0)` → −16; `(6, 15)` → −31; high bits of
+both inputs masked off so the resolver consults only the
+documented 4-bit wire widths); a `gain_db` projection check
+across both variants; and a range-coverage cross-check that
+confirms the resolver's range across all 256
+`(VERNUM, DIALNORM)` pairs is exactly the spec's `{0, −1, …, −31}`
+dB set. The existing `dialnorm_code_round_trips_for_every_4bit_value`
+test is updated to assert `Some(0)` in the UNSPEC branch instead
+of the previous `None`. The black-box `ffmpeg` 48 kHz / stereo /
+768 kb/s fixture (VERNUM=7, DIALNORM=0 → DNG = 0 dB) now asserts
+`dialog_normalization_db() == Some(0)` and the resolver returns
+`DialogNormalization::Fixed(0)`. With this round the post-CRC
+trailing window's three `Option`-resolver gaps (DIALNORM, PCMR,
+CHIST) are all closed; the remaining open header gap is the
+HEADER_CRC polynomial (round-3 gap #4). Scope: this round only
+lands the Table 5-20 resolver; the §D.8 32-band FIR coefficient
+tables (round-208 gap #9) remain pending docs staging.
+
 **Round 232 — §C.2.1 Block Code (ETSI Annex C §C.2.1).**
 Round 232 (2026-06-04) lands the §C.2.1 block-code decoder, the
 mixed-radix unpacking step that turns one code word into the array of
@@ -857,12 +904,18 @@ those tables are not in `docs/`:
    the six valid codes and returns `None` for the two reserved
    ones; `DtsFrameHeader::source_pcm_resolution()` preserves
    both the bits-per-sample value and the auxiliary DTS-ES flag.
-6. **DIALNORM (dialog-normalization) code → dB**: the wiki
-   describes the 4-bit field as "dB of recovery" without
-   enumerating the code → dB mapping (the spec also documents a
-   version-dependent sign convention).
-   `DtsFrameHeader::dialog_normalization_db` returns `None`
-   until the table lands.
+6. **DIALNORM (dialog-normalization) code → dB**: *Resolved in
+   round 241.* ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-20 (staged at
+   `docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf` p.24)
+   enumerates the (`VERNUM`, `DIALNORM`) → Dialog Normalization
+   Gain (dB) mapping: `VERNUM == 7` codes 0..=15 → 0 dB down to
+   −15 dB; `VERNUM == 6` codes 0..=15 → −16 dB down to −31 dB. For
+   every other `VERNUM` the field is named `UNSPEC` (PDF p.23) and
+   the spec sets DNG = 0 dB. `DtsFrameHeader::dialog_normalization_db()`
+   now returns the resolved dB across the whole `(VERNUM, DIALNORM)`
+   product; `DtsFrameHeader::dialog_normalization_gain()`
+   distinguishes the [`DialogNormalization::Fixed`] Table 5-20 row
+   from the [`DialogNormalization::Unspecified`] zero-gain branch.
 
 ### Round-208 docs gaps
 

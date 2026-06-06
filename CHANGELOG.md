@@ -8,6 +8,44 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 241 (2026-06-06) — DIALNORM / UNSPEC → Dialog Normalization
+  Gain in dB (ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-20, staged PDF
+  p.24). Closes the round-5 DIALNORM docs gap. The 4-bit field that
+  follows SURROUND_SUM in the post-CRC header window is named
+  `DIALNORM` when `VERNUM ∈ {6, 7}` and `UNSPEC` otherwise; the
+  resolver routes through the parsed `version` field per §5.3.1.
+  - New `DialogNormalization` enum with `Fixed(i8)` (the Table 5-20
+    `VERNUM ∈ {6, 7}` rows: codes `0..=15` mapping to 0 dB down to
+    −15 dB for `VERNUM == 7`; codes `0..=15` mapping to −16 dB down
+    to −31 dB for `VERNUM == 6`) and `Unspecified` (every other
+    `VERNUM`, where the spec sets DNG = 0 dB).
+  - `DialogNormalization::gain_db() -> i8` returns the dB value (the
+    contained `i8` for `Fixed`, `0` for `Unspecified`).
+  - `DtsFrameHeader::dialog_normalization_gain() -> DialogNormalization`
+    is the typed counterpart to the existing
+    `dialog_normalization_db()`.
+  - `DtsFrameHeader::dialog_normalization_db()` (which had returned
+    `None` since round 5) now returns `Some(db)` across every
+    reachable `(VERNUM, DIALNORM)` pair, including the UNSPEC
+    branch where it resolves to `Some(0)`.
+
+  Five new in-module tests in `src/header.rs` lock the table down:
+  exhaustive sweeps of both Table 5-20 named-VERNUM rows
+  (32 pairs); exhaustive sweeps of the fourteen UNSPEC-branch
+  `VERNUM` values (224 pairs); boundary-corner check on the
+  pure-function `dialog_normalization_from_codes` helper
+  (`(7, 0)` → 0, `(7, 15)` → −15, `(6, 0)` → −16, `(6, 15)` → −31,
+  plus 4-bit input-masking on both arguments); `gain_db` projection
+  check across both variants; and a range-coverage cross-check
+  confirming the resolver's range over all 256 `(VERNUM, DIALNORM)`
+  pairs is exactly the spec's `{0, −1, …, −31}` dB set. The
+  existing `dialnorm_code_round_trips_for_every_4bit_value` test
+  (round 5) is updated to assert `Some(0)` in the UNSPEC branch.
+  The `tests/black_box_ffmpeg.rs` fixture
+  (`ffmpeg -c:a dca -ar 48000 -ac 2 -b:a 768k`,
+  VERNUM=7 + DIALNORM=0) now asserts
+  `dialog_normalization_db() == Some(0)`.
+
 - Round 232 (2026-06-04) — §C.2.1 Block Code (ETSI TS 102 114
   V1.3.1 Annex C §C.2.1, PDF p.182–183). New `src/block_code.rs`
   lands the §C.2.1 modulus / integer-division block-code decoder,

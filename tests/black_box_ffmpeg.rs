@@ -108,9 +108,9 @@ fn parses_real_ffmpeg_frame_header() {
     assert_eq!(hdr.dialog_normalization, 0);
     // Round 202: PCMR (Table 5-17) resolves to 16-bit source PCM
     // for this fixture (PCMR field = 0b000 in the post-CRC window).
-    // The DIALNORM-dB resolver still waits on Table 5-20 transcription.
     assert_eq!(hdr.source_pcm_bits_per_sample(), Some(16));
-    assert_eq!(hdr.dialog_normalization_db(), None);
+    // Round 241: Table 5-20 — VERNUM=7, DIALNORM=0 → DNG = 0 dB.
+    assert_eq!(hdr.dialog_normalization_db(), Some(0));
 }
 
 /// The same `ffmpeg` frame as above, repacked into the 14-bit BE

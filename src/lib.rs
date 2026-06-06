@@ -388,8 +388,8 @@ pub use crate::cos_mod::{
 pub use crate::header::{
     encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,
     encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, AmodeArrangement,
-    DtsFrameHeader, FrameType, LfeMode, SampleFrequency, SourcePcmResolution, SyncWordEncoding,
-    TargetedBitRate,
+    DialogNormalization, DtsFrameHeader, FrameType, LfeMode, SampleFrequency, SourcePcmResolution,
+    SyncWordEncoding, TargetedBitRate,
 };
 pub use crate::inverse_adpcm::{
     inverse_adpcm_decode_f64, inverse_adpcm_decode_i32, inverse_adpcm_required, update_history_f64,
