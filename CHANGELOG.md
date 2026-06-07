@@ -8,6 +8,49 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 249 (2026-06-07) — SSC / nSSC / PSC → Subsubframe-Count
+  prefix at the head of §5.4.1 Table 5-28 (ETSI TS 102 114 V1.3.1,
+  staged PDF p.28, with field descriptions on p.29 and p.30). Wires
+  the first two `ExtractBits` reads of the Primary Audio Side
+  Information pseudocode (`SSC = ExtractBits(2); nSSC = SSC + 1;
+  PSC = ExtractBits(3);`) to a typed 5-bit prefix decoder.
+  - New `SubsubframeCount` struct (`#[non_exhaustive]`) carrying
+    the raw `ssc` (2 bits, `0..=3`) and `psc` (3 bits, `0..=7`)
+    fields. Accessors: `n_ssc(self) -> u8` (= `ssc + 1`, `1..=4`,
+    per PDF p.29), `samples_per_subsubframe_normal(self) -> usize`
+    (= `8 * nSSC`, the per-subband sample stride consumed by the
+    §C.2.3 / §C.2.4 / §C.2.5 loops in `sum_diff.rs` and
+    `joint_subband.rs`), `partial_sample_count(self) -> Option<u8>`
+    (`Some(psc)` when `psc > 0`, `None` otherwise), and
+    `is_termination_tail(self) -> bool` (returns `true` when
+    `psc != 0`, the termination-frame signal per PDF p.30).
+    Associated constants `MAX_SSC = 0b11`, `MAX_PSC = 0b111`, and
+    `WIRE_BITS = 5`. Constructor `new(ssc, psc)` masks inputs to
+    their 2-bit / 3-bit wire widths to match the `ExtractBits`
+    semantics.
+  - New `decode_subsubframe_count_at(bytes: &[u8], bit_offset:
+    usize) -> Result<(SubsubframeCount, usize)>` bit-stream entry
+    point that reads the 5-bit prefix at an arbitrary MSB-first
+    bit offset and returns `(prefix, bits_consumed)`. Returns
+    `Error::UnexpectedEof` when fewer than 5 bits remain after
+    `bit_offset`.
+  - New re-exports at the crate root:
+    `oxideav_dts::{SubsubframeCount, decode_subsubframe_count_at}`.
+
+  Ten new in-module unit tests in `src/side_info.rs`: a four-row
+  sweep verifying `nSSC = SSC + 1`; a four-row sweep verifying the
+  `8 * nSSC` accessor; a high-bit-masking check (`0xFF`,
+  `0b1111_1101`, `0b1111_1010`); a `psc = 0..=7` sweep covering
+  both `partial_sample_count` arms and `is_termination_tail`; a
+  `WIRE_BITS == 5` constant assertion; a byte-aligned
+  `decode_subsubframe_count_at` walk at bit-offset 0; a
+  non-byte-aligned walk at bit-offset 3; a byte-boundary-crossing
+  walk at bit-offset 5 splitting the 5-bit prefix across two
+  bytes; an `UnexpectedEof` check when only 4 bits remain; and an
+  exhaustive `4 × 8 = 32` `(SSC, PSC)`-pair walk asserting every
+  accessor for every combination. Total in-module test count:
+  336 → 346.
+
 - Round 244 (2026-06-07) — ADJ → Scale Factor Adjustment multiplier
   (ETSI TS 102 114 V1.3.1 §5.4.1 Table 5-27, staged PDF p.27). Wires
   the Core Audio Coding Header pseudocode `ADJ = ExtractBits(2);`

@@ -776,6 +776,178 @@ pub fn decode_adj_at(bytes: &[u8], bit_offset: usize) -> Result<(ScaleFactorAdju
     Ok((adj, bits_consumed))
 }
 
+// ---------------------------------------------------------------
+// §5.4.1 Table 5-28 — Subsubframe Count (SSC, nSSC) and Partial
+// Subsubframe Sample Count (PSC).
+// (Staged PDF p.28 — first three rows of the Primary Audio Side
+// Information pseudocode; field descriptions on PDF p.29–p.30.)
+// ---------------------------------------------------------------
+//
+// Verbatim from PDF p.28, top of Table 5-28:
+//
+//     SSC  = ExtractBits(2);    // 2 bits
+//     nSSC = SSC + 1;
+//     PSC  = ExtractBits(3);    // 3 bits
+//
+// Field descriptions, PDF p.29 ("SSC (Subsubframe Count)") and
+// p.30 ("PSC (Partial Subsubframe Sample Count)"):
+//
+// * **SSC.** "Indicates that there are `nSSC = SSC + 1` subsubframes
+//   in the current audio subframe." Wire width 2 bits → the count
+//   `nSSC` ranges over `1..=4` (the four valid Core-profile
+//   subsubframe counts).
+// * **PSC.** "Indicates the number of subband samples held in a
+//   partial subsubframe for each of the active subbands. A partial
+//   subsubframe is one which has less than 8 subband samples. It
+//   exists only in a termination frame and is always at the end of
+//   the last normal subsubframe. A DSYNC word will always occur
+//   after a partial subsubframe." Wire width 3 bits → `0..=7`. A
+//   normal (non-termination) subsubframe carries 8 samples per
+//   active subband, so `PSC < 8`; the spec leaves `PSC = 0` as the
+//   "no partial subsubframe present" sentinel that termination
+//   frames may emit but that is structurally always meaningful only
+//   in termination frames.
+//
+// The downstream §5.4.1 loops (e.g. `for (n=0; n<nSSC; n++)` over
+// PMODE and PVQ, or the SCALES sample-count `8 * nSSC` quantifier
+// used by Annex C §C.2.3 / §C.2.4 / §C.2.5) all consume the
+// `nSSC` value; downstream sum/difference / joint-subband / QMF
+// code in this crate already references `8 * nSSC` as its
+// per-frame sample stride (see `src/sum_diff.rs` and
+// `src/joint_subband.rs`), so wiring the 5-bit head into a typed
+// decoder closes the loop on those quantifiers.
+
+/// Subsubframe-count prefix at the head of §5.4.1 Table 5-28
+/// (staged PDF p.28).
+///
+/// Wraps the three values produced by the first two `ExtractBits`
+/// reads of the Primary Audio Side Information block:
+///
+/// * `ssc`  — raw `SSC` wire field (2 bits, `0..=3`).
+/// * `n_ssc` — derived count `SSC + 1` (`1..=4`), i.e. the number of
+///   subsubframes in the current audio subframe (PDF p.29).
+/// * `psc`  — raw `PSC` wire field (3 bits, `0..=7`), the partial
+///   subsubframe sample count (PDF p.30).
+///
+/// The `n_ssc` and `samples_per_subsubframe_normal` accessors hide
+/// the `+ 1` / `× 8` arithmetic so call sites that need the
+/// `8 * nSSC` per-subband sample stride (used by the §C.2 sum/diff
+/// and joint-subband loops) don't repeat it in raw form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct SubsubframeCount {
+    /// Raw 2-bit `SSC` wire field (`0..=3`). The 2-bit
+    /// `ExtractBits(2)` in PDF p.28 yields this value directly.
+    pub ssc: u8,
+    /// Raw 3-bit `PSC` wire field (`0..=7`). The 3-bit
+    /// `ExtractBits(3)` in PDF p.28 yields this value directly.
+    /// A value of `psc > 0` marks the trailing partial subsubframe
+    /// of a termination frame; a value of `0` means no partial
+    /// subsubframe is present at the tail of this audio subframe.
+    pub psc: u8,
+}
+
+impl SubsubframeCount {
+    /// Maximum 2-bit `SSC` wire value (`0b11 = 3`); decoded
+    /// `n_ssc` is therefore at most `4`.
+    pub const MAX_SSC: u8 = 0b11;
+    /// Maximum 3-bit `PSC` wire value (`0b111 = 7`).
+    pub const MAX_PSC: u8 = 0b111;
+    /// Total wire width of the `SSC` + `PSC` prefix, in bits:
+    /// `2 + 3 = 5`.
+    pub const WIRE_BITS: u32 = 5;
+
+    /// Construct from the raw 2-bit `SSC` and 3-bit `PSC` fields.
+    ///
+    /// Only the low 2 / 3 bits of the inputs are consulted; any
+    /// higher bits in the caller-supplied integers are masked off
+    /// (matching the `ExtractBits(2)` / `ExtractBits(3)` semantics
+    /// of the §5.4.1 pseudocode). The mapping is total.
+    pub fn new(ssc: u8, psc: u8) -> Self {
+        Self {
+            ssc: ssc & Self::MAX_SSC,
+            psc: psc & Self::MAX_PSC,
+        }
+    }
+
+    /// Decoded subsubframe count `nSSC = SSC + 1` (`1..=4`).
+    ///
+    /// Per PDF p.29 field description: "Indicates that there are
+    /// `nSSC = SSC + 1` subsubframes in the current audio
+    /// subframe." This is the count consumed by every downstream
+    /// §5.4.1 loop iterating over subsubframes.
+    pub fn n_ssc(self) -> u8 {
+        self.ssc + 1
+    }
+
+    /// Convenience: subband-sample stride for a *normal* (non-
+    /// partial) subsubframe span, equal to `8 * nSSC` (the quantity
+    /// used by Annex C §C.2.3 / §C.2.4 / §C.2.5 to size per-
+    /// subband sample arrays). Returns a `usize` for direct use as
+    /// a loop bound. Result fits in `5..=32` for any valid `ssc`.
+    pub fn samples_per_subsubframe_normal(self) -> usize {
+        // 8 samples per active subband per subsubframe, times nSSC
+        // subsubframes per audio subframe. Max value 8 * 4 = 32
+        // fits comfortably in u8, but we promote to usize because
+        // downstream callers index into per-subband sample slices.
+        8usize * self.n_ssc() as usize
+    }
+
+    /// Returns `Some(psc)` when this audio subframe ends with a
+    /// partial subsubframe (`psc > 0`, termination-frame signal
+    /// per PDF p.30), or `None` when no partial tail is present
+    /// (`psc == 0`).
+    ///
+    /// The returned value is the partial subsubframe's sample
+    /// count per active subband (so `< 8`, since a partial
+    /// subsubframe by definition holds fewer than 8 subband
+    /// samples).
+    pub fn partial_sample_count(self) -> Option<u8> {
+        if self.psc == 0 {
+            None
+        } else {
+            Some(self.psc)
+        }
+    }
+
+    /// Returns `true` if this prefix signals a termination frame
+    /// tail (i.e. `psc > 0`, per PDF p.30).
+    pub fn is_termination_tail(self) -> bool {
+        self.psc != 0
+    }
+}
+
+/// Decode the 5-bit `SSC` + `PSC` head of the §5.4.1 Primary
+/// Audio Side Information block from `bytes`, starting at
+/// `bit_offset` (MSB-first from `bytes[0]`).
+///
+/// Returns `(SubsubframeCount, bits_consumed)` on success. The
+/// width of the prefix is exactly [`SubsubframeCount::WIRE_BITS`]
+/// (5 bits) per Table 5-28: SSC is read first as a 2-bit
+/// `ExtractBits(2)`, then PSC as a 3-bit `ExtractBits(3)`.
+///
+/// Returns [`Error::UnexpectedEof`] when fewer than 5 bits remain
+/// after `bit_offset`.
+pub fn decode_subsubframe_count_at(
+    bytes: &[u8],
+    bit_offset: usize,
+) -> Result<(SubsubframeCount, usize)> {
+    let byte_offset = bit_offset / 8;
+    let intra_byte = bit_offset % 8;
+    let mut br = BitReader::from_byte_offset(bytes, byte_offset);
+    if intra_byte > 0 {
+        br.read_bits(intra_byte as u32)?;
+    }
+    let start = bit_offset;
+    // SSC = ExtractBits(2)
+    let ssc = br.read_bits(2)? as u8;
+    // PSC = ExtractBits(3)
+    let psc = br.read_bits(3)? as u8;
+    let prefix = SubsubframeCount::new(ssc, psc);
+    let bits_consumed = br.absolute_bit_position() - start;
+    Ok((prefix, bits_consumed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,6 +1442,172 @@ mod tests {
         for code in 0u8..=3 {
             let v = ScaleFactorAdjustment::from_index(code);
             assert_eq!(v.code(), code);
+        }
+    }
+
+    // -----------------------------------------------------------
+    // §5.4.1 Table 5-28 — SSC / nSSC / PSC tests (Round 249,
+    // staged PDF p.28–p.30).
+    // -----------------------------------------------------------
+
+    #[test]
+    fn subsubframe_count_n_ssc_covers_every_ssc_value() {
+        // SSC = 0..=3 → nSSC = 1..=4 per PDF p.29 ("nSSC = SSC + 1").
+        let cases = [(0u8, 1u8), (1, 2), (2, 3), (3, 4)];
+        for (raw_ssc, expected_n_ssc) in cases {
+            let prefix = SubsubframeCount::new(raw_ssc, 0);
+            assert_eq!(prefix.ssc, raw_ssc);
+            assert_eq!(prefix.n_ssc(), expected_n_ssc);
+        }
+    }
+
+    #[test]
+    fn subsubframe_count_samples_per_subsubframe_normal_is_8_times_n_ssc() {
+        // The 8 * nSSC quantity is the §C.2.3 / §C.2.4 / §C.2.5
+        // per-subband sample stride, also referenced in this
+        // crate's `sum_diff.rs` and `joint_subband.rs` doc-comments
+        // as the "8 * nSSC" inner-loop bound.
+        let cases = [(0u8, 8usize), (1, 16), (2, 24), (3, 32)];
+        for (raw_ssc, expected_samples) in cases {
+            let prefix = SubsubframeCount::new(raw_ssc, 0);
+            assert_eq!(prefix.samples_per_subsubframe_normal(), expected_samples);
+        }
+    }
+
+    #[test]
+    fn subsubframe_count_masks_high_bits_of_ssc_and_psc() {
+        // ExtractBits(2) / ExtractBits(3) semantics: only the low
+        // 2 / 3 bits should reach the typed prefix.
+        let prefix = SubsubframeCount::new(0b1111_1101, 0b1111_1010);
+        assert_eq!(prefix.ssc, 0b01);
+        assert_eq!(prefix.psc, 0b010);
+        // All-ones inputs collapse to the max wire values.
+        let max = SubsubframeCount::new(0xFF, 0xFF);
+        assert_eq!(max.ssc, SubsubframeCount::MAX_SSC);
+        assert_eq!(max.psc, SubsubframeCount::MAX_PSC);
+        assert_eq!(max.n_ssc(), 4);
+    }
+
+    #[test]
+    fn subsubframe_count_partial_sample_count_signals_termination_tail() {
+        // PSC == 0 → no partial subsubframe at the tail of the
+        // current audio subframe (PDF p.30: partial subsubframe
+        // "exists only in a termination frame").
+        let normal = SubsubframeCount::new(2, 0);
+        assert_eq!(normal.partial_sample_count(), None);
+        assert!(!normal.is_termination_tail());
+        // PSC > 0 → termination tail; the returned count is the
+        // partial subsubframe's sample count per active subband.
+        for psc in 1u8..=7 {
+            let tail = SubsubframeCount::new(2, psc);
+            assert_eq!(tail.partial_sample_count(), Some(psc));
+            assert!(tail.is_termination_tail());
+        }
+    }
+
+    #[test]
+    fn subsubframe_count_wire_bits_constant_matches_table_5_28() {
+        // SSC = ExtractBits(2); PSC = ExtractBits(3); total 5 bits
+        // per the first two rows of Table 5-28 (PDF p.28).
+        assert_eq!(SubsubframeCount::WIRE_BITS, 5);
+    }
+
+    #[test]
+    fn decode_subsubframe_count_at_byte_aligned() {
+        // Five-bit prefix at bit-offset 0: pack SSC=0b10 and
+        // PSC=0b011 into the top 5 bits of byte 0.
+        //   bit 0..=1 (MSB-first) = SSC = 0b10
+        //   bit 2..=4             = PSC = 0b011
+        //   bit 5..=7             = 0b000 (zero padding)
+        //   → 0b10011000 = 0x98
+        let stream = [0x98];
+        let (prefix, n) = decode_subsubframe_count_at(&stream, 0).unwrap();
+        assert_eq!(prefix.ssc, 0b10);
+        assert_eq!(prefix.psc, 0b011);
+        assert_eq!(prefix.n_ssc(), 3);
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn decode_subsubframe_count_at_non_byte_aligned() {
+        // Three filler bits, then SSC=0b11, PSC=0b101.
+        //   bit 0..=2 = 0b111
+        //   bit 3..=4 = SSC = 0b11
+        //   bit 5..=7 = PSC = 0b101
+        //   → 0b1111_1101 = 0xFD
+        let stream = [0xFD];
+        let (prefix, n) = decode_subsubframe_count_at(&stream, 3).unwrap();
+        assert_eq!(prefix.ssc, 0b11);
+        assert_eq!(prefix.psc, 0b101);
+        assert_eq!(prefix.n_ssc(), 4);
+        assert_eq!(prefix.partial_sample_count(), Some(5));
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn decode_subsubframe_count_at_crosses_byte_boundary() {
+        // Place the 5-bit prefix straddling the byte boundary,
+        // starting at bit-offset 5 within byte 0:
+        //   byte 0: 0b0000_0010 = 0x02 → bit 5..=7 = 0b010,
+        //                                  so SSC MSB=0, SSC LSB=1,
+        //                                  PSC MSB=0 (bit 7).
+        //   Actually: bit 5..=6 = SSC (=0b01), bit 7 = top bit of PSC.
+        //   We pick SSC=0b01 and PSC=0b001 ⇒ bit 7 of byte 0 = 0,
+        //   bit 0..=1 of byte 1 = 0b01.
+        //   byte 0 bits = 0b0000_0010 = 0x02 (SSC LSB at bit 6,
+        //                                     PSC top bit at bit 7 = 0)
+        //   byte 1 bits = 0b0100_0000 = 0x40 (PSC mid bit at bit 0 = 0,
+        //                                     PSC LSB at bit 1 = 1)
+        // Wait: redo it. At bit-offset 5 (MSB-first counting from
+        // byte 0 bit 7 = position 0), bits read are:
+        //   pos 5 → byte 0 bit 2 = SSC[1] (MSB of SSC)
+        //   pos 6 → byte 0 bit 1 = SSC[0] (LSB of SSC)
+        //   pos 7 → byte 0 bit 0 = PSC[2] (MSB of PSC)
+        //   pos 8 → byte 1 bit 7 = PSC[1]
+        //   pos 9 → byte 1 bit 6 = PSC[0] (LSB of PSC)
+        // For SSC=0b01 and PSC=0b001:
+        //   byte 0 bit 2 = 0, byte 0 bit 1 = 1, byte 0 bit 0 = 0
+        //                              → byte 0 = 0b0000_0010 = 0x02
+        //   byte 1 bit 7 = 0, byte 1 bit 6 = 1
+        //                              → byte 1 = 0b0100_0000 = 0x40
+        let stream = [0x02, 0x40];
+        let (prefix, n) = decode_subsubframe_count_at(&stream, 5).unwrap();
+        assert_eq!(prefix.ssc, 0b01);
+        assert_eq!(prefix.psc, 0b001);
+        assert_eq!(prefix.n_ssc(), 2);
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn decode_subsubframe_count_at_reports_eof_when_buffer_short() {
+        // Only 4 bits left after `bit_offset` → EOF before the
+        // full 5-bit prefix can be consumed.
+        let stream = [0x00];
+        let err = decode_subsubframe_count_at(&stream, 4).unwrap_err();
+        assert!(matches!(err, Error::UnexpectedEof));
+    }
+
+    #[test]
+    fn decode_subsubframe_count_at_covers_every_ssc_psc_pair() {
+        // Exhaustively pack each of the 4 * 8 = 32 (SSC, PSC)
+        // combinations into a single byte at bit-offset 0
+        // (SSC occupies bits 0..=1, PSC occupies bits 2..=4, low
+        // 3 bits are zero padding), then decode and check.
+        for ssc in 0u8..=3 {
+            for psc in 0u8..=7 {
+                let byte = (ssc << 6) | (psc << 3);
+                let stream = [byte];
+                let (prefix, n) = decode_subsubframe_count_at(&stream, 0).unwrap();
+                assert_eq!(prefix.ssc, ssc);
+                assert_eq!(prefix.psc, psc);
+                assert_eq!(n, 5);
+                assert_eq!(prefix.n_ssc(), ssc + 1);
+                assert_eq!(
+                    prefix.samples_per_subsubframe_normal(),
+                    8 * (ssc as usize + 1)
+                );
+                assert_eq!(prefix.is_termination_tail(), psc != 0);
+            }
         }
     }
 }

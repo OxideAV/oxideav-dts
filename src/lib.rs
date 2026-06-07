@@ -405,8 +405,8 @@ pub use crate::joint_subband::{
     joint_subband_required,
 };
 pub use crate::side_info::{
-    decode_abits_at, decode_adj_at, decode_scales_at, AbitsCodebook, ScaleFactorAdjustment,
-    ScalesCodebook, RMS_6BIT, RMS_7BIT,
+    decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, AbitsCodebook,
+    ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, RMS_6BIT, RMS_7BIT,
 };
 pub use crate::sum_diff::{
     front_sum_difference_required, sum_difference_decode_f64, sum_difference_decode_i32,

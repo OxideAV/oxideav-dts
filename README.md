@@ -5,6 +5,71 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 249 — SSC / nSSC / PSC → Subsubframe-Count prefix
+(ETSI §5.4.1 Table 5-28, staged PDF p.28).**
+Round 249 (2026-06-07) lands the 5-bit head of the §5.4.1 Primary
+Audio Side Information block: the `SSC = ExtractBits(2)` /
+`nSSC = SSC + 1` / `PSC = ExtractBits(3)` reads that start
+Table 5-28 (PDF p.28) and govern every downstream
+`for (n=0; n<nSSC; …)` and `8 * nSSC` quantifier the §5.4.1
+sub-info pseudocode (and the §C.2.3 / §C.2.4 / §C.2.5
+sum-difference / joint-subband / QMF reconstruction loops in
+this crate's `sum_diff.rs` and `joint_subband.rs`) relies on.
+Source: locally staged ETSI TS 102 114 V1.3.1 §5.4.1 Table 5-28,
+p.28, plus the field descriptions on p.29 ("SSC — Subsubframe
+Count") and p.30 ("PSC — Partial Subsubframe Sample Count").
+New public surface in `src/side_info.rs`:
+[`SubsubframeCount`](crate::SubsubframeCount), a
+`#[non_exhaustive]` struct carrying the raw `ssc` (2 bits,
+`0..=3`) and `psc` (3 bits, `0..=7`) wire fields with accessors
+[`n_ssc`](crate::SubsubframeCount::n_ssc) (= `ssc + 1`,
+`1..=4`),
+[`samples_per_subsubframe_normal`](crate::SubsubframeCount::samples_per_subsubframe_normal)
+(= `8 * nSSC`, the per-subband sample stride consumed by
+§C.2.3 / §C.2.4 / §C.2.5),
+[`partial_sample_count`](crate::SubsubframeCount::partial_sample_count)
+(`Some(psc)` when `psc > 0`, the partial-subsubframe sample
+count per active subband; `None` when no partial tail is
+present), and
+[`is_termination_tail`](crate::SubsubframeCount::is_termination_tail)
+(returns `true` when `psc != 0`, the termination-frame signal
+per p.30: "A partial subsubframe … exists only in a termination
+frame and is always at the end of the last normal subsubframe").
+The three associated constants
+[`MAX_SSC`](crate::SubsubframeCount::MAX_SSC) (`= 0b11`),
+[`MAX_PSC`](crate::SubsubframeCount::MAX_PSC) (`= 0b111`), and
+[`WIRE_BITS`](crate::SubsubframeCount::WIRE_BITS) (`= 5`) name
+the field widths from Table 5-28 directly. The bit-stream entry
+point
+[`decode_subsubframe_count_at(bytes, bit_offset) -> (SubsubframeCount, bits_consumed)`](crate::decode_subsubframe_count_at)
+reads the 5-bit prefix at an arbitrary MSB-first bit offset and
+returns the typed value plus the (always-5) bits-consumed count;
+`Error::UnexpectedEof` is returned when fewer than 5 bits remain.
+The `SubsubframeCount::new` constructor consults only the low 2
+and 3 bits of its inputs (matching the `ExtractBits(2)` /
+`ExtractBits(3)` semantics in Table 5-28), so the mapping is
+total. Ten new in-module tests in `src/side_info.rs` lock the
+prefix down: a sweep across all four `SSC` rows confirming
+`nSSC = SSC + 1`; a sweep across the same four rows confirming
+the `8 * nSSC` stride accessor; a high-bit-masking check covering
+inputs `0xFF`, `0b1111_1101`, `0b1111_1010`; a termination-tail
+sweep across `psc = 0..=7` exercising both
+`partial_sample_count` arms; a wire-width constant assertion
+(`WIRE_BITS == 5`); a byte-aligned `decode_subsubframe_count_at`
+walk reading `(SSC=0b10, PSC=0b011)` from the top 5 bits of one
+byte; a non-byte-aligned walk at bit-offset 3; a byte-boundary-
+crossing walk at bit-offset 5 that straddles two bytes; an
+`UnexpectedEof` check when only 4 bits remain after `bit_offset`;
+and an exhaustive `4 * 8 = 32` `(SSC, PSC)`-pair walk that
+asserts `n_ssc`, `samples_per_subsubframe_normal`, and
+`is_termination_tail` for every combination. New re-exports at
+the crate root: `oxideav_dts::{SubsubframeCount,
+decode_subsubframe_count_at}`. Total in-module test count: 336 →
+346 (`cargo test -p oxideav-dts --lib`). Scope: this round only
+lands the 5-bit head; the rest of Table 5-28 (PMODE, PVQ, TMODE,
+JOIN_SHUFF / JOIN_SCALES, RANGE, SICRC) remains for follow-up
+rounds working forward through the §5.4.1 ladder.
+
 **Round 244 — ADJ → Scale Factor Adjustment multiplier
 (ETSI §5.4.1 Table 5-27, staged PDF p.27).**
 Round 244 (2026-06-07) lands the `ADJ` (Scale Factor Adjustment
