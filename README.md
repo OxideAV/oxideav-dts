@@ -5,6 +5,63 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 255 — `cos_mod_stage()` cosine-modulation stage of
+`QMFInterpolation()` (ETSI Annex C §C.2.5, staged PDF p.185).**
+Round 255 (2026-06-08) lands the FIR-independent first half of the
+32-band synthesis QMF's per-sample loop body
+(`docs/audio/dts/dts-core-extracts.md` §2.4, transcribing
+ETSI TS 102 114 V1.3.1 Annex C §C.2.5 / staged PDF p.185). Given the
+per-sample subband vector `raXin[0..32]` and the round-208
+[`precal_cos_mod`](crate::precal_cos_mod) 544-entry matrix,
+[`cos_mod_stage(&ra_xin, &ra_cos_mod) -> [f64; 32]`](crate::cos_mod_stage)
+returns the 32 leading entries `raX[0..32]` the spec writes into the
+synthesis filter's shift register before the 512-tap FIR convolution
+that follows. The implementation walks the pseudocode's three
+substeps with a single running `j`-counter that matches the spec
+exactly: substep 1 reads `raCosMod[0..256]` (Block 1,
+`cos((2i+1)(2k+1)π/64)`) to build the 16-entry `A[k]` accumulator
+and `raCosMod[256..512]` (Block 2, `cos(i(2k+1)π/32)`) to build the
+16-entry `B[k]` accumulator (with the spec's asymmetric
+`B[k]`-pairing — `raXin[2i] + raXin[2i-1]` for `i > 0`,
+`raXin[0]` at `i = 0`); substep 2 forms `SUM[k] = A[k] + B[k]` and
+`DIFF[k] = A[k] - B[k]` (fused into substep 3 in the live
+implementation to avoid materialising the intermediates); substep 3
+reads `raCosMod[512..528]` (Block 3,
+`+0.25 / (2·cos((2k+1)π/128))`) to scale `SUM[k]` into `raX[k]` for
+`k = 0..16`, then `raCosMod[528..544]` (Block 4,
+`-0.25 / (2·sin((2k+1)π/128))`) to scale `DIFF[k]` into
+`raX[32 - k - 1]` for the same `k` range. The function consumes
+only the cosine-modulation matrix — no §D.8 `raCoeffLossy` /
+`raCoeffLossLess` 512-tap FIR tables (still pending docs staging,
+round-208 docs gap #9 / OxideAV-docs issue #1357) — so it ships
+ahead of the full `QMFInterpolation()` driver. The history shift of
+`raX[]` between successive `nSubIndex` iterations remains the
+caller's responsibility (the shift moves the 32 values this
+function returns into `raX[32..64]` after the FIR step runs).
+A new public constant [`NUM_SUBBAND`](crate::NUM_SUBBAND) (= 32)
+names the spec's `NumSubband` constant for the 32-band synthesis
+QMF (§C.2.5) so callers can size `raXin` / `raX` window arrays
+against the spec value directly. Nine new in-module tests in
+`src/cos_mod.rs` lock the stage down: a zero-input zero-output
+corner; a bit-exact match (`to_bits()` equality, not approximate)
+against a verbatim line-for-line reference implementation on zero,
+32-impulse-basis (one sweep per `j ∈ 0..32`), ramp (`raXin[i] = i +
+0.5`), and alternating-sign (`raXin[i] = (-1)^i`) inputs — each
+input exercises the Block 1 / Block 2 cosine entries with distinct
+sign and magnitude regimes; a finite-output check on a `sin`-driven
+input; a linearity check (`cos_mod_stage(2x) = 2 *
+cos_mod_stage(x)` to `1e-9`) derived from the spec's pure linear
+dependence on `raXin`; a determinism check (two calls with the same
+input produce bit-identical outputs); and a `NUM_SUBBAND == 32`
+constant check. New re-exports at the crate root:
+`oxideav_dts::{cos_mod_stage, NUM_SUBBAND}`. Total in-module
+cos_mod test count: 20 → 29 (`cargo test -p oxideav-dts --lib
+cos_mod`). Scope: this round only lands the cosine-modulation
+stage; the FIR convolution, integer-PCM output step, and per-sample
+shift of `raX[]` / `raZ[]` history all stay blocked on the §D.8
+table transcription (round-208 docs gap #9 remains pending — DOCS
+staging has not yet landed the 512-coefficient tables).
+
 **Round 249 — SSC / nSSC / PSC → Subsubframe-Count prefix
 (ETSI §5.4.1 Table 5-28, staged PDF p.28).**
 Round 249 (2026-06-07) lands the 5-bit head of the §5.4.1 Primary

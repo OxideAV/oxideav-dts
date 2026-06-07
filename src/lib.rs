@@ -307,6 +307,16 @@
 //!   round 208). Per-block start indices match the four-block
 //!   decomposition of `PreCalCosMod()` in
 //!   `docs/audio/dts/dts-core-extracts.md` §2.3.
+//! - [`cos_mod_stage`] / [`NUM_SUBBAND`] — the cosine-modulation
+//!   stage of `QMFInterpolation()` (§C.2.5, PDF p.185, per
+//!   `docs/audio/dts/dts-core-extracts.md` §2.4): consumes one
+//!   per-sample subband vector `raXin[0..32]` plus the
+//!   [`precal_cos_mod`] matrix, returns the 32 leading entries
+//!   `raX[0..32]` written into the synthesis filter's shift
+//!   register before the 512-tap FIR convolution. Independent of
+//!   the §D.8 FIR coefficient tables (round-208 docs gap #9), so
+//!   it ships ahead of the full `QMFInterpolation()` driver. Added
+//!   in round 255.
 //! - [`sum_difference_decode_i32`] / [`sum_difference_decode_f64`] /
 //!   [`sum_difference_decode_subband_pair_i32`] /
 //!   [`sum_difference_decode_subband_pair_f64`] /
@@ -382,8 +392,8 @@ mod registry;
 
 pub use crate::block_code::{block_code_max_code, block_code_offset, decode_block_code};
 pub use crate::cos_mod::{
-    precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START, COS_MOD_BLOCK3_START,
-    COS_MOD_BLOCK4_START, COS_MOD_LEN,
+    cos_mod_stage, precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START,
+    COS_MOD_BLOCK3_START, COS_MOD_BLOCK4_START, COS_MOD_LEN, NUM_SUBBAND,
 };
 pub use crate::header::{
     encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,

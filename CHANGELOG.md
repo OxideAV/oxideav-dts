@@ -8,6 +8,45 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 255 (2026-06-08) — `cos_mod_stage()` cosine-modulation stage
+  of `QMFInterpolation()` (ETSI TS 102 114 V1.3.1 Annex C §C.2.5,
+  staged PDF p.185, per `docs/audio/dts/dts-core-extracts.md` §2.4).
+  Lands the FIR-independent first half of the 32-band synthesis QMF's
+  per-sample loop body: given the per-sample subband vector
+  `raXin[0..32]` and the round-208 `precal_cos_mod()` matrix, returns
+  the 32 leading entries `raX[0..32]` the spec writes into the
+  synthesis filter's shift register before the 512-tap FIR
+  convolution. The function consumes only the cosine-modulation
+  matrix — no §D.8 `raCoeffLossy` / `raCoeffLossLess` tables (still
+  pending docs staging, round-208 docs gap #9) — so it ships ahead of
+  the full `QMFInterpolation()` driver.
+  - Substep 1 builds the 16-entry `A[k]` and `B[k]` accumulators
+    from `raCosMod` Block 1 (`cos((2i+1)(2k+1)π/64)`, indices
+    `0..256`) and Block 2 (`cos(i(2k+1)π/32)`, indices `256..512`),
+    using the spec's asymmetric `B[k]` accumulation that pairs
+    `raXin[2i] + raXin[2i-1]` for `i > 0` and falls back to
+    `raXin[0]` at `i = 0`.
+  - Substep 2 forms `SUM[k] = A[k] + B[k]` and `DIFF[k] = A[k] -
+    B[k]` (fused with substep 3 in the live implementation to avoid
+    materialising the intermediates).
+  - Substep 3 places `raX[k] = raCosMod[Block3 + k] * SUM[k]` for
+    `k = 0..16` (Block 3 scaling, indices `512..528`) and
+    `raX[32 - k - 1] = raCosMod[Block4 + k] * DIFF[k]` (Block 4
+    scaling, indices `528..544`). The spec's running `j`-counter
+    walks `0..544` across the whole stage, matching the j value
+    handed to the FIR step that follows.
+  - New public re-exports at the crate root: `oxideav_dts::{cos_mod_stage,
+    NUM_SUBBAND}`. `NUM_SUBBAND = 32` is the spec's `NumSubband`
+    constant for the 32-band synthesis QMF (§C.2.5).
+  - Nine new in-module tests in `src/cos_mod.rs` exercising the
+    stage: a zero-input zero-output check; a bit-exact match against
+    a verbatim line-for-line reference implementation on zero,
+    32-impulse, ramp, and alternating-sign inputs; a finite-output
+    check on a `sin`-driven input; a linearity check
+    (`cos_mod_stage(2x) == 2 * cos_mod_stage(x)`); a determinism
+    check; and a `NUM_SUBBAND == 32` constant check. Total
+    cos_mod-module test count: 20 → 29.
+
 - Round 249 (2026-06-07) — SSC / nSSC / PSC → Subsubframe-Count
   prefix at the head of §5.4.1 Table 5-28 (ETSI TS 102 114 V1.3.1,
   staged PDF p.28, with field descriptions on p.29 and p.30). Wires
