@@ -8,6 +8,48 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 259 (2026-06-08) — `assemble_xin()` + `shift_x_history()`:
+  the FIR-independent per-sample raXin assembly and raX
+  shift-register update steps of `QMFInterpolation()` (ETSI TS 102
+  114 V1.3.1 Annex C §C.2.5, staged PDF p.185, per
+  `docs/audio/dts/dts-core-extracts.md` §2.4 lines 182-183 and 217).
+  Bracket round-255's `cos_mod_stage()` inside the synthesis QMF's
+  per-sample loop body without depending on the §D.8 FIR coefficient
+  tables (still pending docs staging, round-208 docs gap #9), so
+  they ship ahead of the full driver.
+  - `assemble_xin(subband_samples, n_subs) -> Result<[f64; 32], _>`
+    builds the per-sample input vector `cos_mod_stage()` consumes
+    by copying `subband_samples[0..n_subs]` into the leading active
+    slots and leaving the inactive tail `n_subs..32` at +0.0. Validates
+    `n_subs <= 32` (the spec's `NumSubband = 32` cap) and that the
+    caller supplied at least `n_subs` per-subband scalars; returns a
+    new `QmfAssembleError` enum (`SubsOutOfRange` / `SampleSliceTooShort`)
+    on either violation.
+  - `shift_x_history(&mut [f64; 512])` rotates the 512-entry `raX[]`
+    register by 32 entries toward the high end, matching the spec's
+    reverse-iteration shift `for (i=511; i>=32; i--) raX[i] = raX[i-32];`.
+    Leaves `raX[0..32]` untouched (the driver overwrites that range
+    from the next per-sample `cos_mod_stage()` output before the FIR
+    step reads it).
+  - New public re-exports at the crate root:
+    `oxideav_dts::{assemble_xin, shift_x_history, QmfAssembleError,
+    X_HISTORY_LEN}`. `X_HISTORY_LEN = 512` is the spec's implicit
+    `raX[]` length (the upper bound of the §2.4 line-217 shift loop,
+    matching the 512-tap §D.8 FIR set).
+  - 20 new unit tests covering: full-active / zero-active /
+    partial-active assembly, ignoring trailing samples past `nSUBS`,
+    out-of-range rejection, short-slice rejection, exact-length
+    boundary, bit-identical pass-through for signed and subnormal
+    f64s, positive-zero invariant in the inactive tail, the shift's
+    move-by-32 semantics, the untouched low block, identity on
+    uniform / zero registers, top-block contents verification, the
+    reverse-iteration anti-pattern check (forward iteration would
+    collapse `raX[k*32]` slots to `raX[0]`), repeated-shift
+    composition, the length constants (`X_HISTORY_LEN = 512`,
+    `X_HISTORY_LEN % NUM_SUBBAND == 0`), and human-readable error
+    rendering. All run on stable IEEE-754 `f64`; the assembly is a
+    `copy_from_slice` so it inherits memcpy semantics directly.
+
 - Round 255 (2026-06-08) — `cos_mod_stage()` cosine-modulation stage
   of `QMFInterpolation()` (ETSI TS 102 114 V1.3.1 Annex C §C.2.5,
   staged PDF p.185, per `docs/audio/dts/dts-core-extracts.md` §2.4).

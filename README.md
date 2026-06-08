@@ -5,6 +5,75 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 259 — `assemble_xin()` + `shift_x_history()` per-sample
+QMF input assembly and raX shift-register update (ETSI Annex C
+§C.2.5, staged PDF p.185).**
+Round 259 (2026-06-08) brackets round-255's `cos_mod_stage()` with
+the two remaining FIR-independent steps of the §C.2.5
+`QMFInterpolation()` per-sample loop body
+(`docs/audio/dts/dts-core-extracts.md` §2.4 lines 182-183 and
+217). [`assemble_xin(subband_samples, n_subs)`](crate::assemble_xin)
+builds the per-sample input vector `raXin[0..32]` that
+`cos_mod_stage()` consumes: active subbands `raXin[0..n_subs]`
+copy from `subband_samples[0..n_subs]` (per the spec's
+`for (i=0; i<nSUBS; i++) raXin[i] = aSubband[i].raSample[nSubIndex];`)
+and the inactive tail `raXin[n_subs..32]` is left at +0.0 (per
+`for (i=nSUBS; i<NumSubband; i++) raXin[i] = 0.0;`). Returns a
+new [`QmfAssembleError`](crate::QmfAssembleError)
+(`SubsOutOfRange { n_subs }` / `SampleSliceTooShort { provided,
+required }`) when `n_subs` exceeds `NUM_SUBBAND = 32` or when the
+caller supplied fewer than `n_subs` per-subband scalars.
+[`shift_x_history(&mut [f64; 512])`](crate::shift_x_history) then
+rotates the 512-entry raX register by 32 entries toward the high
+end, exactly translating the spec's reverse-iteration shift
+`for (i=511; i>=32; i--) raX[i] = raX[i-32];`. The walk runs from
+`i = 511` down to `i = 32` (inclusive) so each write reads a slot
+that has not yet been overwritten — a forward walk would collapse
+every `raX[k*32]` slot to `raX[0]`. The low block `raX[0..32]` is
+left untouched by design; the spec's driver overwrites it from the
+next per-sample `cos_mod_stage()` output before the FIR step reads
+it. Both primitives consume zero §D.8 FIR coefficients (round-208
+docs gap #9 / OxideAV-docs issue #1357 remains open), so they
+ship ahead of the full `QMFInterpolation()` driver. The post-FIR
+`raZ[]` rotate (`raZ[i] = raZ[i+32]; raZ[i+32] = 0.0`, §2.4 lines
+218-219) operates on the output of step (c)'s FIR convolution and
+is *not* part of this round — it will land alongside the §D.8
+table transcription. New public constant
+[`X_HISTORY_LEN`](crate::X_HISTORY_LEN) (= 512) names the raX
+register's length, which §2.4 line 217's `i = 511` bound implicitly
+fixes (matching the 512-tap §D.8 FIR set). Twenty new in-module
+tests in `src/qmf_assemble.rs` exercise: full-active assembly with
+all 32 slots populated; a zero-active edge case (silent pass);
+partial-active (`n_subs = 5`) with explicit zero-fill verification
+of the inactive tail; tolerant slice handling that ignores trailing
+samples past `nSUBS`; out-of-range rejection (`n_subs = 33`);
+short-slice rejection (4 expected, 2 supplied); exact-length
+boundary acceptance; bit-identical pass-through (`to_bits()`
+equality) for `-1.5`, a subnormal `MIN_POSITIVE / 4.0`, `-0.0`,
+and `3.0`; positive-zero bit-pattern in the inactive tail (a
+`-0.0` there would perturb `cos_mod_stage()`'s asymmetric
+`B[k] = raXin[0] * raCosMod[…]` step at `i = 0`); raX shift's
+move-by-32 semantics over an `i`-ramp input; raX shift identity
+on uniform and all-zero registers; an explicit top-block
+verification (`raX[480..512]` after shift holds pre-shift
+`raX[448..480]`); an anti-pattern check that catches forward
+iteration (which would collapse `raX[64]` to pre-shift `raX[0] =
+0` instead of the correct `raX[32] = 32`); two-shift composition
+that confirms repeated calls walk block by block; and the
+length-constant invariants (`X_HISTORY_LEN = 512`,
+`X_HISTORY_LEN % NUM_SUBBAND == 0`, `X_HISTORY_LEN / NUM_SUBBAND
+== 16`). Plus two error-rendering tests (`SubsOutOfRange`
+includes the bad `n_subs` and the spec's cap; `SampleSliceTooShort`
+includes both lengths). New re-exports at the crate root:
+`oxideav_dts::{assemble_xin, shift_x_history, QmfAssembleError,
+X_HISTORY_LEN}`. Total in-module test count: 355 → 375 (`cargo
+test -p oxideav-dts --lib`). The `--no-default-features --lib`
+standalone build still passes (the new primitives have no
+`oxideav-core` dependency). Scope: this round only lands the
+raXin assembly and raX shift; the FIR convolution, integer-PCM
+output step, and per-sample raZ rotate all stay blocked on §D.8
+table transcription.
+
 **Round 255 — `cos_mod_stage()` cosine-modulation stage of
 `QMFInterpolation()` (ETSI Annex C §C.2.5, staged PDF p.185).**
 Round 255 (2026-06-08) lands the FIR-independent first half of the

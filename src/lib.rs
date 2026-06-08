@@ -317,6 +317,17 @@
 //!   the §D.8 FIR coefficient tables (round-208 docs gap #9), so
 //!   it ships ahead of the full `QMFInterpolation()` driver. Added
 //!   in round 255.
+//! - [`assemble_xin`] / [`shift_x_history`] / [`X_HISTORY_LEN`] /
+//!   [`QmfAssembleError`] — the FIR-independent per-sample
+//!   raXin assembly + raX shift-register update steps of
+//!   `QMFInterpolation()` (§C.2.5, PDF p.185, per
+//!   `docs/audio/dts/dts-core-extracts.md` §2.4 lines 182-183 and
+//!   217). [`assemble_xin`] builds the input vector
+//!   [`cos_mod_stage`] consumes (active subbands copied,
+//!   inactive tail zero-filled); [`shift_x_history`] rotates the
+//!   512-entry raX register by 32 entries to make room for the
+//!   next per-sample cosine-modulation output. Both ship ahead of
+//!   the §D.8-dependent FIR step they bracket. Added in round 259.
 //! - [`sum_difference_decode_i32`] / [`sum_difference_decode_f64`] /
 //!   [`sum_difference_decode_subband_pair_i32`] /
 //!   [`sum_difference_decode_subband_pair_f64`] /
@@ -383,6 +394,7 @@ mod header;
 mod inverse_adpcm;
 mod iter;
 mod joint_subband;
+mod qmf_assemble;
 mod side_info;
 mod sum_diff;
 mod unpack14;
@@ -414,6 +426,7 @@ pub use crate::joint_subband::{
     joint_source_channel, joint_subband_decode_range_f64, joint_subband_decode_range_i32,
     joint_subband_required,
 };
+pub use crate::qmf_assemble::{assemble_xin, shift_x_history, QmfAssembleError, X_HISTORY_LEN};
 pub use crate::side_info::{
     decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, AbitsCodebook,
     ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, RMS_6BIT, RMS_7BIT,
