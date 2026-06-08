@@ -328,6 +328,16 @@
 //!   512-entry raX register by 32 entries to make room for the
 //!   next per-sample cosine-modulation output. Both ship ahead of
 //!   the §D.8-dependent FIR step they bracket. Added in round 259.
+//! - [`FilterBankSelection`] — typed selector for the §C.2.5
+//!   `QMFInterpolation()` 512-tap FIR coefficient set (the §D.8
+//!   `raCoeffLossy` / `raCoeffLossLess` named tables).
+//!   `from_filts(u8) -> Self` resolves the §C.2.5 `FILTS` flag per
+//!   the pseudocode's `if (FILTS==0) prCoeff = raCoeffLossy; else
+//!   prCoeff = raCoeffLossLess;` branch
+//!   (`docs/audio/dts/dts-core-extracts.md` §2.4 lines 175-178).
+//!   FIR-coefficient-independent: names the two sets but does not
+//!   read any coefficient values (round-208 docs gap #9 still
+//!   blocks the value transcription). Added in round 263.
 //! - [`sum_difference_decode_i32`] / [`sum_difference_decode_f64`] /
 //!   [`sum_difference_decode_subband_pair_i32`] /
 //!   [`sum_difference_decode_subband_pair_f64`] /
@@ -390,6 +400,7 @@
 mod bitreader;
 mod block_code;
 mod cos_mod;
+mod filter_bank;
 mod header;
 mod inverse_adpcm;
 mod iter;
@@ -407,6 +418,7 @@ pub use crate::cos_mod::{
     cos_mod_stage, precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START,
     COS_MOD_BLOCK3_START, COS_MOD_BLOCK4_START, COS_MOD_LEN, NUM_SUBBAND,
 };
+pub use crate::filter_bank::FilterBankSelection;
 pub use crate::header::{
     encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,
     encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, AmodeArrangement,

@@ -681,8 +681,16 @@ pub struct DtsFrameHeader {
     /// enumerate the two filter modes — round 5 preserves the raw
     /// boolean. Per ETSI TS 102 114 §5.3 (cited in the wiki link)
     /// this bit selects between non-perfect-reconstruction and
-    /// perfect-reconstruction QMF interpolation filters; the
-    /// semantic mapping waits on the §5.4 polyphase-filterbank doc.
+    /// perfect-reconstruction QMF interpolation filters; round 263
+    /// landed the receiving side as [`crate::FilterBankSelection`]
+    /// (`from_filts(u8)` resolves the §C.2.5 `FILTS` flag to the
+    /// named §D.8 coefficient set), but the polarity mapping
+    /// between this header bit and the §C.2.5 `FILTS` parameter
+    /// (`multirate_inter == 0` → `FILTS == 0`, or the inverse) is
+    /// still not documented in the staged extracts under
+    /// `docs/audio/dts/`. Once that mapping lands, a
+    /// `filter_bank_selection()` accessor can be added here that
+    /// bridges this bit to [`crate::FilterBankSelection`] directly.
     pub multirate_inter: bool,
     /// Encoder version code (`VERSION`, 4 bits, 0..=15). The wiki
     /// snapshot does not enumerate which integer values correspond

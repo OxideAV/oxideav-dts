@@ -8,6 +8,45 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 263 (2026-06-09) — `FilterBankSelection`: typed selector
+  for the §C.2.5 `QMFInterpolation()` 512-tap FIR coefficient set
+  (ETSI TS 102 114 V1.3.1 Annex C §C.2.5, staged PDF p.185, per
+  `docs/audio/dts/dts-core-extracts.md` §2.4 lines 175-178).
+  Lands the receiving side for the §C.2.5 `FILTS` parameter
+  without consuming any §D.8 coefficient values (round-208 docs
+  gap #9 / OxideAV-docs issue #1357 still open), so the selection
+  ships ahead of the FIR step it parametrises.
+  - `FilterBankSelection::NonPerfectReconstruction` names the
+    §D.8 `raCoeffLossy` 512-tap set; `FilterBankSelection::PerfectReconstruction`
+    names the §D.8 `raCoeffLossLess` 512-tap set. Marked
+    `#[non_exhaustive]` so future additional reconstruction modes
+    extend without breaking match arms.
+  - `FilterBankSelection::from_filts(filts: u8) -> Self` mirrors
+    the spec's `if (FILTS==0) prCoeff = raCoeffLossy; else
+    prCoeff = raCoeffLossLess;` branch — `0` picks the
+    non-perfect variant, every non-zero `u8` picks the perfect
+    variant (matching the spec's collapsed `else` semantics).
+  - `FilterBankSelection::filts(self) -> u8` returns the
+    canonical inverse (`0` / `1`).
+  - `FilterBankSelection::spec_table_name(self) -> &'static str`
+    returns the verbatim §C.2.5 pseudocode identifier
+    (`"raCoeffLossy"` / `"raCoeffLossLess"`) for diagnostics.
+  - The `DtsFrameHeader::multirate_inter` docstring is updated to
+    point callers at the new enum and to record the still-open
+    polarity gap (`multirate_inter ↔ FILTS` mapping not yet
+    documented under `docs/audio/dts/`). No `DtsFrameHeader`
+    accessor is added until that polarity lands.
+  - New public re-export at the crate root:
+    `oxideav_dts::FilterBankSelection`.
+  - 11 new unit tests covering: `from_filts(0)` →
+    `NonPerfectReconstruction`; `from_filts(1)` →
+    `PerfectReconstruction`; every non-zero `u8` value picks the
+    lossless variant (255-iteration sweep); round-trips of both
+    variants through `filts()`; spec-table-name verbatim match;
+    table-name distinctness; copy / equality / hash behaviour;
+    stable Debug output. Total in-module test count:
+    375 → 386 (`cargo test -p oxideav-dts --lib`).
+
 - Round 259 (2026-06-08) — `assemble_xin()` + `shift_x_history()`:
   the FIR-independent per-sample raXin assembly and raX
   shift-register update steps of `QMFInterpolation()` (ETSI TS 102

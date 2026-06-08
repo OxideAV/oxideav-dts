@@ -5,6 +5,57 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 263 — `FilterBankSelection` typed selector for the §C.2.5
+512-tap FIR coefficient set (ETSI Annex C §C.2.5, staged PDF
+p.185).**
+Round 263 (2026-06-09) lands a typed receiving side for the
+§C.2.5 `QMFInterpolation()` `FILTS` parameter: a new
+[`FilterBankSelection`](crate::FilterBankSelection) enum with two
+variants (`NonPerfectReconstruction` → the §D.8 `raCoeffLossy`
+512-tap set; `PerfectReconstruction` → the §D.8 `raCoeffLossLess`
+512-tap set) plus a `from_filts(u8) -> Self` resolver that mirrors
+the spec's `if (FILTS==0) prCoeff = raCoeffLossy; else prCoeff =
+raCoeffLossLess;` branch (`docs/audio/dts/dts-core-extracts.md`
+§2.4 lines 175-178). Per the spec, `FILTS` is one bit and the
+`==0` branch is the only distinguished input — every non-zero
+`u8` value therefore picks the lossless variant, matching the
+pseudocode's `if/else` semantics. The enum also exposes
+`filts() -> u8` (the canonical inverse, returning `0` / `1`) and
+`spec_table_name() -> &'static str` (the verbatim pseudocode
+identifier `"raCoeffLossy"` / `"raCoeffLossLess"`). The accessor
+is FIR-coefficient-value-independent: it names the two §D.8
+tables but reads none of their entries — the table values
+themselves remain pending docs staging (round-208 docs gap #9 /
+OxideAV-docs issue #1357 still open), so the selection lands
+ahead of the FIR step it parametrises. The DTS Core frame header
+carries a one-bit `MULTIRATE_INTER` field
+([`DtsFrameHeader::multirate_inter`](crate::DtsFrameHeader::multirate_inter))
+that the wiki snapshot identifies as the source of `FILTS`, but
+the polarity mapping (`multirate_inter == 0` → `FILTS == 0`, or
+the inverse) is **not** documented in the staged extracts under
+`docs/audio/dts/` — so this round does *not* add a
+`DtsFrameHeader::filter_bank_selection()` accessor; the
+`multirate_inter` docstring is updated to point callers at the
+new enum and to record the still-open polarity gap. Eleven new
+in-module tests in `src/filter_bank.rs` exercise: `from_filts(0)`
+→ `NonPerfectReconstruction`; `from_filts(1)` →
+`PerfectReconstruction`; every non-zero `u8` value picks the
+lossless variant (256-iteration sweep); round-trips of both
+variants through `filts()` and back; the spec table-name
+verbatim match for both variants; that the two table names are
+distinct; copy / equality / hash discriminator behaviour for the
+derived `Copy + PartialEq + Eq + Hash` impls; and stable Debug
+output that names the variant rather than printing a discriminant
+integer. New re-export at the crate root:
+`oxideav_dts::FilterBankSelection`. Total in-module test count:
+375 → 386 (`cargo test -p oxideav-dts --lib`). The
+`--no-default-features --lib` standalone build still passes (the
+new module has no `oxideav-core` dependency). Scope: this round
+only lands the typed selector; the FIR convolution itself, the
+integer-PCM output step, the per-sample raZ rotate, and the
+`multirate_inter ↔ FILTS` polarity all stay blocked on the
+remaining docs gaps.
+
 **Round 259 — `assemble_xin()` + `shift_x_history()` per-sample
 QMF input assembly and raX shift-register update (ETSI Annex C
 §C.2.5, staged PDF p.185).**
