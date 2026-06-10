@@ -22,7 +22,11 @@
 //!     // (c) 512-tap FIR convolution against the §D.8 prCoeff set —
 //!     //     deferred until docs gap #9 closes.
 //!
-//!     // (d) PCM output step — deferred (depends on (c)).
+//!     // (d) PCM output step — this module's write_pcm_output().
+//!     //     Reads raZ[0..32], scales by rScale, int()-casts, writes
+//!     //     32 samples to naCh[]. FIR-independent in structure (it
+//!     //     consumes the already-accumulated raZ[0..32]).
+//!     for (i=0; i<32; i++) naCh[nChIndex++] = int(rScale*raZ[i]);
 //!
 //!     // (e) Per-sample shift-register update — this module's
 //!     //     shift_x_history() plus the still-deferred raZ[]
@@ -225,6 +229,102 @@ pub fn shift_z_output(ra_z: &mut [f64; Z_OUTPUT_LEN]) {
     }
 }
 
+/// Number of PCM output samples the §C.2.5 PCM-output step emits per
+/// per-sample iteration of the `QMFInterpolation()` outer loop, per
+/// `dts-core-extracts.md` §2.4 lines 213-214:
+///
+/// ```text
+///     for (i=0; i<32; i++) naCh[nChIndex++] = int(rScale*raZ[i]);
+/// ```
+///
+/// — the loop bound (`i < 32`) fixes the per-iteration output count
+/// at 32, equal to `NumSubband`. Each per-sample iteration of the
+/// synthesis QMF consumes the 32 low entries of the `raZ[]`
+/// accumulator and produces exactly 32 reconstructed PCM samples
+/// into the channel output buffer.
+pub const PCM_OUTPUT_PER_SAMPLE: usize = NUM_SUBBAND;
+
+/// Per-sample PCM-output step of the §C.2.5 `QMFInterpolation()`
+/// outer-loop body, per `dts-core-extracts.md` §2.4 lines 213-214
+/// (PDF p.185):
+///
+/// ```text
+///     for (i=0; i<32; i++) naCh[nChIndex++] = int(rScale*raZ[i]);
+/// ```
+///
+/// Consumes the 32 low entries `raZ[0..32]` of the synthesis filter's
+/// output accumulator (the FIR step (c) accumulated them for the
+/// current per-sample iteration), scales each by the per-channel
+/// output multiplier `r_scale`, applies the spec's `int()` cast, and
+/// writes the 32 resulting integer PCM samples into `na_ch` starting
+/// at the running cursor `n_ch_index`. Returns the advanced cursor
+/// `n_ch_index + 32`, mirroring the spec's `naCh[nChIndex++]`
+/// post-increment across the 32-iteration loop.
+///
+/// `r_scale` is the §C.2.5 `rScale` output multiplier the clause
+/// applies before the integer cast. The §C.2.5 pseudocode uses
+/// `rScale` in the PCM-output step without assigning it inside the
+/// `QMFInterpolation()` block, so this function takes it as a
+/// caller-supplied parameter rather than deriving a value (the
+/// derivation of the QMF-output `rScale` is not fixed by the staged
+/// §C.2.5 clause — see the docs gap noted in the round CHANGELOG).
+///
+/// The spec's `int()` cast truncates toward zero — the C semantics of
+/// casting a floating value to `int` discard the fractional part — so
+/// this step uses [`f64::trunc`] followed by an `as i32` conversion.
+/// The §C.2.5 clause writes the result into the integer `naCh[]`
+/// array without a stated per-width saturation; any clamping to the
+/// transmitted source-PCM resolution
+/// ([`crate::SourcePcmResolution`]) is a separate output-format step
+/// the clause does not define here, so this primitive emits the
+/// faithful truncated value.
+///
+/// This primitive reads no §D.8 `raCoeffLossy` / `raCoeffLossLess`
+/// FIR coefficients: it consumes the already-accumulated `raZ[0..32]`
+/// values, applies a scalar multiply + integer cast, and never
+/// touches the coefficient tables. It is therefore FIR-independent in
+/// the same way [`shift_z_output`] is, and lands as the companion of
+/// the accumulator rotate it precedes in the per-sample loop body
+/// (round-208 docs gap #9 / OxideAV-docs issue #1357 still gates the
+/// FIR step that fills `raZ[]`).
+///
+/// Returns `Err(QmfAssembleError::OutputSliceTooShort)` if `na_ch`
+/// does not have room for 32 samples starting at `n_ch_index` (the
+/// caller's channel buffer is too small for this per-sample
+/// iteration's output).
+pub fn write_pcm_output(
+    ra_z: &[f64; Z_OUTPUT_LEN],
+    r_scale: f64,
+    na_ch: &mut [i32],
+    n_ch_index: usize,
+) -> Result<usize, QmfAssembleError> {
+    let end = n_ch_index.checked_add(PCM_OUTPUT_PER_SAMPLE).ok_or(
+        QmfAssembleError::OutputSliceTooShort {
+            n_ch_index,
+            available: na_ch.len(),
+        },
+    )?;
+    if end > na_ch.len() {
+        return Err(QmfAssembleError::OutputSliceTooShort {
+            n_ch_index,
+            available: na_ch.len(),
+        });
+    }
+
+    // for (i=0; i<32; i++) naCh[nChIndex++] = int(rScale*raZ[i]);
+    //
+    // The C `int()` cast truncates toward zero, so scale then trunc
+    // then narrow to i32. Only raZ[0..32] is read — the accumulator's
+    // high block raZ[32..64] holds the *next* iteration's pre-rotate
+    // partial sums and is not part of this iteration's PCM output.
+    for i in 0..PCM_OUTPUT_PER_SAMPLE {
+        let scaled = r_scale * ra_z[i];
+        na_ch[n_ch_index + i] = scaled.trunc() as i32;
+    }
+
+    Ok(end)
+}
+
 /// Error returned by [`assemble_xin`] when its inputs violate the
 /// spec's preconditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,6 +348,18 @@ pub enum QmfAssembleError {
         /// (`n_subs`).
         required: usize,
     },
+    /// The channel output buffer `na_ch` does not have room for the
+    /// 32 PCM samples the §C.2.5 PCM-output step writes starting at
+    /// `n_ch_index`, so the write loop would run past the end of the
+    /// buffer.
+    OutputSliceTooShort {
+        /// The running output cursor `nChIndex` the write would
+        /// start at.
+        n_ch_index: usize,
+        /// `na_ch.len()` — the number of `i32` slots the caller's
+        /// channel buffer provides.
+        available: usize,
+    },
 }
 
 impl core::fmt::Display for QmfAssembleError {
@@ -263,6 +375,15 @@ impl core::fmt::Display for QmfAssembleError {
                 write!(
                     f,
                     "subband_samples.len()={provided} is shorter than the n_subs={required} per-sample scalars required by §C.2.5"
+                )
+            }
+            QmfAssembleError::OutputSliceTooShort {
+                n_ch_index,
+                available,
+            } => {
+                write!(
+                    f,
+                    "na_ch.len()={available} has no room for the 32 §C.2.5 PCM samples at n_ch_index={n_ch_index}"
                 )
             }
         }
@@ -683,6 +804,174 @@ mod tests {
         for v in ra_z.iter().skip(NUM_SUBBAND) {
             assert_eq!(*v, 0.0, "high block should be cleared after second rotate");
         }
+    }
+
+    // -----------------------------------------------------------
+    // write_pcm_output() — per-sample PCM-output step.
+    // -----------------------------------------------------------
+
+    #[test]
+    fn write_pcm_output_emits_thirty_two_samples_and_advances_cursor() {
+        // raZ[0..32] = i, rScale = 1.0 → naCh[i] = int(1.0*i) = i.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        for (i, slot) in ra_z.iter_mut().take(NUM_SUBBAND).enumerate() {
+            *slot = i as f64;
+        }
+        let mut na_ch = [0_i32; NUM_SUBBAND];
+        let next = write_pcm_output(&ra_z, 1.0, &mut na_ch, 0).expect("fits exactly");
+        assert_eq!(next, NUM_SUBBAND, "cursor advances by 32");
+        for (i, v) in na_ch.iter().enumerate() {
+            assert_eq!(*v, i as i32, "naCh[{i}] mismatch");
+        }
+    }
+
+    #[test]
+    fn write_pcm_output_applies_scale_before_cast() {
+        // rScale = 4.0, raZ[i] = i → naCh[i] = int(4.0*i) = 4*i.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        for (i, slot) in ra_z.iter_mut().take(NUM_SUBBAND).enumerate() {
+            *slot = i as f64;
+        }
+        let mut na_ch = [0_i32; NUM_SUBBAND];
+        write_pcm_output(&ra_z, 4.0, &mut na_ch, 0).expect("fits");
+        for (i, v) in na_ch.iter().enumerate() {
+            assert_eq!(*v, 4 * i as i32, "naCh[{i}] = 4*{i} expected");
+        }
+    }
+
+    #[test]
+    fn write_pcm_output_truncates_toward_zero() {
+        // int() in C discards the fractional part toward zero for both
+        // signs: int(2.9) = 2, int(-2.9) = -2, int(-0.4) = 0.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        ra_z[0] = 2.9;
+        ra_z[1] = -2.9;
+        ra_z[2] = -0.4;
+        ra_z[3] = 0.99;
+        ra_z[4] = -0.99;
+        let mut na_ch = [0_i32; NUM_SUBBAND];
+        write_pcm_output(&ra_z, 1.0, &mut na_ch, 0).expect("fits");
+        assert_eq!(na_ch[0], 2, "int(2.9) = 2");
+        assert_eq!(na_ch[1], -2, "int(-2.9) = -2");
+        assert_eq!(na_ch[2], 0, "int(-0.4) = 0 (toward zero)");
+        assert_eq!(na_ch[3], 0, "int(0.99) = 0");
+        assert_eq!(na_ch[4], 0, "int(-0.99) = 0");
+    }
+
+    #[test]
+    fn write_pcm_output_scaling_then_truncation_order_matters() {
+        // The cast happens AFTER the scale: int(0.5 * 3.0) = int(1.5)
+        // = 1, not int(0.5)*3 = 0.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        ra_z[0] = 3.0;
+        let mut na_ch = [0_i32; NUM_SUBBAND];
+        write_pcm_output(&ra_z, 0.5, &mut na_ch, 0).expect("fits");
+        assert_eq!(na_ch[0], 1, "int(0.5 * 3.0) = int(1.5) = 1");
+    }
+
+    #[test]
+    fn write_pcm_output_writes_at_running_cursor_and_returns_new_cursor() {
+        // A buffer of three iterations' worth; write into the second
+        // slot-block and confirm the first and third are untouched.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        for (i, slot) in ra_z.iter_mut().take(NUM_SUBBAND).enumerate() {
+            *slot = (100 + i) as f64;
+        }
+        let mut na_ch = [-1_i32; 3 * NUM_SUBBAND];
+        let next = write_pcm_output(&ra_z, 1.0, &mut na_ch, NUM_SUBBAND).expect("fits");
+        assert_eq!(next, 2 * NUM_SUBBAND, "cursor advances 32→64");
+        // First block untouched.
+        for v in &na_ch[..NUM_SUBBAND] {
+            assert_eq!(*v, -1, "first block must not be written");
+        }
+        // Second block holds the output.
+        for (i, v) in na_ch[NUM_SUBBAND..2 * NUM_SUBBAND].iter().enumerate() {
+            assert_eq!(*v, 100 + i as i32, "naCh[{}] mismatch", NUM_SUBBAND + i);
+        }
+        // Third block untouched.
+        for v in &na_ch[2 * NUM_SUBBAND..] {
+            assert_eq!(*v, -1, "third block must not be written");
+        }
+    }
+
+    #[test]
+    fn write_pcm_output_reads_only_low_block_not_high_accumulator() {
+        // raZ[32..64] holds the next iteration's pre-rotate partials;
+        // they must NOT leak into this iteration's output.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        for slot in ra_z.iter_mut().skip(NUM_SUBBAND) {
+            *slot = 9999.0; // high block — must be ignored
+        }
+        let mut na_ch = [0_i32; NUM_SUBBAND];
+        write_pcm_output(&ra_z, 1.0, &mut na_ch, 0).expect("fits");
+        for (i, v) in na_ch.iter().enumerate() {
+            assert_eq!(
+                *v, 0,
+                "naCh[{i}] must come from raZ[0..32]=0, not the high block"
+            );
+        }
+    }
+
+    #[test]
+    fn write_pcm_output_rejects_buffer_too_short() {
+        let ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        let mut na_ch = [0_i32; NUM_SUBBAND - 1]; // one slot short
+        let err = write_pcm_output(&ra_z, 1.0, &mut na_ch, 0).unwrap_err();
+        assert_eq!(
+            err,
+            QmfAssembleError::OutputSliceTooShort {
+                n_ch_index: 0,
+                available: NUM_SUBBAND - 1,
+            }
+        );
+    }
+
+    #[test]
+    fn write_pcm_output_rejects_cursor_past_room() {
+        // Buffer has room for exactly 32 samples but the cursor starts
+        // at 1, so 1+32 = 33 > 32.
+        let ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        let mut na_ch = [0_i32; NUM_SUBBAND];
+        let err = write_pcm_output(&ra_z, 1.0, &mut na_ch, 1).unwrap_err();
+        assert_eq!(
+            err,
+            QmfAssembleError::OutputSliceTooShort {
+                n_ch_index: 1,
+                available: NUM_SUBBAND,
+            }
+        );
+    }
+
+    #[test]
+    fn write_pcm_output_negative_scale_flips_sign() {
+        // A negative rScale negates each sample before the cast.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        ra_z[0] = 5.0;
+        ra_z[1] = -3.0;
+        let mut na_ch = [0_i32; NUM_SUBBAND];
+        write_pcm_output(&ra_z, -2.0, &mut na_ch, 0).expect("fits");
+        assert_eq!(na_ch[0], -10, "int(-2.0 * 5.0) = -10");
+        assert_eq!(na_ch[1], 6, "int(-2.0 * -3.0) = 6");
+    }
+
+    #[test]
+    fn write_pcm_output_per_sample_constant_is_num_subband() {
+        assert_eq!(PCM_OUTPUT_PER_SAMPLE, NUM_SUBBAND);
+        assert_eq!(PCM_OUTPUT_PER_SAMPLE, 32);
+    }
+
+    #[test]
+    fn write_pcm_output_error_renders_human_readable_message() {
+        let err = QmfAssembleError::OutputSliceTooShort {
+            n_ch_index: 64,
+            available: 80,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("64"), "message names the cursor: {msg}");
+        assert!(
+            msg.contains("80"),
+            "message names the available length: {msg}"
+        );
     }
 
     // -----------------------------------------------------------

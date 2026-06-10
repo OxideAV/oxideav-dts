@@ -5,46 +5,54 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
-**Round 271 — `shift_z_output()` post-PCM `raZ[]` accumulator rotate
-of `QMFInterpolation()` (ETSI Annex C §C.2.5, staged PDF p.185).**
-Round 271 (2026-06-10) lands the last FIR-independent step of the
-§C.2.5 `QMFInterpolation()` per-sample loop body: the post-PCM rotate
-of the 64-entry `raZ[]` output accumulator
-(`docs/audio/dts/dts-core-extracts.md` §2.4 lines 218-219). After the
-§C.2.5 PCM-output step consumes `raZ[0..32]` for the current sample,
-[`shift_z_output(&mut [f64; 64])`](crate::shift_z_output) executes the
-spec's two sequential loops `for (i=0; i<NumSubband; i++) raZ[i] =
-raZ[i+32];` then `for (i=0; i<NumSubband; i++) raZ[i+32] = 0.0;` —
-sliding the high block `raZ[32..64]` (which the FIR step accumulated
-for the *next* sample's PCM output) down into `raZ[0..32]` and zeroing
-the freed high block so the next per-sample FIR step accumulates into a
-cleared region. Unlike round-259's `shift_x_history()` reverse walk,
-the down-shift iterates forward because the read range `raZ[32..64]`
-and write range `raZ[0..32]` are disjoint; the subsequent zero-fill
-then overwrites the (now-stale) source range, exactly mirroring the
-spec's two-loop form. The rotate reads zero §D.8 FIR coefficients (it
-only moves and clears the accumulator's content), so it ships ahead of
-the still-deferred FIR convolution that fills `raZ[]` (round-208 docs
-gap #9 / OxideAV-docs issue #1357 remains open). New public constant
-[`Z_OUTPUT_LEN`](crate::Z_OUTPUT_LEN) (= 64 = `2 * NUM_SUBBAND`) names
-the accumulator length the §2.4 line 218-219 `raZ[i]` / `raZ[i+32]`
-indexing implicitly fixes. Eight new in-module tests in
-`src/qmf_assemble.rs` exercise: the down-shift's high-to-low block
-move; the high-block zero-fill; the +0.0 (not -0.0) bit-pattern of the
-cleared block; that the prior low-block content does not leak through;
-the all-zero no-op; bit-identical pass-through of signed and subnormal
-high-block values; a two-rotate composition that confirms a simulated
-inter-sample FIR refill is exposed on the next rotate; and the length
-constants (`Z_OUTPUT_LEN = 64`, `Z_OUTPUT_LEN = 2 * NUM_SUBBAND`). New
-re-exports at the crate root: `oxideav_dts::{shift_z_output,
-Z_OUTPUT_LEN}`. Total in-module test count: 387 → 395 (`cargo test -p
-oxideav-dts --lib`). The `--no-default-features --lib` standalone build
-still passes (the new primitive has no `oxideav-core` dependency).
-Scope: with this round all three FIR-independent steps of the §C.2.5
-per-sample loop (raXin assembly, raX shift, raZ rotate) plus the
-cosine-modulation stage are landed; the 512-tap FIR convolution itself,
-the integer-PCM output step, and the `multirate_inter ↔ FILTS` polarity
-all stay blocked on the remaining docs gaps.
+**Round 274 — `write_pcm_output()` integer-PCM output step of
+`QMFInterpolation()` (ETSI Annex C §C.2.5, staged PDF p.185).**
+Round 274 (2026-06-11) lands the FIR-independent PCM-output step of
+the §C.2.5 `QMFInterpolation()` per-sample loop body
+(`docs/audio/dts/dts-core-extracts.md` §2.4 lines 213-214).
+[`write_pcm_output(&[f64; 64], r_scale, &mut [i32],
+n_ch_index)`](crate::write_pcm_output) executes the spec's
+`for (i=0; i<32; i++) naCh[nChIndex++] = int(rScale*raZ[i]);`: it
+consumes the 32 low entries `raZ[0..32]` (the FIR step accumulated
+them for the current sample), scales each by the per-channel `rScale`
+multiplier, applies the spec's `int()` truncate-toward-zero cast
+(`f64::trunc` then `as i32`), and writes the 32 integer samples into
+the channel buffer at the running `nChIndex` cursor — returning the
+advanced cursor (`n_ch_index + 32`) to mirror the spec's
+`naCh[nChIndex++]` post-increment. Only `raZ[0..32]` is read; the high
+block `raZ[32..64]` (the next sample's pre-rotate partials) is never
+touched, and no §D.8 FIR coefficient is read, so the step ships ahead
+of the still-deferred 512-tap FIR convolution that fills `raZ[]`
+(round-208 docs gap #9 / OxideAV-docs issue #1357 remains open).
+`rScale` is a caller-supplied parameter: the §C.2.5 pseudocode uses it
+in the output step without assigning it inside the
+`QMFInterpolation()` block, and the staged clause does not fix the
+value/derivation of the QMF-output `rScale`, so the step ships
+parametrically (the *structure* — scale → `int()` → write 32 → advance
+— is fully defined; only the multiplier value is a docs gap, recorded
+below). The clause states no per-width saturation here; clamping to
+the transmitted `SourcePcmResolution` is a separate, not-yet-specified
+output-format step. New `QmfAssembleError::OutputSliceTooShort` guards
+a channel buffer with no room for the 32 samples at the cursor. New
+public constant
+[`PCM_OUTPUT_PER_SAMPLE`](crate::PCM_OUTPUT_PER_SAMPLE) (= 32 =
+`NUM_SUBBAND`) names the per-iteration output count the §2.4 line
+213-214 `i < 32` bound fixes. Eleven new in-module tests in
+`src/qmf_assemble.rs` exercise: the 32-sample emit + cursor advance;
+scale-before-cast; truncate-toward-zero for both signs and sub-unit
+magnitudes; scale-then-truncate ordering; write-at-running-cursor with
+untouched neighbour blocks; low-block-only read (no high-accumulator
+leak); buffer-too-short and cursor-past-room rejections; negative-scale
+sign flip; the `PCM_OUTPUT_PER_SAMPLE` constant; and the error Display
+message. New re-exports at the crate root:
+`oxideav_dts::{write_pcm_output, PCM_OUTPUT_PER_SAMPLE}`. Total
+in-module test count: 395 → 406 (`cargo test -p oxideav-dts --lib`).
+Scope: with this round all three FIR-independent shift/assembly steps
+of the §C.2.5 per-sample loop (raXin assembly, raX shift, raZ rotate)
+plus the cosine-modulation stage and the integer-PCM output step are
+landed; only the 512-tap FIR convolution (blocked on the §D.8 docs
+gap), the value of the output `rScale`, and the `multirate_inter ↔
+FILTS` polarity remain blocked on docs gaps.
 
 **Round 263 — `FilterBankSelection` typed selector for the §C.2.5
 512-tap FIR coefficient set (ETSI Annex C §C.2.5, staged PDF

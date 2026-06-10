@@ -8,6 +8,65 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 274 (2026-06-11) — `write_pcm_output()`: the
+  FIR-independent PCM-output step of the §C.2.5
+  `QMFInterpolation()` per-sample loop body (ETSI TS 102 114 V1.3.1
+  Annex C §C.2.5, staged PDF p.185, per
+  `docs/audio/dts/dts-core-extracts.md` §2.4 lines 213-214). Lands
+  the loop-body step that turns the synthesis filter's accumulated
+  output into integer PCM, without depending on the §D.8 FIR
+  coefficient tables (still pending docs staging, round-208 docs
+  gap #9 / OxideAV-docs issue #1357).
+  - `write_pcm_output(&[f64; 64], r_scale, &mut [i32], n_ch_index)`
+    executes the spec's `for (i=0; i<32; i++) naCh[nChIndex++] =
+    int(rScale*raZ[i]);`: it consumes the 32 low entries
+    `raZ[0..32]` (the FIR step accumulated them for the current
+    per-sample iteration), scales each by the per-channel `rScale`
+    multiplier, applies the spec's `int()` truncate-toward-zero
+    cast (`f64::trunc` then `as i32`), and writes the 32 integer
+    samples into the channel buffer at the running `nChIndex`
+    cursor. Returns the advanced cursor (`n_ch_index + 32`),
+    mirroring the spec's `naCh[nChIndex++]` post-increment. Reads
+    only `raZ[0..32]`; the high block `raZ[32..64]` (next
+    iteration's pre-rotate partials) is never read. Reads no §D.8
+    coefficients.
+  - `rScale` is taken as a caller-supplied parameter: the §C.2.5
+    pseudocode uses `rScale` in the PCM-output step without
+    assigning it inside the `QMFInterpolation()` block, and the
+    staged §C.2.5 clause does not fix the value/derivation of the
+    QMF-output `rScale` (distinct from the per-subband
+    reconstruction `rScale` defined elsewhere in the spec). This is
+    a docs gap for the *value* of the output multiplier; the
+    *structure* of the step (scale → `int()` → write 32 → advance
+    cursor) is fully defined, so the step ships parametrically. The
+    §C.2.5 clause states no per-width saturation in this step;
+    clamping to the transmitted source-PCM resolution
+    (`SourcePcmResolution`) is a separate output-format step the
+    clause does not define here.
+  - New `QmfAssembleError::OutputSliceTooShort { n_ch_index,
+    available }` for a channel buffer with no room for the 32
+    samples at the cursor.
+  - New public re-exports at the crate root:
+    `oxideav_dts::{write_pcm_output, PCM_OUTPUT_PER_SAMPLE}`.
+    `PCM_OUTPUT_PER_SAMPLE = 32` (= `NUM_SUBBAND`) names the
+    per-iteration output count the §2.4 line 213-214 `i < 32` bound
+    fixes.
+  - 11 new unit tests covering: the 32-sample emit + cursor
+    advance; scale-before-cast; truncate-toward-zero for both signs
+    and sub-unit magnitudes; scale-then-truncate ordering;
+    write-at-running-cursor with untouched neighbour blocks;
+    low-block-only read (no high-accumulator leak); buffer-too-short
+    and cursor-past-room rejections; negative-scale sign flip; the
+    `PCM_OUTPUT_PER_SAMPLE` constant; and the error Display message.
+    Total in-module test count: 395 → 406 (`cargo test -p
+    oxideav-dts --lib`).
+
+  No external library source consulted. No web search. Wall
+  respected per IMPLEMENTOR_ROUND.md guardrails. Trace material
+  read: ETSI TS 102 114 V1.3.1 Annex C §C.2.5 only
+  (`docs/audio/dts/dts-core-extracts.md` §2.4 lines 213-214, staged
+  PDF p.185); no other section, no other docs file.
+
 - Round 271 (2026-06-10) — `shift_z_output()`: the FIR-independent
   post-PCM rotate of the 64-entry `raZ[]` output accumulator, the
   last index-only step of the §C.2.5 `QMFInterpolation()` per-sample

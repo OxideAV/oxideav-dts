@@ -336,6 +336,17 @@
 //!   next per-sample FIR accumulation. Pure index manipulation —
 //!   reads no §D.8 FIR coefficients — so it ships ahead of the FIR
 //!   convolution that fills `raZ[]`. Added in round 271.
+//! - [`write_pcm_output`] / [`PCM_OUTPUT_PER_SAMPLE`] — the
+//!   FIR-independent PCM-output step of `QMFInterpolation()`
+//!   (§C.2.5, PDF p.185, per `docs/audio/dts/dts-core-extracts.md`
+//!   §2.4 lines 213-214): consumes the 32 low entries `raZ[0..32]`,
+//!   scales each by the per-channel `rScale` multiplier, applies the
+//!   spec's `int()` truncate-toward-zero cast, and writes 32
+//!   integer PCM samples into the channel buffer at the running
+//!   `nChIndex` cursor (returning the advanced cursor). Reads no
+//!   §D.8 FIR coefficients — it consumes the already-accumulated
+//!   `raZ[0..32]` — so it ships ahead of the FIR step that fills
+//!   them. Added in round 274.
 //! - [`FilterBankSelection`] — typed selector for the §C.2.5
 //!   `QMFInterpolation()` 512-tap FIR coefficient set (the §D.8
 //!   `raCoeffLossy` / `raCoeffLossLess` named tables).
@@ -447,7 +458,8 @@ pub use crate::joint_subband::{
     joint_subband_required,
 };
 pub use crate::qmf_assemble::{
-    assemble_xin, shift_x_history, shift_z_output, QmfAssembleError, X_HISTORY_LEN, Z_OUTPUT_LEN,
+    assemble_xin, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
+    PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,
 };
 pub use crate::side_info::{
     decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, AbitsCodebook,
