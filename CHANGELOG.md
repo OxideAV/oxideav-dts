@@ -8,6 +8,44 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 271 (2026-06-10) — `shift_z_output()`: the FIR-independent
+  post-PCM rotate of the 64-entry `raZ[]` output accumulator, the
+  last index-only step of the §C.2.5 `QMFInterpolation()` per-sample
+  loop body (ETSI TS 102 114 V1.3.1 Annex C §C.2.5, staged PDF
+  p.185, per `docs/audio/dts/dts-core-extracts.md` §2.4 lines
+  218-219). Completes the three FIR-independent loop-body steps
+  (raXin assembly, raX shift, raZ rotate) without depending on the
+  §D.8 FIR coefficient tables (still pending docs staging, round-208
+  docs gap #9 / OxideAV-docs issue #1357).
+  - `shift_z_output(&mut [f64; 64])` executes the spec's two
+    sequential loops `for (i=0; i<NumSubband; i++) raZ[i] =
+    raZ[i+32];` then `for (i=0; i<NumSubband; i++) raZ[i+32] = 0.0;`:
+    it slides the high block `raZ[32..64]` (the FIR step accumulated
+    it for the next sample's PCM output) down into `raZ[0..32]` and
+    zero-fills the freed high block. The down-shift iterates forward
+    (unlike `shift_x_history()`'s reverse walk) because the source
+    range `[32, 64)` and destination range `[0, 32)` are disjoint.
+    Reads no §D.8 coefficients — pure index manipulation.
+  - New public re-exports at the crate root:
+    `oxideav_dts::{shift_z_output, Z_OUTPUT_LEN}`. `Z_OUTPUT_LEN = 64`
+    (= `2 * NUM_SUBBAND`) is the accumulator length the §2.4 line
+    218-219 `raZ[i]` / `raZ[i+32]` indexing implicitly fixes.
+  - 8 new unit tests covering: high-to-low block move; high-block
+    zero-fill; +0.0 (not -0.0) bit-pattern of the cleared block;
+    no leak-through of the prior low-block content; all-zero no-op;
+    bit-identical pass-through of signed and subnormal high-block
+    values; a two-rotate composition exposing a simulated
+    inter-sample FIR refill; and the length constants
+    (`Z_OUTPUT_LEN = 64`, `Z_OUTPUT_LEN = 2 * NUM_SUBBAND`). Total
+    in-module test count: 387 → 395 (`cargo test -p oxideav-dts
+    --lib`).
+
+  No external library source consulted. No web search. Wall
+  respected per IMPLEMENTOR_ROUND.md guardrails. Trace material
+  read: ETSI TS 102 114 V1.3.1 Annex C §C.2.5 only
+  (`docs/audio/dts/dts-core-extracts.md` §2.4 lines 218-219, staged
+  PDF p.185); no other section, no other docs file.
+
 - Round 263 (2026-06-09) — `FilterBankSelection`: typed selector
   for the §C.2.5 `QMFInterpolation()` 512-tap FIR coefficient set
   (ETSI TS 102 114 V1.3.1 Annex C §C.2.5, staged PDF p.185, per

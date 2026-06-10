@@ -328,6 +328,14 @@
 //!   512-entry raX register by 32 entries to make room for the
 //!   next per-sample cosine-modulation output. Both ship ahead of
 //!   the §D.8-dependent FIR step they bracket. Added in round 259.
+//! - [`shift_z_output`] / [`Z_OUTPUT_LEN`] — the FIR-independent
+//!   post-PCM rotate of the 64-entry `raZ[]` output accumulator
+//!   (§C.2.5, PDF p.185, per `docs/audio/dts/dts-core-extracts.md`
+//!   §2.4 lines 218-219): shifts the high block `raZ[32..64]` down
+//!   into `raZ[0..32]` and zero-fills the freed high block for the
+//!   next per-sample FIR accumulation. Pure index manipulation —
+//!   reads no §D.8 FIR coefficients — so it ships ahead of the FIR
+//!   convolution that fills `raZ[]`. Added in round 271.
 //! - [`FilterBankSelection`] — typed selector for the §C.2.5
 //!   `QMFInterpolation()` 512-tap FIR coefficient set (the §D.8
 //!   `raCoeffLossy` / `raCoeffLossLess` named tables).
@@ -438,7 +446,9 @@ pub use crate::joint_subband::{
     joint_source_channel, joint_subband_decode_range_f64, joint_subband_decode_range_i32,
     joint_subband_required,
 };
-pub use crate::qmf_assemble::{assemble_xin, shift_x_history, QmfAssembleError, X_HISTORY_LEN};
+pub use crate::qmf_assemble::{
+    assemble_xin, shift_x_history, shift_z_output, QmfAssembleError, X_HISTORY_LEN, Z_OUTPUT_LEN,
+};
 pub use crate::side_info::{
     decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, AbitsCodebook,
     ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, RMS_6BIT, RMS_7BIT,

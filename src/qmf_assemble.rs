@@ -40,10 +40,15 @@
 //! therefore be landed ahead of the FIR step that fuses them into
 //! the full driver.
 //!
-//! The `raZ[]` rotate at the end of step (e) operates on the
-//! output of step (c)'s FIR convolution, so its semantics are
-//! entangled with the FIR step and it is *not* implemented here —
-//! it will land alongside the FIR coefficient tables.
+//! The `raZ[]` rotate at the end of step (e)
+//! ([`shift_z_output`]) operates on the §C.2.5 output accumulator
+//! `raZ[0..64]`: the FIR step (c) accumulates into it and the PCM
+//! step (d) reads `raZ[0..32]` from it, but the rotate *itself* is
+//! pure index manipulation — it shifts the low 32 entries down by
+//! 32 and zeros the freed high block, never reading any §D.8 FIR
+//! coefficient. It is therefore FIR-independent in exactly the same
+//! way [`shift_x_history`] is, and lands here as the symmetric
+//! companion shift.
 
 use crate::cos_mod::NUM_SUBBAND;
 
@@ -62,6 +67,23 @@ use crate::cos_mod::NUM_SUBBAND;
 /// `raCoeffLossLess`, §D.8) the FIR step that drives `raX[]`
 /// consumes.
 pub const X_HISTORY_LEN: usize = 512;
+
+/// Length of the synthesis filter's `raZ[]` output accumulator, per
+/// §C.2.5 / `dts-core-extracts.md` §2.4.
+///
+/// The staged pseudocode indexes `raZ[]` at both `raZ[i]` and
+/// `raZ[32+i]` for `i ∈ 0..32` (the FIR step writes `raZ[i]` and
+/// `raZ[32+i]`; the PCM step reads `raZ[0..32]`; the rotate step
+/// reads `raZ[i+32]` and writes `raZ[32+i]`):
+///
+/// ```text
+///     for (i=0; i<NumSubband; i++)   raZ[i]    = raZ[i+32];
+///     for (i=0; i<NumSubband; i++)   raZ[i+32] = (real)0.0;
+/// ```
+///
+/// — so `raZ[]` spans indices `0..64`, i.e. `2 * NumSubband`
+/// (`2 * 32 = 64`) entries.
+pub const Z_OUTPUT_LEN: usize = 2 * NUM_SUBBAND;
 
 /// Per-sample subband-input assembly step of the §C.2.5
 /// `QMFInterpolation()` outer-loop body (per
@@ -157,6 +179,49 @@ pub fn shift_x_history(ra_x: &mut [f64; X_HISTORY_LEN]) {
     // the high-index entries that depend on them are read.
     for i in (NUM_SUBBAND..X_HISTORY_LEN).rev() {
         ra_x[i] = ra_x[i - NUM_SUBBAND];
+    }
+}
+
+/// Per-sample rotate of the synthesis filter's `raZ[]` output
+/// accumulator, per `dts-core-extracts.md` §2.4 lines 218-219:
+///
+/// ```text
+///     for (i=0; i<NumSubband; i++)   raZ[i]    = raZ[i+32];
+///     for (i=0; i<NumSubband; i++)   raZ[i+32] = (real)0.0;
+/// ```
+///
+/// Runs after the §C.2.5 PCM-output step has consumed `raZ[0..32]`
+/// for the current per-sample iteration. The 32 high entries
+/// `raZ[32..64]` (which the FIR step accumulated for the *next*
+/// iteration's PCM output) slide down into `raZ[0..32]`, and the
+/// freed high block `raZ[32..64]` is reset to `+0.0` so the next
+/// per-sample FIR step accumulates into a cleared region.
+///
+/// The forward iteration (`i = 0` upward) is correct here — unlike
+/// [`shift_x_history`]'s reverse walk — because the read range
+/// `raZ[32..64]` and the write range `raZ[0..32]` are disjoint: no
+/// write clobbers a slot a later read depends on. The subsequent
+/// zero-fill of `raZ[32..64]` then overwrites the (now-stale) source
+/// range, exactly mirroring the spec's two sequential loops.
+///
+/// This primitive reads no §D.8 `raCoeffLossy` / `raCoeffLossLess`
+/// FIR coefficients — it only rotates and clears the accumulator's
+/// content — so it ships ahead of the still-deferred FIR convolution
+/// step that fills `raZ[]` (round-208 docs gap #9 / OxideAV-docs
+/// issue #1357).
+pub fn shift_z_output(ra_z: &mut [f64; Z_OUTPUT_LEN]) {
+    // Loop 1: raZ[i] = raZ[i+32] for i in 0..32. The source range
+    // [32, 64) and destination range [0, 32) are disjoint, so a
+    // forward walk needs no scratch buffer (matching the spec's
+    // straight `for (i=0; i<NumSubband; i++)`).
+    for i in 0..NUM_SUBBAND {
+        ra_z[i] = ra_z[i + NUM_SUBBAND];
+    }
+    // Loop 2: raZ[32+i] = 0.0 for i in 0..32. Reset the high block
+    // to positive zero so the next per-sample FIR step accumulates
+    // into a cleared region.
+    for slot in ra_z.iter_mut().skip(NUM_SUBBAND) {
+        *slot = 0.0;
     }
 }
 
@@ -480,8 +545,165 @@ mod tests {
     }
 
     // -----------------------------------------------------------
+    // shift_z_output() — post-PCM rotate of the raZ[] accumulator.
+    // -----------------------------------------------------------
+
+    #[test]
+    fn shift_z_output_moves_high_block_down_into_low_block() {
+        // After the rotate, raZ[0..32] should hold what raZ[32..64]
+        // held on entry (the spec's `raZ[i] = raZ[i+32]`).
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        for (i, slot) in ra_z.iter_mut().enumerate() {
+            *slot = i as f64;
+        }
+        let snapshot = ra_z;
+        shift_z_output(&mut ra_z);
+        for (i, v) in ra_z.iter().enumerate().take(NUM_SUBBAND) {
+            assert_eq!(
+                *v,
+                snapshot[i + NUM_SUBBAND],
+                "raZ[{i}] should equal pre-rotate raZ[{}]",
+                i + NUM_SUBBAND
+            );
+        }
+    }
+
+    #[test]
+    fn shift_z_output_zeros_the_high_block() {
+        // After the rotate, raZ[32..64] should all be +0.0 (the
+        // spec's `raZ[i+32] = 0.0`), readying it for the next
+        // per-sample FIR accumulation.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        for (i, slot) in ra_z.iter_mut().enumerate() {
+            *slot = (i as f64) + 1.0; // all non-zero so a missed clear is visible
+        }
+        shift_z_output(&mut ra_z);
+        for (i, v) in ra_z.iter().enumerate().skip(NUM_SUBBAND) {
+            assert_eq!(
+                v.to_bits(),
+                0.0_f64.to_bits(),
+                "raZ[{i}] should be cleared to +0.0"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_z_output_high_block_is_positive_zero_not_negative() {
+        // The spec writes `(real)0.0` — positive zero. A negative
+        // zero in the cleared block could perturb a later FIR
+        // accumulation that starts from `raZ[32+i]`.
+        let mut ra_z = [-3.0_f64; Z_OUTPUT_LEN];
+        shift_z_output(&mut ra_z);
+        for (i, v) in ra_z.iter().enumerate().skip(NUM_SUBBAND) {
+            assert_eq!(
+                v.to_bits(),
+                0.0_f64.to_bits(),
+                "raZ[{i}] should be the +0.0 bit-pattern, not -0.0"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_z_output_low_block_is_independent_of_prior_low_values() {
+        // raZ[0..32] is fully overwritten by raZ[32..64]; the
+        // pre-rotate low-block content must not leak through.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        // Distinct sentinel in the low block; a known ramp in the
+        // high block.
+        for slot in ra_z.iter_mut().take(NUM_SUBBAND) {
+            *slot = 999.0;
+        }
+        for (i, slot) in ra_z.iter_mut().enumerate().skip(NUM_SUBBAND) {
+            *slot = (i - NUM_SUBBAND) as f64 - 100.0;
+        }
+        shift_z_output(&mut ra_z);
+        for (i, v) in ra_z.iter().enumerate().take(NUM_SUBBAND) {
+            assert_eq!(
+                *v,
+                (i as f64) - 100.0,
+                "raZ[{i}] should come from the high block, not the prior low block"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_z_output_on_all_zero_accumulator_is_a_no_op() {
+        // A common §C.2.5 startup state: raZ[] = 0.0 everywhere.
+        // The rotate leaves it silent.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        shift_z_output(&mut ra_z);
+        for (i, v) in ra_z.iter().enumerate() {
+            assert_eq!(*v, 0.0, "raZ[{i}] = {v} should stay 0");
+        }
+    }
+
+    #[test]
+    fn shift_z_output_preserves_signed_and_subnormal_high_block_values() {
+        // The down-shift is a verbatim copy — signed and subnormal
+        // f64s in the high block must arrive bit-identically in the
+        // low block.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        let specials = [-1.5_f64, f64::MIN_POSITIVE / 4.0, -0.0, 7.25];
+        for (k, s) in specials.iter().enumerate() {
+            ra_z[NUM_SUBBAND + k] = *s;
+        }
+        shift_z_output(&mut ra_z);
+        for (k, s) in specials.iter().enumerate() {
+            assert_eq!(
+                ra_z[k].to_bits(),
+                s.to_bits(),
+                "raZ[{k}] bit-mismatch after down-shift"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_z_output_two_rotates_walk_the_accumulator_block_by_block() {
+        // Simulate two per-sample iterations: between the rotates the
+        // driver's FIR step would refill raZ[32..64]. Confirm the
+        // first rotate exposes the original high block and the second
+        // rotate exposes whatever the (simulated) FIR step wrote.
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        for (i, slot) in ra_z.iter_mut().enumerate().skip(NUM_SUBBAND) {
+            *slot = (i - NUM_SUBBAND) as f64; // raZ[32..64] = 0..32
+        }
+        shift_z_output(&mut ra_z);
+        // raZ[0..32] now holds 0..32; raZ[32..64] cleared.
+        assert_eq!(ra_z[0], 0.0);
+        assert_eq!(ra_z[31], 31.0);
+        // Simulated FIR step for the next iteration refills the high
+        // block with a fresh ramp.
+        for (i, slot) in ra_z.iter_mut().enumerate().skip(NUM_SUBBAND) {
+            *slot = 1000.0 + (i - NUM_SUBBAND) as f64;
+        }
+        shift_z_output(&mut ra_z);
+        // The second rotate exposes the freshly-written high block.
+        assert_eq!(ra_z[0], 1000.0);
+        assert_eq!(ra_z[31], 1031.0);
+        for v in ra_z.iter().skip(NUM_SUBBAND) {
+            assert_eq!(*v, 0.0, "high block should be cleared after second rotate");
+        }
+    }
+
+    // -----------------------------------------------------------
     // Constants
     // -----------------------------------------------------------
+
+    #[test]
+    fn z_output_len_is_sixty_four() {
+        // §C.2.5 / §2.4 lines 218-219 index raZ[] at raZ[i] and
+        // raZ[i+32] for i in 0..32, so the accumulator spans
+        // 2 * NumSubband = 64 entries.
+        assert_eq!(Z_OUTPUT_LEN, 64);
+    }
+
+    #[test]
+    fn z_output_len_is_twice_num_subband() {
+        // The rotate writes raZ[i] = raZ[i+32] and raZ[32+i] = 0.0;
+        // both index ranges fit exactly when Z_OUTPUT_LEN = 2 *
+        // NUM_SUBBAND.
+        assert_eq!(Z_OUTPUT_LEN, 2 * NUM_SUBBAND);
+    }
 
     #[test]
     fn x_history_len_is_five_hundred_twelve() {
