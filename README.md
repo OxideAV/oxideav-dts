@@ -5,6 +5,54 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 278 — §D.8 32-band interpolation FIR coefficient tables +
+`fir_step()` FIR convolution (ETSI Annex D §D.8 / Annex C §C.2.5,
+staged PDF p.238-246 / p.185).**
+Round 278 (2026-06-11) closes the round-208 docs gap #9: the two
+512-tap `prCoeff` sets the §C.2.5 `QMFInterpolation()` FIR step
+convolves are transcribed verbatim from the staged ETSI TS 102 114
+V1.3.1 Annex D §D.8 "32-Band Interpolation and LFE Interpolation
+FIR" table
+(`docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf`
+p.238-246, decimal commas rendered as decimal points) into the new
+`src/fir_coeff.rs` —
+[`RA_COEFF_LOSSLESS`](crate::RA_COEFF_LOSSLESS) (the "Perfect
+Reconstruction" column, the pseudocode's `raCoeffLossLess`,
+`FILTS != 0`) and [`RA_COEFF_LOSSY`](crate::RA_COEFF_LOSSY) (the
+"Non-Perfect Reconstruction" column, `raCoeffLossy`, `FILTS == 0`),
+plus [`FIR_COEFF_LEN`](crate::FIR_COEFF_LEN) (= 512). The round-263
+[`FilterBankSelection`](crate::FilterBankSelection) selector gains
+`coefficients() -> &'static [f64; 512]`, completing the spec's
+two-line `prCoeff` assignment, and the new
+[`fir_step(&ra_x, pr_coeff, &mut ra_z)`](crate::fir_step) executes
+the §C.2.5 "Multiply by filter coefficients" step
+(`docs/audio/dts/dts-core-extracts.md` §2.4): both
+`for (k=31,i=0; i<32; i++,k--) for (j=0; j<512; j+=64)` loops,
+accumulating `prCoeff[i+j]*(raX[i+j]-raX[j+k])` into `raZ[0..32]`
+and `prCoeff[32+i+j]*(-raX[i+j]-raX[j+k])` into `raZ[32..64]` —
+each of the 512 coefficients consumed exactly once per call, 8 taps
+per output slot. Sixteen new in-module tests: verbatim anchor rows
+read independently off both sides of every staged-PDF page seam
+plus the first / centre / last rows; exact whole-table antisymmetry
+(`coeff[i] == -coeff[511-i]`, both sets); finite/bounded magnitudes
+peaking at the 255/256 centre; distinct-set and length checks;
+pointer-identity + `from_filts`-composition checks for
+`coefficients()`; and for `fir_step` a bit-exact line-for-line
+§C.2.5 reference comparison across ramp / alternating /
+pseudo-random registers × both §D.8 sets, silent-register no-op,
+accumulate-not-overwrite, low-/high-half single-tap index mapping,
+the 8-taps-per-output count, and exact power-of-two linearity. New
+re-exports at the crate root: `oxideav_dts::{fir_step,
+FIR_COEFF_LEN, RA_COEFF_LOSSLESS, RA_COEFF_LOSSY}`. Total in-module
+test count: 406 → 422 (`cargo test -p oxideav-dts --lib`). Scope:
+with this round every per-sample step of the §C.2.5 loop body
+exists as a public primitive (assemble → cos-mod → FIR → PCM out →
+raX/raZ shifts); the fused `QMFInterpolation()` driver remains a
+follow-up blocked only on the output `rScale` value and the
+`multirate_inter ↔ FILTS` polarity (both still docs gaps). The
+§D.8 LFE columns (64x / 128x interpolation) await the LFE
+reconstruction path.
+
 **Round 274 — `write_pcm_output()` integer-PCM output step of
 `QMFInterpolation()` (ETSI Annex C §C.2.5, staged PDF p.185).**
 Round 274 (2026-06-11) lands the FIR-independent PCM-output step of
@@ -1264,16 +1312,21 @@ those tables are not in `docs/`:
 ### Round-208 docs gaps
 
 9. **Annex §D.8 32-band synthesis FIR coefficient tables
-   (`raCoeffLossy` / `raCoeffLossLess`, 512 taps each)**: the staged
-   ETSI TS 102 114 V1.3.1 PDF lists these on page 238 but
-   `docs/audio/dts/dts-core-extracts.md` only references them by name
-   (§2.4 names them as the `FILTS == 0` / `FILTS == 1` selector
-   targets inside `QMFInterpolation`); the two 512-coefficient tables
-   themselves are not yet transcribed under `docs/audio/dts/`. The
-   round-208 `precal_cos_mod()` matrix does not depend on §D.8, but
-   wiring the full 32-band synthesis QMF (`QMFInterpolation`) does.
-   The same docs collaborator pass that lands the Table 5-20 DIALNORM
-   transcription is the natural place for the §D.8 transcription.
+   (`raCoeffLossy` / `raCoeffLossLess`, 512 taps each)**: *Resolved
+   in round 278.* The tables are printed in full in the staged ETSI
+   TS 102 114 V1.3.1 PDF (§D.8 "32-Band Interpolation and LFE
+   Interpolation FIR", p.238-246, indices 0..=511) and are now
+   transcribed verbatim into `src/fir_coeff.rs` as
+   `RA_COEFF_LOSSLESS` (the "Perfect Reconstruction" column) and
+   `RA_COEFF_LOSSY` (the "Non-Perfect Reconstruction" column), with
+   page-seam anchor rows and the tables' exact antisymmetry
+   (`coeff[i] == -coeff[511-i]`) locked down in tests.
+   `FilterBankSelection::coefficients()` resolves the §C.2.5 `FILTS`
+   selection to the matching table and `fir_step()` consumes it. The
+   §D.8 LFE columns (64x / 128x interpolation) remain untranscribed
+   pending the LFE reconstruction path. Still open on the synthesis
+   chain: the value/derivation of the §C.2.5 output `rScale` and the
+   `multirate_inter ↔ FILTS` polarity.
 
 ### Round-195 docs gaps
 

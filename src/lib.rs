@@ -420,6 +420,7 @@ mod bitreader;
 mod block_code;
 mod cos_mod;
 mod filter_bank;
+mod fir_coeff;
 mod header;
 mod inverse_adpcm;
 mod iter;
@@ -438,6 +439,7 @@ pub use crate::cos_mod::{
     COS_MOD_BLOCK3_START, COS_MOD_BLOCK4_START, COS_MOD_LEN, NUM_SUBBAND,
 };
 pub use crate::filter_bank::FilterBankSelection;
+pub use crate::fir_coeff::{FIR_COEFF_LEN, RA_COEFF_LOSSLESS, RA_COEFF_LOSSY};
 pub use crate::header::{
     encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,
     encode_frame_header_le, parse_frame_header, parse_frame_header_14bit, AmodeArrangement,
@@ -458,7 +460,7 @@ pub use crate::joint_subband::{
     joint_subband_required,
 };
 pub use crate::qmf_assemble::{
-    assemble_xin, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
+    assemble_xin, fir_step, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
     PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,
 };
 pub use crate::side_info::{

@@ -8,6 +8,68 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 278 (2026-06-11) — §D.8 32-band interpolation FIR
+  coefficient tables + `fir_step()`: closes round-208 docs gap #9
+  by transcribing the two 512-tap `prCoeff` sets from the staged
+  ETSI TS 102 114 V1.3.1 Annex D §D.8 "32-Band Interpolation and
+  LFE Interpolation FIR" table
+  (`docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf`
+  p.238-246) and landing the §C.2.5 `QMFInterpolation()` FIR
+  convolution step that consumes them
+  (`docs/audio/dts/dts-core-extracts.md` §2.4).
+  - New module `src/fir_coeff.rs` with
+    `RA_COEFF_LOSSLESS: [f64; 512]` (the §D.8 "Perfect
+    Reconstruction" column — the pseudocode's `raCoeffLossLess`,
+    selected by `FILTS != 0`) and `RA_COEFF_LOSSY: [f64; 512]`
+    (the "Non-Perfect Reconstruction" column — `raCoeffLossy`,
+    `FILTS == 0`), both transcribed verbatim (the spec table's
+    decimal commas rendered as decimal points), plus
+    `FIR_COEFF_LEN = 512`. The §D.8 LFE columns (64x / 128x
+    interpolation) drive the LFE reconstruction path and stay out
+    of scope until that path lands.
+  - `FilterBankSelection::coefficients() -> &'static [f64; 512]`
+    resolves the round-263 typed selector to the matching §D.8
+    table, completing the spec's two-line `prCoeff` assignment.
+  - `fir_step(&ra_x, pr_coeff, &mut ra_z)` executes the §C.2.5
+    "Multiply by filter coefficients" step: both
+    `for (k=31,i=0; i<32; i++,k--) for (j=0; j<512; j+=64)`
+    loops, accumulating `prCoeff[i+j]*(raX[i+j]-raX[j+k])` into
+    `raZ[0..32]` and `prCoeff[32+i+j]*(-raX[i+j]-raX[j+k])` into
+    `raZ[32..64]` (each of the 512 coefficients consumed exactly
+    once per call, 8 taps per output slot).
+  - 16 new in-module tests: verbatim anchor rows read
+    independently off both sides of every staged-PDF page seam
+    (p.238/239/.../246) plus the first / centre / last rows; exact
+    whole-table antisymmetry (`coeff[i] == -coeff[511-i]`, both
+    sets); finite/bounded values with the magnitude peak at the
+    255/256 centre; distinct-set check; the `FIR_COEFF_LEN` bound;
+    pointer-identity + `from_filts`-composition checks for
+    `coefficients()`; and for `fir_step` a bit-exact
+    line-for-line §C.2.5 reference comparison (ramp / alternating
+    / two pseudo-random registers × both §D.8 sets),
+    silent-register no-op, accumulate-not-overwrite
+    (reference-matched from a preloaded accumulator plus an exact
+    dyadic single-tap check), low-/high-half single-tap index
+    mapping, the 8-taps-per-output count, and exact power-of-two
+    linearity in the shift register.
+  - New re-exports at the crate root: `oxideav_dts::{fir_step,
+    FIR_COEFF_LEN, RA_COEFF_LOSSLESS, RA_COEFF_LOSSY}`. Total
+    in-module test count: 406 → 422 (`cargo test -p oxideav-dts
+    --lib`).
+  - With this round every per-sample step of the §C.2.5 loop body
+    exists as a public primitive (assemble → cos-mod → FIR → PCM
+    out → raX/raZ shifts); the remaining blockers for the fused
+    `QMFInterpolation()` driver are the output `rScale` value and
+    the `multirate_inter ↔ FILTS` polarity (both still docs
+    gaps).
+
+  No external library source consulted. No web search. Wall
+  respected per IMPLEMENTOR_ROUND.md guardrails. Trace material
+  read: ETSI TS 102 114 V1.3.1 Annex D §D.8 (staged PDF p.236-247
+  window, §D.8 table rows 0-511) and Annex C §C.2.5 as transcribed
+  in `docs/audio/dts/dts-core-extracts.md` §2.4; no other docs
+  file.
+
 - Round 274 (2026-06-11) — `write_pcm_output()`: the
   FIR-independent PCM-output step of the §C.2.5
   `QMFInterpolation()` per-sample loop body (ETSI TS 102 114 V1.3.1

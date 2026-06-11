@@ -20,7 +20,15 @@
 //!     //     Reads raXin[], raCosMod[], writes raX[0..32].
 //!
 //!     // (c) 512-tap FIR convolution against the §D.8 prCoeff set —
-//!     //     deferred until docs gap #9 closes.
+//!     //     this module's fir_step(). Reads raX[] and prCoeff
+//!     //     (FilterBankSelection::coefficients()), accumulates
+//!     //     into raZ[0..64].
+//!     for (k=31,i=0; i<32; i++,k--)
+//!         for (j=0; j<512; j+=64)
+//!             raZ[i]    += prCoeff[i+j]   *( raX[i+j]-raX[j+k]);
+//!     for (k=31,i=0; i<32; i++,k--)
+//!         for (j=0; j<512; j+=64)
+//!             raZ[32+i] += prCoeff[32+i+j]*(-raX[i+j]-raX[j+k]);
 //!
 //!     // (d) PCM output step — this module's write_pcm_output().
 //!     //     Reads raZ[0..32], scales by rScale, int()-casts, writes
@@ -29,8 +37,7 @@
 //!     for (i=0; i<32; i++) naCh[nChIndex++] = int(rScale*raZ[i]);
 //!
 //!     // (e) Per-sample shift-register update — this module's
-//!     //     shift_x_history() plus the still-deferred raZ[]
-//!     //     rotate (depends on (c)/(d)).
+//!     //     shift_x_history() and shift_z_output().
 //!     for (i=511; i>=32; i--)        raX[i]    = raX[i-32];
 //!     for (i=0; i<NumSubband; i++)   raZ[i]    = raZ[i+32];
 //!     for (i=0; i<NumSubband; i++)   raZ[i+32] = (real)0.0;
@@ -38,11 +45,13 @@
 //!
 //! Steps (a) and (e)'s `raX` shift only depend on `nSUBS`, the
 //! per-subband sample arrays, and the synthesis filter's `raX[]`
-//! shift register — they are entirely independent of the §D.8
-//! `raCoeffLossy` / `raCoeffLossLess` 512-tap FIR coefficient tables
-//! (still pending docs staging, round-208 docs gap #9). They can
-//! therefore be landed ahead of the FIR step that fuses them into
-//! the full driver.
+//! shift register. Step (c), [`fir_step`], convolves the §D.8
+//! `raCoeffLossy` / `raCoeffLossLess` 512-tap FIR coefficient
+//! tables ([`crate::RA_COEFF_LOSSY`] / [`crate::RA_COEFF_LOSSLESS`],
+//! selected through
+//! [`crate::FilterBankSelection::coefficients`]) against `raX[]`,
+//! accumulating into the `raZ[]` output accumulator the PCM step
+//! (d) reads.
 //!
 //! The `raZ[]` rotate at the end of step (e)
 //! ([`shift_z_output`]) operates on the §C.2.5 output accumulator
@@ -210,9 +219,8 @@ pub fn shift_x_history(ra_x: &mut [f64; X_HISTORY_LEN]) {
 ///
 /// This primitive reads no §D.8 `raCoeffLossy` / `raCoeffLossLess`
 /// FIR coefficients — it only rotates and clears the accumulator's
-/// content — so it ships ahead of the still-deferred FIR convolution
-/// step that fills `raZ[]` (round-208 docs gap #9 / OxideAV-docs
-/// issue #1357).
+/// content; the FIR convolution step that fills `raZ[]` is
+/// [`fir_step`].
 pub fn shift_z_output(ra_z: &mut [f64; Z_OUTPUT_LEN]) {
     // Loop 1: raZ[i] = raZ[i+32] for i in 0..32. The source range
     // [32, 64) and destination range [0, 32) are disjoint, so a
@@ -226,6 +234,63 @@ pub fn shift_z_output(ra_z: &mut [f64; Z_OUTPUT_LEN]) {
     // into a cleared region.
     for slot in ra_z.iter_mut().skip(NUM_SUBBAND) {
         *slot = 0.0;
+    }
+}
+
+/// 512-tap FIR convolution step (c) of the §C.2.5
+/// `QMFInterpolation()` per-sample loop body, per
+/// `dts-core-extracts.md` §2.4 (PDF p.185):
+///
+/// ```text
+///     // Multiply by filter coefficients
+///     for (k=31,i=0; i<32; i++,k--)
+///         for (j=0; j<512; j+=64)
+///             raZ[i]    += prCoeff[i+j]   *( raX[i+j]-raX[j+k]);
+///     for (k=31,i=0; i<32; i++,k--)
+///         for (j=0; j<512; j+=64)
+///             raZ[32+i] += prCoeff[32+i+j]*(-raX[i+j]-raX[j+k]);
+/// ```
+///
+/// `pr_coeff` is the §D.8 512-tap coefficient set the §C.2.5 `FILTS`
+/// branch selected — pass
+/// [`crate::FilterBankSelection::coefficients`]'s result
+/// ([`crate::RA_COEFF_LOSSY`] for `FILTS == 0`,
+/// [`crate::RA_COEFF_LOSSLESS`] otherwise). `ra_x` is the 512-entry
+/// shift register whose low block [`crate::cos_mod_stage`] just
+/// refreshed (steps (b)/(e)); `ra_z` is the 64-entry output
+/// accumulator this step **accumulates into** (`+=`, exactly as the
+/// pseudocode writes it — the rotate step [`shift_z_output`] cleared
+/// `raZ[32..64]` and carried the previous iteration's partials down
+/// into `raZ[0..32]`, so the accumulation across two consecutive
+/// per-sample iterations is what completes each output sample before
+/// [`write_pcm_output`] consumes it).
+///
+/// Index shape, faithful to the pseudocode's `(k=31-i, j += 64)`
+/// walk: the first loop reads `prCoeff[i + j]` (indices
+/// `{0..32} + {0, 64, …, 448}`, i.e. the even 32-blocks) into
+/// `raZ[0..32]`, the second reads `prCoeff[32 + i + j]` (the odd
+/// 32-blocks) into `raZ[32..64]`; together the 2 × 32 × 8 reads
+/// consume each of the 512 coefficients exactly once per call. Both
+/// loops difference the shift register at `raX[i+j]` against the
+/// mirrored slot `raX[j+k] = raX[j + 31 - i]` from the same
+/// 64-entry window.
+pub fn fir_step(
+    ra_x: &[f64; X_HISTORY_LEN],
+    pr_coeff: &[f64; X_HISTORY_LEN],
+    ra_z: &mut [f64; Z_OUTPUT_LEN],
+) {
+    let window = 2 * NUM_SUBBAND; // the spec's `j += 64` stride
+    for i in 0..NUM_SUBBAND {
+        let k = NUM_SUBBAND - 1 - i; // spec: k starts at 31, k-- per i++
+        for j in (0..X_HISTORY_LEN).step_by(window) {
+            ra_z[i] += pr_coeff[i + j] * (ra_x[i + j] - ra_x[j + k]);
+        }
+    }
+    for i in 0..NUM_SUBBAND {
+        let k = NUM_SUBBAND - 1 - i;
+        for j in (0..X_HISTORY_LEN).step_by(window) {
+            ra_z[NUM_SUBBAND + i] += pr_coeff[NUM_SUBBAND + i + j] * (-ra_x[i + j] - ra_x[j + k]);
+        }
     }
 }
 
@@ -283,10 +348,9 @@ pub const PCM_OUTPUT_PER_SAMPLE: usize = NUM_SUBBAND;
 /// FIR coefficients: it consumes the already-accumulated `raZ[0..32]`
 /// values, applies a scalar multiply + integer cast, and never
 /// touches the coefficient tables. It is therefore FIR-independent in
-/// the same way [`shift_z_output`] is, and lands as the companion of
-/// the accumulator rotate it precedes in the per-sample loop body
-/// (round-208 docs gap #9 / OxideAV-docs issue #1357 still gates the
-/// FIR step that fills `raZ[]`).
+/// the same way [`shift_z_output`] is, and is the companion of the
+/// accumulator rotate it precedes in the per-sample loop body; the
+/// FIR step that fills `raZ[]` is [`fir_step`].
 ///
 /// Returns `Err(QmfAssembleError::OutputSliceTooShort)` if `na_ch`
 /// does not have room for 32 samples starting at `n_ch_index` (the
@@ -803,6 +867,238 @@ mod tests {
         assert_eq!(ra_z[31], 1031.0);
         for v in ra_z.iter().skip(NUM_SUBBAND) {
             assert_eq!(*v, 0.0, "high block should be cleared after second rotate");
+        }
+    }
+
+    // -----------------------------------------------------------
+    // fir_step() — §C.2.5 512-tap FIR convolution step (c).
+    // -----------------------------------------------------------
+
+    /// Verbatim line-for-line transcription of the §C.2.5 FIR
+    /// pseudocode (C-style index walk with the paired `i++, k--`
+    /// updates and the `j += 64` stride), used as a bit-exact
+    /// reference against the production [`fir_step`].
+    fn reference_fir_step(
+        ra_x: &[f64; X_HISTORY_LEN],
+        pr_coeff: &[f64; X_HISTORY_LEN],
+        ra_z: &mut [f64; Z_OUTPUT_LEN],
+    ) {
+        // for (k=31,i=0; i<32; i++,k--)
+        //     for (j=0; j<512; j+=64)
+        //         raZ[i] += prCoeff[i+j] * ( raX[i+j]-raX[j+k]);
+        let mut k: isize = 31;
+        let mut i: isize = 0;
+        while i < 32 {
+            let mut j: isize = 0;
+            while j < 512 {
+                ra_z[i as usize] +=
+                    pr_coeff[(i + j) as usize] * (ra_x[(i + j) as usize] - ra_x[(j + k) as usize]);
+                j += 64;
+            }
+            i += 1;
+            k -= 1;
+        }
+        // for (k=31,i=0; i<32; i++,k--)
+        //     for (j=0; j<512; j+=64)
+        //         raZ[32+i] += prCoeff[32+i+j] * (-raX[i+j]-raX[j+k]);
+        let mut k: isize = 31;
+        let mut i: isize = 0;
+        while i < 32 {
+            let mut j: isize = 0;
+            while j < 512 {
+                ra_z[(32 + i) as usize] += pr_coeff[(32 + i + j) as usize]
+                    * (-ra_x[(i + j) as usize] - ra_x[(j + k) as usize]);
+                j += 64;
+            }
+            i += 1;
+            k -= 1;
+        }
+    }
+
+    /// Deterministic pseudo-random `raX[]` fill (multiplicative LCG;
+    /// no external randomness) spanning distinct signs/magnitudes.
+    fn pseudo_random_x(seed: u64) -> [f64; X_HISTORY_LEN] {
+        let mut state = seed;
+        let mut ra_x = [0.0_f64; X_HISTORY_LEN];
+        for slot in ra_x.iter_mut() {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            // Map the top 32 bits onto roughly [-1, 1).
+            *slot = ((state >> 32) as i64 - (1_i64 << 31)) as f64 / (1_i64 << 31) as f64;
+        }
+        ra_x
+    }
+
+    #[test]
+    fn fir_step_on_silent_register_leaves_accumulator_unchanged() {
+        // raX[] = 0 → every (raX[i+j] - raX[j+k]) term is zero; the
+        // accumulator (pre-loaded with sentinels) must be unchanged
+        // for both §D.8 coefficient sets.
+        use crate::fir_coeff::{RA_COEFF_LOSSLESS, RA_COEFF_LOSSY};
+        let ra_x = [0.0_f64; X_HISTORY_LEN];
+        for table in [&RA_COEFF_LOSSLESS, &RA_COEFF_LOSSY] {
+            let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+            for (i, slot) in ra_z.iter_mut().enumerate() {
+                *slot = 100.0 + i as f64;
+            }
+            let snapshot = ra_z;
+            fir_step(&ra_x, table, &mut ra_z);
+            assert_eq!(ra_z, snapshot, "silent raX must not move the accumulator");
+        }
+    }
+
+    #[test]
+    fn fir_step_accumulates_into_ra_z_instead_of_overwriting() {
+        // The pseudocode writes `raZ[…] += …`; pre-loaded partials
+        // from the previous per-sample iteration must survive and the
+        // accumulation must walk in the spec's order. Run both the
+        // production step and the verbatim reference from the SAME
+        // non-zero accumulator and require bit-identical results.
+        use crate::fir_coeff::RA_COEFF_LOSSLESS;
+        let ra_x = pseudo_random_x(7);
+        let mut got = [0.0_f64; Z_OUTPUT_LEN];
+        for (i, slot) in got.iter_mut().enumerate() {
+            *slot = 1000.0 + i as f64;
+        }
+        let preload = got;
+        let mut expected = got;
+        fir_step(&ra_x, &RA_COEFF_LOSSLESS, &mut got);
+        reference_fir_step(&ra_x, &RA_COEFF_LOSSLESS, &mut expected);
+        for i in 0..Z_OUTPUT_LEN {
+            assert_eq!(
+                got[i].to_bits(),
+                expected[i].to_bits(),
+                "raZ[{i}] mismatch vs reference on preloaded accumulator"
+            );
+            assert_ne!(
+                got[i], preload[i],
+                "raZ[{i}] must have received a contribution"
+            );
+        }
+        // Exact-arithmetic spot check: a single dyadic tap on a
+        // preloaded slot adds exactly.
+        let mut pr_coeff = [0.0_f64; X_HISTORY_LEN];
+        pr_coeff[64] = 1.0;
+        let mut ra_x = [0.0_f64; X_HISTORY_LEN];
+        ra_x[64] = 5.0;
+        ra_x[95] = 2.0;
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        ra_z[0] = 1000.0;
+        fir_step(&ra_x, &pr_coeff, &mut ra_z);
+        assert_eq!(ra_z[0], 1003.0, "raZ[0] = 1000.0 + 1.0*(5.0-2.0)");
+    }
+
+    #[test]
+    fn fir_step_matches_verbatim_reference_bit_exactly_on_both_d8_tables() {
+        // Bit-exact (to_bits) agreement with the line-for-line
+        // §C.2.5 transcription across ramp, alternating-sign, and
+        // pseudo-random raX[] fills, for both §D.8 sets.
+        use crate::fir_coeff::{RA_COEFF_LOSSLESS, RA_COEFF_LOSSY};
+        let mut ramp = [0.0_f64; X_HISTORY_LEN];
+        for (i, slot) in ramp.iter_mut().enumerate() {
+            *slot = (i as f64) * 0.001 - 0.25;
+        }
+        let mut alternating = [0.0_f64; X_HISTORY_LEN];
+        for (i, slot) in alternating.iter_mut().enumerate() {
+            *slot = if i % 2 == 0 { 1.0 } else { -1.0 };
+        }
+        let inputs = [ramp, alternating, pseudo_random_x(1), pseudo_random_x(42)];
+        for table in [&RA_COEFF_LOSSLESS, &RA_COEFF_LOSSY] {
+            for (n, ra_x) in inputs.iter().enumerate() {
+                let mut got = [0.0_f64; Z_OUTPUT_LEN];
+                let mut expected = [0.0_f64; Z_OUTPUT_LEN];
+                fir_step(ra_x, table, &mut got);
+                reference_fir_step(ra_x, table, &mut expected);
+                for i in 0..Z_OUTPUT_LEN {
+                    assert_eq!(
+                        got[i].to_bits(),
+                        expected[i].to_bits(),
+                        "raZ[{i}] mismatch vs reference on input #{n}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fir_step_low_half_tap_maps_pr_coeff_i_plus_j() {
+        // Isolate prCoeff[64]: it is read exactly once, by the first
+        // loop at (i=0, j=64, k=31), contributing
+        // prCoeff[64] * (raX[64] - raX[95]) to raZ[0].
+        let mut pr_coeff = [0.0_f64; X_HISTORY_LEN];
+        pr_coeff[64] = 1.0;
+        let mut ra_x = [0.0_f64; X_HISTORY_LEN];
+        ra_x[64] = 5.0;
+        ra_x[95] = 2.0; // j + k = 64 + 31
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        fir_step(&ra_x, &pr_coeff, &mut ra_z);
+        assert_eq!(ra_z[0], 3.0, "raZ[0] = prCoeff[64]*(raX[64]-raX[95])");
+        for (i, v) in ra_z.iter().enumerate().skip(1) {
+            assert_eq!(*v, 0.0, "raZ[{i}] must receive no contribution");
+        }
+    }
+
+    #[test]
+    fn fir_step_high_half_tap_maps_pr_coeff_32_plus_i_plus_j() {
+        // Isolate prCoeff[32]: it is read exactly once, by the second
+        // loop at (i=0, j=0, k=31), contributing
+        // prCoeff[32] * (-raX[0] - raX[31]) to raZ[32].
+        let mut pr_coeff = [0.0_f64; X_HISTORY_LEN];
+        pr_coeff[32] = 1.0;
+        let mut ra_x = [0.0_f64; X_HISTORY_LEN];
+        ra_x[0] = 2.0;
+        ra_x[31] = 3.0; // j + k = 0 + 31
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        fir_step(&ra_x, &pr_coeff, &mut ra_z);
+        assert_eq!(ra_z[32], -5.0, "raZ[32] = prCoeff[32]*(-raX[0]-raX[31])");
+        for (i, v) in ra_z.iter().enumerate() {
+            if i != 32 {
+                assert_eq!(*v, 0.0, "raZ[{i}] must receive no contribution");
+            }
+        }
+    }
+
+    #[test]
+    fn fir_step_uses_each_coefficient_exactly_eight_taps_per_output() {
+        // With prCoeff ≡ 1 and raX ≡ c: the first loop's terms are
+        // (c - c) = 0, so raZ[0..32] stays silent; the second loop's
+        // terms are (-c - c) = -2c, eight j-steps each, so
+        // raZ[32..64] = 8 * (-2c) = -16c — confirming the 8-tap
+        // (j = 0, 64, …, 448) walk per output slot.
+        let pr_coeff = [1.0_f64; X_HISTORY_LEN];
+        let ra_x = [0.5_f64; X_HISTORY_LEN];
+        let mut ra_z = [0.0_f64; Z_OUTPUT_LEN];
+        fir_step(&ra_x, &pr_coeff, &mut ra_z);
+        for (i, v) in ra_z.iter().enumerate().take(NUM_SUBBAND) {
+            assert_eq!(*v, 0.0, "raZ[{i}]: (c - c) terms must cancel");
+        }
+        for (i, v) in ra_z.iter().enumerate().skip(NUM_SUBBAND) {
+            assert_eq!(*v, -16.0 * 0.5, "raZ[{i}]: 8 taps of -2c expected");
+        }
+    }
+
+    #[test]
+    fn fir_step_is_linear_in_the_shift_register() {
+        // The step is a fixed linear map of raX[] (sums of products
+        // against constant coefficients); scaling the register by a
+        // power of two scales the accumulation exactly.
+        use crate::fir_coeff::RA_COEFF_LOSSY;
+        let ra_x = pseudo_random_x(99);
+        let mut doubled = ra_x;
+        for slot in doubled.iter_mut() {
+            *slot *= 2.0;
+        }
+        let mut z1 = [0.0_f64; Z_OUTPUT_LEN];
+        let mut z2 = [0.0_f64; Z_OUTPUT_LEN];
+        fir_step(&ra_x, &RA_COEFF_LOSSY, &mut z1);
+        fir_step(&doubled, &RA_COEFF_LOSSY, &mut z2);
+        for i in 0..Z_OUTPUT_LEN {
+            assert_eq!(
+                z2[i].to_bits(),
+                (2.0 * z1[i]).to_bits(),
+                "raZ[{i}]: doubling raX must exactly double the contribution"
+            );
         }
     }
 

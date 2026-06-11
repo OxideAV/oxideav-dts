@@ -19,22 +19,16 @@
 //! The two coefficient sets (`raCoeffLossy`, the *non-perfect
 //! reconstruction* 512-tap interpolation FIR, and `raCoeffLossLess`,
 //! the *perfect reconstruction* 512-tap interpolation FIR) are
-//! named in §D.8 "32-Band Interpolation and LFE Interpolation FIR"
-//! (staged PDF p.238); the numeric tables themselves are not yet
-//! transcribed under `docs/audio/dts/` (round-208 docs gap #9 —
-//! tracked separately). What §C.2.5 specifies normatively, and what
-//! this module captures, is the *selection* between the two named
-//! sets — a `FILTS` flag value of `0` picks the lossy set; any
-//! non-zero value picks the lossless set.
+//! defined in §D.8 "32-Band Interpolation and LFE Interpolation FIR"
+//! (staged PDF p.238-246) and transcribed at the crate
+//! root as [`crate::RA_COEFF_LOSSY`] / [`crate::RA_COEFF_LOSSLESS`].
 //!
 //! This module exposes the §C.2.5 selection step as a typed
 //! [`FilterBankSelection`] enum plus a [`FilterBankSelection::from_filts`]
-//! resolver that mirrors the spec's `if (FILTS==0) … else …` branch.
-//! It is independent of the §D.8 FIR coefficient tables (it only
-//! names the two sets, never reads any coefficient values), so it
-//! ships ahead of the full `QMFInterpolation()` driver alongside the
-//! other FIR-independent §C.2.5 primitives ([`crate::cos_mod_stage`],
-//! [`crate::assemble_xin`], [`crate::shift_x_history`]).
+//! resolver that mirrors the spec's `if (FILTS==0) … else …` branch,
+//! and [`FilterBankSelection::coefficients`] resolves the selection
+//! to the matching §D.8 512-tap table for the §C.2.5 FIR step
+//! ([`crate::fir_step`]).
 //!
 //! ## Relationship to the frame-header `multirate_inter` bit
 //!
@@ -63,10 +57,11 @@
 ///
 /// Each variant names exactly one of the two §D.8 "32-Band
 /// Interpolation and LFE Interpolation FIR" coefficient tables
-/// (PDF p.238); the actual table values are not transcribed under
-/// `docs/audio/dts/` yet (round-208 docs gap #9). The variant
-/// names mirror the spec pseudocode's identifiers (`raCoeffLossy`
-/// for the non-perfect set, `raCoeffLossLess` for the perfect set)
+/// (PDF p.238-246), transcribed as [`crate::RA_COEFF_LOSSY`] /
+/// [`crate::RA_COEFF_LOSSLESS`] and reachable through
+/// [`Self::coefficients`]. The variant names
+/// mirror the spec pseudocode's identifiers (`raCoeffLossy` for
+/// the non-perfect set, `raCoeffLossLess` for the perfect set)
 /// rendered in idiomatic Rust.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -135,6 +130,25 @@ impl FilterBankSelection {
         match self {
             FilterBankSelection::NonPerfectReconstruction => "raCoeffLossy",
             FilterBankSelection::PerfectReconstruction => "raCoeffLossLess",
+        }
+    }
+
+    /// The §D.8 512-tap coefficient table this selection picks —
+    /// the spec's `prCoeff` after the §C.2.5
+    /// `if (FILTS==0) prCoeff = raCoeffLossy; else prCoeff = raCoeffLossLess;`
+    /// assignment, ready for the FIR step ([`crate::fir_step`]).
+    ///
+    /// Returns [`crate::RA_COEFF_LOSSY`] (the §D.8 "Non-Perfect
+    /// Reconstruction" column) for
+    /// [`FilterBankSelection::NonPerfectReconstruction`] and
+    /// [`crate::RA_COEFF_LOSSLESS`] (the "Perfect Reconstruction"
+    /// column) for [`FilterBankSelection::PerfectReconstruction`],
+    /// both transcribed verbatim from the staged PDF p.238-246.
+    #[must_use]
+    pub fn coefficients(self) -> &'static [f64; crate::fir_coeff::FIR_COEFF_LEN] {
+        match self {
+            FilterBankSelection::NonPerfectReconstruction => &crate::fir_coeff::RA_COEFF_LOSSY,
+            FilterBankSelection::PerfectReconstruction => &crate::fir_coeff::RA_COEFF_LOSSLESS,
         }
     }
 }
@@ -240,6 +254,46 @@ mod tests {
             FilterBankSelection::NonPerfectReconstruction.spec_table_name(),
             FilterBankSelection::PerfectReconstruction.spec_table_name()
         );
+    }
+
+    // -----------------------------------------------------------
+    // coefficients — §D.8 table resolution.
+    // -----------------------------------------------------------
+
+    #[test]
+    fn coefficients_for_non_perfect_is_the_lossy_table() {
+        // Spec line 176: `if (FILTS==0) prCoeff = raCoeffLossy;` —
+        // the non-perfect variant resolves to the §D.8 "Non-Perfect
+        // Reconstruction" column.
+        assert!(core::ptr::eq(
+            FilterBankSelection::NonPerfectReconstruction.coefficients(),
+            &crate::fir_coeff::RA_COEFF_LOSSY,
+        ));
+    }
+
+    #[test]
+    fn coefficients_for_perfect_is_the_lossless_table() {
+        // Spec line 177: `else prCoeff = raCoeffLossLess;` — the
+        // perfect variant resolves to the §D.8 "Perfect
+        // Reconstruction" column.
+        assert!(core::ptr::eq(
+            FilterBankSelection::PerfectReconstruction.coefficients(),
+            &crate::fir_coeff::RA_COEFF_LOSSLESS,
+        ));
+    }
+
+    #[test]
+    fn coefficients_composed_with_from_filts_reproduces_the_spec_branch() {
+        // from_filts + coefficients together are the §C.2.5
+        // two-line `prCoeff` assignment.
+        assert!(core::ptr::eq(
+            FilterBankSelection::from_filts(0).coefficients(),
+            &crate::fir_coeff::RA_COEFF_LOSSY,
+        ));
+        assert!(core::ptr::eq(
+            FilterBankSelection::from_filts(1).coefficients(),
+            &crate::fir_coeff::RA_COEFF_LOSSLESS,
+        ));
     }
 
     // -----------------------------------------------------------
