@@ -5,6 +5,74 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 281 — §5.4.1 Primary Audio Coding Side Information subframe
+walker + TMODE codebooks (ETSI §5.4.1 Table 5-28 / §5.3.2 Table 5-23
+/ Annex D §D.5.2, staged PDF p.28-29 / p.26 / p.198).**
+Round 281 (2026-06-12) lands the §5.4 subframe walker's side-info
+half: the new
+[`decode_primary_side_info_at(bytes, bit_offset, params)`](crate::decode_primary_side_info_at)
+(`src/subframe.rs`) walks the §5.4.1 Table 5-28 "Core side
+information" block in the spec's exact field order — the round-249
+SSC/PSC prefix, then the PMODE plane (1 bit per `(ch, n)`, all
+channels before any later field), the PVQ plane
+(`nVQIndex = ExtractBits(12)` per PMODE-active subband), the ABITS
+plane (round-195 `BHUFF[ch]` codebook decode for `n < nVQSUB[ch]`),
+the TMODE plane (cleared to zero; decoded only when `nSSC > 1` and
+only where `ABITS > 0`), and the SCALES plane (round-195 `SHUFF[ch]`
+decode with the per-channel `nScaleSum = 0` reset, the transient
+second factor where `TMODE > 0`, and the "High frequency VQ
+subbands" tail loop sharing the same running accumulator) —
+returning a typed [`PrimarySideInfo`](crate::PrimarySideInfo) (one
+[`ChannelSideInfo`](crate::ChannelSideInfo) of fixed 32-slot
+pmode / pvq_index / abits / tmode / scales planes per channel) plus
+the consumed-bit count, whose cursor lands exactly on the un-walked
+Table 5-28 tail (`JOIN_SHUFF` onward). Inputs arrive as
+[`ChannelSideInfoParams`](crate::ChannelSideInfoParams) (`nSUBS` /
+`nVQSUB` bounds + the three codebook selectors), resolved by the
+caller from the §5.3.2 Table 5-21 header (whose decoder is a
+follow-up); the new constant
+[`MAX_PRIMARY_CHANNELS`](crate::MAX_PRIMARY_CHANNELS) (= 5)
+enforces the §5.3.2 `nPCHS = PCHS + 1 ≤ 5` cap (PDF p.25), and
+`nSUBS ≤ 32` / `nVQSUB ≤ nSUBS` violations surface as typed
+`Error::InvalidSideInfo` values before any bit is read. Enabling
+the TMODE plane, the round also transcribes the four Annex D §D.5.2
+"4 Levels (For TMODE)" Huffman codebooks (Tables A4/B4/C4/D4, PDF
+p.198) into `src/side_info.rs` with a new
+[`TmodeCodebook`](crate::TmodeCodebook) selector (`from_thuff` /
+`thuff`, total over the 2-bit Table 5-21 wire field per Table 5-23,
+PDF p.26) and the single-field
+[`decode_tmode_at`](crate::decode_tmode_at) entry point. Three
+Table 5-28 pieces stay out of scope, each blocked on a
+not-yet-transcribed Annex D table: the clause D.10.1 ADPCM
+prediction-coefficient VQ lookup (the raw 12-bit index is captured
+in `ChannelSideInfo::pvq_index` so it can be applied later without
+re-walking the bit stream), and the `JOIN_SHUFF` / `JOIN_SCALES`
+block plus the `RANGE` / `SICRC` tail (clause D.4 table). Nineteen
+new in-module tests: six in `src/side_info.rs` (THUFF dispatch rows
++ 256-value masking / round-trip; every symbol of all four §D.5.2
+codebooks; bit-offset + code-length reporting; the D4 raw-2-bit
+degeneration; EOF; plus A4..D4 joining the Kraft-equality sweep)
+and thirteen in `src/subframe.rs` (full single-channel linear walk
+with per-plane asserts + exact bit count; two-channel
+PMODE-plane-before-PVQ-plane ordering; TMODE decoded only when
+`nSSC > 1` and bits allocated, with the post-transient second scale
+factor; TMODE plane absent at `nSSC = 1`; Huffman ABITS + SCALES
+walk with the accumulator carrying into the HF-VQ tail; per-channel
+accumulator reset; 7-bit RMS routing; arbitrary-bit-offset
+equivalence; empty-channel-list prefix-only walk; `nPCHS` / `nSUBS`
+/ `VQSUB` rejections; mid-walk EOF; and a 32-subband full-width
+walk). New re-exports at the crate root:
+`oxideav_dts::{decode_primary_side_info_at, decode_tmode_at,
+ChannelSideInfo, ChannelSideInfoParams, PrimarySideInfo,
+TmodeCodebook, MAX_PRIMARY_CHANNELS}`. Total in-module test count:
+422 → 441 (`cargo test -p oxideav-dts --lib`). The
+`--no-default-features --lib` standalone build still passes. Scope:
+with this round the §5.4.1 side-info walk decodes end-to-end
+through SCALES; the §5.5 Table 5-29 audio-data array walk (SEL
+codebooks + dispatch into the landed §C.2.1 / §C.2.2 primitives),
+the Table 5-21 header decoder feeding this walker, and the D.10.1 /
+D.4 table transcriptions remain follow-ups.
+
 **Round 278 — §D.8 32-band interpolation FIR coefficient tables +
 `fir_step()` FIR convolution (ETSI Annex D §D.8 / Annex C §C.2.5,
 staged PDF p.238-246 / p.185).**

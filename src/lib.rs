@@ -427,6 +427,7 @@ mod iter;
 mod joint_subband;
 mod qmf_assemble;
 mod side_info;
+mod subframe;
 mod sum_diff;
 mod unpack14;
 
@@ -464,8 +465,13 @@ pub use crate::qmf_assemble::{
     PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,
 };
 pub use crate::side_info::{
-    decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, AbitsCodebook,
-    ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, RMS_6BIT, RMS_7BIT,
+    decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, decode_tmode_at,
+    AbitsCodebook, ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, TmodeCodebook,
+    RMS_6BIT, RMS_7BIT,
+};
+pub use crate::subframe::{
+    decode_primary_side_info_at, ChannelSideInfo, ChannelSideInfoParams, PrimarySideInfo,
+    MAX_PRIMARY_CHANNELS,
 };
 pub use crate::sum_diff::{
     front_sum_difference_required, sum_difference_decode_f64, sum_difference_decode_i32,
@@ -545,23 +551,29 @@ pub enum Error {
     /// A Primary Audio Coding Side Information field
     /// (§5.4.1 Table 5-28) carried a value the ETSI spec marks as
     /// reserved/invalid: a `BHUFF` / `SHUFF` selector equal to `7`,
-    /// or a `SCALES` accumulator that walked outside the documented
+    /// a `SCALES` accumulator that walked outside the documented
     /// range of the §D.1.1 / §D.1.2 RMS square-root table (e.g.
     /// index 63 in the 6-bit table, or indices 125..=127 in the
-    /// 7-bit table, both written as "invalid" in the staged PDF).
+    /// 7-bit table, both written as "invalid" in the staged PDF),
+    /// or a [`crate::decode_primary_side_info_at`] loop bound
+    /// outside its §5.3.2 range (`"nPCHS"` above 5 per PDF p.25,
+    /// `"nSUBS"` above the `NumSubband = 32` cap, or `"VQSUB"`
+    /// above the channel's `nSUBS`).
     InvalidSideInfo {
         /// Static name of the offending side-info field: `"BHUFF"`,
-        /// `"SHUFF"`, or `"SCALES"`.
+        /// `"SHUFF"`, `"SCALES"`, `"nPCHS"`, `"nSUBS"`, or
+        /// `"VQSUB"`.
         field: &'static str,
         /// The reserved value the bit stream carried.
         value: u32,
     },
     /// The bit stream's prefix did not match any entry in the named
     /// Annex D Huffman codebook (`A12`, `B12`, `C12`, `D12`, `E12`,
-    /// `A5`, `B5`, `C5`, `A7`, `B7`) within the maximum documented
-    /// code length. Surfaced by [`crate::decode_abits`] and
-    /// [`crate::decode_scales`] when the input is structurally
-    /// corrupt or the wrong codebook was selected upstream.
+    /// `A5`, `B5`, `C5`, `A7`, `B7`, `A4`, `B4`, `C4`, `D4`) within
+    /// the maximum documented code length. Surfaced by the ABITS /
+    /// SCALES / TMODE side-info decoders when the input is
+    /// structurally corrupt or the wrong codebook was selected
+    /// upstream.
     HuffmanDecodeFailed {
         /// Static name of the codebook that failed to match.
         table: &'static str,

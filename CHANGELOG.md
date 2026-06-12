@@ -8,6 +8,38 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 281 (2026-06-12) — §5.4.1 Primary Audio Coding Side
+  Information subframe walker + TMODE codebooks: composes the
+  round-249 SSC/PSC prefix, the round-195 ABITS / SCALES decoders,
+  and the new TMODE decoder into the §5.4.1 Table 5-28 decode walk
+  (staged ETSI TS 102 114 V1.3.1 PDF p.28-29).
+  - New module `src/subframe.rs` with
+    `decode_primary_side_info_at(bytes, bit_offset, params)`
+    walking, in Table 5-28's exact field order: the SSC/PSC prefix,
+    the PMODE plane (1 bit per `(ch, n)`), the PVQ plane (12-bit
+    `nVQIndex` per PMODE-active subband; the clause D.10.1
+    coefficient lookup is deferred and the raw index is captured),
+    the ABITS plane (`BHUFF[ch]` codebook, `n < nVQSUB[ch]`), the
+    TMODE plane (decoded only when `nSSC > 1` and `ABITS > 0`), and
+    the SCALES plane (per-channel `nScaleSum = 0` reset, transient
+    second factor where `TMODE > 0`, high-frequency-VQ tail loop on
+    the same running accumulator). Returns a typed
+    `PrimarySideInfo` / `ChannelSideInfo` (fixed 32-slot planes)
+    plus the consumed-bit count; the cursor lands on the un-walked
+    `JOIN_SHUFF`-onward tail (blocked on the clause D.4 table).
+  - New `ChannelSideInfoParams` input struct (`nSUBS` / `nVQSUB`
+    bounds + codebook selectors, resolved by the caller from the
+    §5.3.2 Table 5-21 header) and `MAX_PRIMARY_CHANNELS = 5`
+    (§5.3.2 `nPCHS = PCHS + 1 ≤ 5`, PDF p.25); bound violations
+    surface as `Error::InvalidSideInfo` with fields `"nPCHS"` /
+    `"nSUBS"` / `"VQSUB"` before any bit is read.
+  - New `TmodeCodebook` selector (§5.3.2 Table 5-23, PDF p.26;
+    total over the 2-bit `THUFF[ch]` wire field) and
+    `decode_tmode_at` single-field decoder backed by the Annex D
+    §D.5.2 "4 Levels (For TMODE)" Huffman codebooks A4/B4/C4/D4
+    transcribed verbatim from the staged PDF p.198.
+  - Nineteen new in-module tests (six TMODE-side, thirteen
+    walker-side); total lib test count 422 → 441.
 - Round 278 (2026-06-11) — §D.8 32-band interpolation FIR
   coefficient tables + `fir_step()`: closes round-208 docs gap #9
   by transcribing the two 512-tap `prCoeff` sets from the staged

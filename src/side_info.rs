@@ -300,6 +300,133 @@ pub(crate) fn decode_abits(br: &mut BitReader<'_>, codebook: AbitsCodebook) -> R
 }
 
 // ---------------------------------------------------------------
+// Table 5-23 — Selection of Huffman Codebook for Encoding TMODE
+// (THUFF[ch] selector, §5.3.2 / staged PDF p.26).
+// ---------------------------------------------------------------
+//
+// | THUFF[ch] | Huffman Codebook |
+// | --------- | ---------------- |
+// |     0     | A4               |
+// |     1     | B4               |
+// |     2     | C4               |
+// |     3     | D4               |
+//
+// THUFF[ch] is a 2-bit wire field — the §5.3.2 Table 5-21 Core audio
+// coding header pseudocode (staged PDF p.24) reads
+// `THUFF[ch] = ExtractBits(2);` ("2 bits per channel") — so all four
+// wire values resolve to a documented codebook. Unlike BHUFF/SHUFF
+// there is no reserved/invalid row, and the resolver below is total
+// over the masked 2-bit input.
+
+/// Codebook selector for the transient-mode (TMODE) field, per §5.3.2
+/// Table 5-23 (staged PDF p.26). All four 2-bit `THUFF[ch]` values
+/// are valid (no reserved row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TmodeCodebook {
+    /// `THUFF=0` — Annex D §D.5.2 Table A4 (Huffman, 4 levels).
+    A4,
+    /// `THUFF=1` — Annex D §D.5.2 Table B4 (Huffman, 4 levels).
+    B4,
+    /// `THUFF=2` — Annex D §D.5.2 Table C4 (Huffman, 4 levels).
+    C4,
+    /// `THUFF=3` — Annex D §D.5.2 Table D4 (Huffman, 4 levels —
+    /// every code is 2 bits, so this variant is equivalent to a raw
+    /// 2-bit read).
+    D4,
+}
+
+impl TmodeCodebook {
+    /// Resolve a raw 2-bit `THUFF[ch]` field to a codebook variant
+    /// per Table 5-23. Only the low 2 bits of the input are
+    /// consulted (matching the `ExtractBits(2)` wire width fixed by
+    /// Table 5-21), so the mapping is total.
+    pub fn from_thuff(thuff: u8) -> Self {
+        match thuff & 0b11 {
+            0 => Self::A4,
+            1 => Self::B4,
+            2 => Self::C4,
+            _ => Self::D4,
+        }
+    }
+
+    /// The canonical 2-bit `THUFF[ch]` wire value for this variant
+    /// (the inverse of [`Self::from_thuff`]).
+    pub fn thuff(self) -> u8 {
+        match self {
+            Self::A4 => 0,
+            Self::B4 => 1,
+            Self::C4 => 2,
+            Self::D4 => 3,
+        }
+    }
+}
+
+// ---------------------------------------------------------------
+// Annex D §D.5.2 — "4 Levels (For TMODE)" Huffman codebooks.
+// Transcribed verbatim from the staged PDF p.198.
+// ---------------------------------------------------------------
+
+/// Annex D §D.5.2 Table A4.
+const TABLE_A4: &[HuffmanEntry] = &[(0, 1, 0), (1, 2, 2), (2, 3, 6), (3, 3, 7)];
+
+/// Annex D §D.5.2 Table B4.
+const TABLE_B4: &[HuffmanEntry] = &[(0, 2, 2), (1, 3, 6), (2, 3, 7), (3, 1, 0)];
+
+/// Annex D §D.5.2 Table C4.
+const TABLE_C4: &[HuffmanEntry] = &[(0, 3, 6), (1, 3, 7), (2, 1, 0), (3, 2, 2)];
+
+/// Annex D §D.5.2 Table D4. All four codes are 2 bits and equal
+/// their quantization level, so this codebook degenerates to a raw
+/// 2-bit field.
+const TABLE_D4: &[HuffmanEntry] = &[(0, 2, 0), (1, 2, 1), (2, 2, 2), (3, 2, 3)];
+
+/// Decode a single TMODE field from the bit stream given the
+/// channel-wide `THUFF[ch]` codebook selector. Implements the THUFF
+/// dispatch in §5.4.1 Table 5-28 (staged PDF p.28):
+///
+/// ```text
+/// nQSelect = THUFF[ch];
+/// for (n=0; n<nVQSUB[ch]; n++)   // No VQ encoded subbands
+///   if ( ABITS[ch][n] > 0 )      // Present only if bits allocated
+///     QTMODE.ppQ[nQSelect]->InverseQ(InputFrame, TMODE[ch][n]);
+/// ```
+///
+/// Returns `(tmode, bits_consumed)` where `tmode` is in `0..=3`:
+/// `0` means no transient in the subframe for this subband, and a
+/// non-zero value means the transition occurred in subsubframe
+/// `TMODE[ch][n] + 1` (PDF p.30 field description). The
+/// `ABITS[ch][n] > 0` / `nSSC > 1` transmission conditions are the
+/// caller's responsibility (see PDF p.30: TMODE is not transmitted
+/// when only one subsubframe is present, for VQ-encoded high-
+/// frequency subbands, or for subbands without bit allocation).
+pub fn decode_tmode_at(
+    bytes: &[u8],
+    bit_offset: usize,
+    codebook: TmodeCodebook,
+) -> Result<(u8, usize)> {
+    let byte_offset = bit_offset / 8;
+    let intra_byte = bit_offset % 8;
+    let mut br = BitReader::from_byte_offset(bytes, byte_offset);
+    if intra_byte > 0 {
+        br.read_bits(intra_byte as u32)?;
+    }
+    let start = bit_offset;
+    let value = decode_tmode(&mut br, codebook)?;
+    let bits_consumed = br.absolute_bit_position() - start;
+    Ok((value, bits_consumed))
+}
+
+pub(crate) fn decode_tmode(br: &mut BitReader<'_>, codebook: TmodeCodebook) -> Result<u8> {
+    let (table, name) = match codebook {
+        TmodeCodebook::A4 => (TABLE_A4, "A4"),
+        TmodeCodebook::B4 => (TABLE_B4, "B4"),
+        TmodeCodebook::C4 => (TABLE_C4, "C4"),
+        TmodeCodebook::D4 => (TABLE_D4, "D4"),
+    };
+    decode_huffman(br, table, name).map(|s| s as u8)
+}
+
+// ---------------------------------------------------------------
 // Table 5-24 — Code Books and Square Root Tables for Scale Factors
 // (SHUFF[ch] selector, §5.3.x).
 // ---------------------------------------------------------------
@@ -1101,6 +1228,10 @@ mod tests {
             ("C5", TABLE_C5),
             ("A7", TABLE_A7),
             ("B7", TABLE_B7),
+            ("A4", TABLE_A4),
+            ("B4", TABLE_B4),
+            ("C4", TABLE_C4),
+            ("D4", TABLE_D4),
         ] {
             let kraft: f64 = table
                 .iter()
@@ -1111,6 +1242,91 @@ mod tests {
                 "codebook {name} fails Kraft equality (sum = {kraft})",
             );
         }
+    }
+
+    // -----------------------------------------------------------
+    // THUFF / TMODE decode tests
+    // -----------------------------------------------------------
+
+    #[test]
+    fn thuff_dispatch_resolves_all_four_documented_codes() {
+        // Cover the full {0..=3} grid of Table 5-23.
+        assert_eq!(TmodeCodebook::from_thuff(0), TmodeCodebook::A4);
+        assert_eq!(TmodeCodebook::from_thuff(1), TmodeCodebook::B4);
+        assert_eq!(TmodeCodebook::from_thuff(2), TmodeCodebook::C4);
+        assert_eq!(TmodeCodebook::from_thuff(3), TmodeCodebook::D4);
+    }
+
+    #[test]
+    fn thuff_dispatch_masks_high_bits_and_round_trips() {
+        // Only the low 2 bits are consulted (Table 5-21 fixes the
+        // wire width at ExtractBits(2)); every u8 input resolves to
+        // the variant of its low 2 bits, and thuff() inverts it.
+        for raw in 0..=u8::MAX {
+            let cb = TmodeCodebook::from_thuff(raw);
+            assert_eq!(cb, TmodeCodebook::from_thuff(raw & 0b11));
+            assert_eq!(cb.thuff(), raw & 0b11);
+            assert_eq!(TmodeCodebook::from_thuff(cb.thuff()), cb);
+        }
+    }
+
+    #[test]
+    fn decode_tmode_every_codebook_walks_every_symbol() {
+        // Each of A4/B4/C4/D4 must round-trip every symbol it lists
+        // (the four §D.5.2 tables, staged PDF p.198).
+        for (cb, table) in [
+            (TmodeCodebook::A4, TABLE_A4),
+            (TmodeCodebook::B4, TABLE_B4),
+            (TmodeCodebook::C4, TABLE_C4),
+            (TmodeCodebook::D4, TABLE_D4),
+        ] {
+            let codes: Vec<(u16, u8)> = table.iter().map(|&(_, l, c)| (c, l)).collect();
+            let stream = pack_codes(&codes);
+            let mut br = BitReader::new(&stream);
+            for &(expected_symbol, _, _) in table {
+                let got = decode_tmode(&mut br, cb).unwrap();
+                assert_eq!(
+                    got as i16, expected_symbol,
+                    "codebook {:?} mis-decoded symbol {}",
+                    cb, expected_symbol
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn decode_tmode_at_reports_code_length_and_offset_handling() {
+        // A4's symbol 0 is the 1-bit code `0`; symbol 3 is the
+        // 3-bit code `111`. Pack `0` then `111` then `10` (= symbol
+        // 1) back-to-back starting at bit offset 3 after three
+        // leading filler 1-bits: 0b111_0_111_1, 0b0_0000000.
+        let stream = [0b1110_1111, 0b0000_0000];
+        let (s0, used0) = decode_tmode_at(&stream, 3, TmodeCodebook::A4).unwrap();
+        assert_eq!((s0, used0), (0, 1));
+        let (s1, used1) = decode_tmode_at(&stream, 4, TmodeCodebook::A4).unwrap();
+        assert_eq!((s1, used1), (3, 3));
+        let (s2, used2) = decode_tmode_at(&stream, 7, TmodeCodebook::A4).unwrap();
+        assert_eq!((s2, used2), (1, 2));
+    }
+
+    #[test]
+    fn decode_tmode_d4_is_a_raw_two_bit_field() {
+        // Table D4 maps every 2-bit code to itself; one byte packs
+        // four consecutive symbols 0b00_01_10_11 -> 0, 1, 2, 3.
+        let stream = [0b0001_1011];
+        let mut br = BitReader::new(&stream);
+        for expected in 0..=3u8 {
+            assert_eq!(decode_tmode(&mut br, TmodeCodebook::D4).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn decode_tmode_short_buffer_surfaces_eof() {
+        let stream: [u8; 0] = [];
+        assert_eq!(
+            decode_tmode_at(&stream, 0, TmodeCodebook::B4).unwrap_err(),
+            Error::UnexpectedEof
+        );
     }
 
     // -----------------------------------------------------------
