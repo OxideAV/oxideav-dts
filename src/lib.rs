@@ -426,6 +426,7 @@ mod inverse_adpcm;
 mod iter;
 mod joint_subband;
 mod qmf_assemble;
+mod qmf_synth;
 mod side_info;
 mod subframe;
 mod sum_diff;
@@ -464,6 +465,7 @@ pub use crate::qmf_assemble::{
     assemble_xin, fir_step, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
     PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,
 };
+pub use crate::qmf_synth::QmfSynthesis;
 pub use crate::side_info::{
     decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, decode_tmode_at,
     AbitsCodebook, ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, TmodeCodebook,

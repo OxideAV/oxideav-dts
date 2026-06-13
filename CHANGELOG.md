@@ -8,6 +8,46 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 286 (2026-06-13) — fused 32-band synthesis QMF driver
+  (§C.2.5 `QMFInterpolation()` per-channel outer loop, staged ETSI
+  TS 102 114 V1.3.1 Annex C §C.2.5, PDF p.185 / `dts-core-extracts.md`
+  §2.4). New module `src/qmf_synth.rs` composes the previously-landed
+  FIR-independent per-sample primitives — `assemble_xin` (step a),
+  `cos_mod_stage` (step b), `fir_step` (step c), `write_pcm_output`
+  (step d), and `shift_x_history` / `shift_z_output` (step e) — into
+  the complete §C.2.5 outer loop.
+  - New `QmfSynthesis` per-channel filter object owns the persistent
+    §C.2.5 `raX[]` (512-tap shift register) and `raZ[]` (64-entry
+    output accumulator) state plus a precomputed 544-entry
+    `raCosMod[]` matrix; `QmfSynthesis::new` clears the history
+    (matching the per-channel filter's pre-first-subframe state).
+  - `QmfSynthesis::synthesize(subband_samples, n_subs, filter,
+    r_scale, output)` runs the per-sample loop over one block of
+    subband sample rows (one `f64`-per-subband vector per
+    `nSubIndex`), appending exactly 32 reconstructed PCM samples per
+    row to `output`, and persists the updated `raX[]` / `raZ[]` for
+    the channel's next subframe. The §D.8 `prCoeff` table is selected
+    once from the resolved `FILTS` branch
+    (`FilterBankSelection::coefficients`) and threaded into every
+    per-sample FIR step, exactly as the spec hoists the
+    `prCoeff = …` assignment out of the loop. `n_subs > 32` surfaces
+    as `QmfAssembleError::SubsOutOfRange` before any sample runs.
+  - `x_history()` / `z_accumulator()` borrow the live `raX[]` /
+    `raZ[]` state for checkpoint/inspection.
+  - New crate-root re-export `oxideav_dts::QmfSynthesis`.
+  - Eight in-module tests: cleared-history construction; 32-PCM-per-
+    row count; all-zero-input → all-zero-PCM for both filter
+    selections; fused driver byte-identical to a hand-composed
+    per-sample loop over an impulse input (pins the composition as
+    faithful with no hidden reordering); split-call equals single
+    concatenated call (inter-subframe `raX[]` tail carries across
+    `synthesize` calls); `n_subs > 32` rejection with untouched
+    state; empty-input no-op; and `n_subs = 0` full-silence.
+  - The §C.2.5 `rScale` output multiplier stays a caller-supplied
+    parameter — the staged clause uses `rScale` in the PCM step
+    without assigning it inside `QMFInterpolation()`, so its
+    derivation is a documented docs gap (carried from the round-255
+    `write_pcm_output` note).
 - Round 281 (2026-06-12) — §5.4.1 Primary Audio Coding Side
   Information subframe walker + TMODE codebooks: composes the
   round-249 SSC/PSC prefix, the round-195 ABITS / SCALES decoders,

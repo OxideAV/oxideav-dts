@@ -5,6 +5,47 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 286 — fused 32-band synthesis QMF driver (ETSI Annex C
+§C.2.5 `QMFInterpolation()`, staged PDF p.185 /
+`dts-core-extracts.md` §2.4).**
+Round 286 (2026-06-13) fuses the previously-landed FIR-independent
+per-sample primitives —
+[`assemble_xin`](crate::assemble_xin) (step a),
+[`cos_mod_stage`](crate::cos_mod_stage) (step b),
+[`fir_step`](crate::fir_step) (step c),
+[`write_pcm_output`](crate::write_pcm_output) (step d), and
+[`shift_x_history`](crate::shift_x_history) /
+[`shift_z_output`](crate::shift_z_output) (step e) — into the
+complete §C.2.5 `QMFInterpolation()` per-channel outer loop. The new
+[`QmfSynthesis`](crate::QmfSynthesis) (`src/qmf_synth.rs`) is the
+spec's persistent per-channel `aPrmCh[ch]` filter object: it owns the
+512-tap `raX[]` shift register, the 64-entry `raZ[]` output
+accumulator, and a precomputed 544-entry `raCosMod[]` matrix, and
+clears the history at [`QmfSynthesis::new`](crate::QmfSynthesis::new)
+(the per-channel filter's pre-first-subframe state).
+[`QmfSynthesis::synthesize(subband_samples, n_subs, filter, r_scale,
+output)`](crate::QmfSynthesis::synthesize) runs the per-sample loop
+over one block of subband sample rows (one `f64`-per-subband vector
+per `nSubIndex`), appends exactly 32 reconstructed PCM samples per
+row, and **persists the updated `raX[]` / `raZ[]` across calls** so a
+channel's inter-subframe filter tail carries correctly (pinned by a
+split-call-equals-concatenated-call test). The §D.8 `prCoeff` table
+is selected once from the resolved `FILTS` branch
+([`FilterBankSelection::coefficients`](crate::FilterBankSelection::coefficients))
+and threaded into every per-sample FIR step, exactly as the spec
+hoists the `prCoeff = …` assignment out of the loop. A
+fused-equals-hand-composed-loop test pins the driver as a faithful
+composition with no hidden reordering. The §C.2.5 `rScale` output
+multiplier stays a caller-supplied parameter (the staged clause uses
+it without assigning it inside `QMFInterpolation()` — a documented
+docs gap). New crate-root re-export
+[`QmfSynthesis`](crate::QmfSynthesis); eight in-module tests
+(441 → 449, `cargo test -p oxideav-dts --lib`). With the QMF driver
+landed, the remaining decode work toward PCM is the §5.5 audio-data
+array reconstruction (subband-sample decode from the staged block
+codes + scales + ADPCM) and the Table 5-21 header decoder feeding
+the §5.4.1 walker.
+
 **Round 281 — §5.4.1 Primary Audio Coding Side Information subframe
 walker + TMODE codebooks (ETSI §5.4.1 Table 5-28 / §5.3.2 Table 5-23
 / Annex D §D.5.2, staged PDF p.28-29 / p.26 / p.198).**
