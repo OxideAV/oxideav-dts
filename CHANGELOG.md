@@ -8,6 +8,34 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 293 (2026-06-14) — §D.2 quantization step-size tables + §5.5
+  inverse-quantization scale composition (staged ETSI TS 102 114
+  V1.3.1 Annex D §D.2.1 / §D.2.2, PDF p.193-194, and §5.5 Table 5-29
+  `Audio Data`, PDF p.31-32). New module `src/step_size.rs` is the
+  dequantization bridge from the §C.2.1 / Annex D Huffman `AUDIO[m]`
+  quantization indices to the §C.2.2 / §C.2.5 reconstruction inputs.
+  - `STEP_SIZE_LOSSY` (§D.2.1) and `STEP_SIZE_LOSSLESS` (§D.2.2),
+    32-entry `Step-size × 2²²` integer tables indexed by `ABITS`
+    (indices `0..=26` defined; `27..=31` reserved). `StepSizeTable`
+    enum with `for_rate(rate)` (the §5.5 `RATE == 0x1f` lossless
+    selector) and `step_size(abits)` (undoes the `× 2²²` scaling).
+  - `transient_scale_index(tmode, n_ssc, subsubframe)` — the §5.5
+    `nTmode == 0 → nSSC` / pre-vs-post-transient scale-factor split.
+  - `dequant_scale(table, abits, scale, adj)` — the §5.5
+    `rScale = rStepSize · SCALES · arADJ` composition (`adj` reuses
+    the round-241 `ScaleFactorAdjustment`).
+  - `scale_subsubframe_samples(audio, r_scale, out)` — the §5.5
+    eight-sample `aSample[m] = rScale · AUDIO[m]` scaling.
+  - `dequant_subsubframe(side, n, n_ssc, subsubframe, table, adj,
+    audio, out)` — fused end-to-end one-subsubframe driver reading
+    `abits` / `tmode` / `scales` off the round-281 `ChannelSideInfo`.
+  - New `Error::InvalidStepSize { abits }` (reserved/out-of-range
+    `ABITS`) and `Error::SampleCountMismatch { expected, found }`
+    (non-eight-sample subwindow), both mapped to `CoreError::InvalidData`.
+  - 14 in-module tests cross-check the §D.2 nominal column, the
+    transient split, the zero-step `ABITS 0` path, and the
+    end-to-end driver (449 → 463 lib tests).
+
 - Round 286 (2026-06-13) — fused 32-band synthesis QMF driver
   (§C.2.5 `QMFInterpolation()` per-channel outer loop, staged ETSI
   TS 102 114 V1.3.1 Annex C §C.2.5, PDF p.185 / `dts-core-extracts.md`

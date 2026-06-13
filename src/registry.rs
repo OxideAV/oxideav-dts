@@ -74,6 +74,15 @@ impl From<DtsError> for CoreError {
             DtsError::BlockCodeLevelsOutOfRange { .. } | DtsError::BlockCodeResidual { .. } => {
                 CoreError::InvalidData(e.to_string())
             }
+            // Round 293 §D.2 / §5.5 dequantization errors. A reserved
+            // `ABITS` step-size index (`27..=31`) indicates a corrupt
+            // bit stream (the §5.5 `Audio Data` block only ever selects
+            // a quantizer for a defined `ABITS`), so `InvalidData`; the
+            // §5.5 eight-sample shape-mismatch is the same caller-side
+            // slice-shape violation as the §C.2.x variants above.
+            DtsError::InvalidStepSize { .. } | DtsError::SampleCountMismatch { .. } => {
+                CoreError::InvalidData(e.to_string())
+            }
         }
     }
 }

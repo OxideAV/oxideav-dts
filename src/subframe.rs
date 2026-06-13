@@ -129,7 +129,7 @@ pub struct ChannelSideInfo {
 }
 
 impl ChannelSideInfo {
-    fn cleared() -> Self {
+    pub(crate) fn cleared() -> Self {
         Self {
             pmode: [0; NUM_SUBBAND],
             pvq_index: [None; NUM_SUBBAND],

@@ -428,6 +428,7 @@ mod joint_subband;
 mod qmf_assemble;
 mod qmf_synth;
 mod side_info;
+mod step_size;
 mod subframe;
 mod sum_diff;
 mod unpack14;
@@ -470,6 +471,11 @@ pub use crate::side_info::{
     decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, decode_tmode_at,
     AbitsCodebook, ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, TmodeCodebook,
     RMS_6BIT, RMS_7BIT,
+};
+pub use crate::step_size::{
+    dequant_scale, dequant_subsubframe, scale_subsubframe_samples, transient_scale_index,
+    StepSizeTable, RATE_LOSSLESS, SAMPLES_PER_SUBSUBFRAME, STEP_SIZE_FIRST_INVALID,
+    STEP_SIZE_LOSSLESS, STEP_SIZE_LOSSY, STEP_SIZE_SCALE_SHIFT, STEP_SIZE_TABLE_LEN,
 };
 pub use crate::subframe::{
     decode_primary_side_info_at, ChannelSideInfo, ChannelSideInfoParams, PrimarySideInfo,
@@ -648,6 +654,27 @@ pub enum Error {
         /// Quantisation-level count passed to the decoder.
         n_levels: u32,
     },
+    /// An `ABITS` bit-allocation index passed to the §D.2
+    /// quantization-step-size lookup ([`crate::StepSizeTable::step_size`]
+    /// or a `dequant_*` composer) was one of the `27..=31` indices the
+    /// staged §D.2.1 / §D.2.2 tables write "invalid" (PDF p.193-194),
+    /// or was `>= 32`. A defined `ABITS` index is `0..=26`.
+    InvalidStepSize {
+        /// The reserved / out-of-range `ABITS` index.
+        abits: u8,
+    },
+    /// A slice argument to a §5.5 subsubframe dequantizer
+    /// ([`crate::scale_subsubframe_samples`] /
+    /// [`crate::dequant_subsubframe`]) was not exactly
+    /// [`crate::SAMPLES_PER_SUBSUBFRAME`] (= 8) samples long. The §5.5
+    /// `Audio Data` block scales one subband analysis subwindow of
+    /// eight samples per call (PDF p.31-32).
+    SampleCountMismatch {
+        /// The number of samples the §5.5 loop requires (always 8).
+        expected: usize,
+        /// The slice length the caller actually supplied.
+        found: usize,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -733,6 +760,16 @@ impl core::fmt::Display for Error {
                 "oxideav-dts: §C.2.1 block-code decode residual {residual} != 0 \
                  after extracting {n_elements} element(s) from a base-{n_levels} \
                  block (code-word out of range for the declared block dimensions)"
+            ),
+            Error::InvalidStepSize { abits } => write!(
+                f,
+                "oxideav-dts: §D.2 quantization step-size lookup: ABITS index \
+                 {abits} is reserved/invalid (defined range is 0..=26)"
+            ),
+            Error::SampleCountMismatch { expected, found } => write!(
+                f,
+                "oxideav-dts: §5.5 subsubframe dequantization expects {expected} \
+                 samples per subband analysis subwindow, got {found}"
             ),
         }
     }

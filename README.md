@@ -5,6 +5,44 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 293 — §D.2 quantization step-size tables + §5.5 inverse-
+quantization scale composition (ETSI Annex D §D.2.1 / §D.2.2, staged
+PDF p.193-194, and §5.5 Table 5-29 `Audio Data`, staged PDF
+p.31-32).**
+Round 293 (2026-06-14) lands the dequantization bridge between the
+quantization-index decode (the §C.2.1 block-code / Annex D Huffman
+`AUDIO[m]` indices) and the §C.2.2 inverse-ADPCM / §C.2.5 QMF
+synthesis inputs. The new `src/step_size.rs` transcribes the two §D.2
+step-size tables verbatim as `Step-size × 2²²` integers —
+[`STEP_SIZE_LOSSY`](crate::STEP_SIZE_LOSSY) (§D.2.1) and
+[`STEP_SIZE_LOSSLESS`](crate::STEP_SIZE_LOSSLESS) (§D.2.2), indices
+`0..=26` defined and `27..=31` reserved — behind a typed
+[`StepSizeTable`](crate::StepSizeTable) whose
+[`for_rate`](crate::StepSizeTable::for_rate) mirrors the §5.5
+`if (RATE == 0x1f) … LossLess else … Lossy` selection and whose
+[`step_size`](crate::StepSizeTable::step_size) undoes the §D.2 `× 2²²`
+fixed-point scaling (a reserved/out-of-range `ABITS` surfaces the new
+`Error::InvalidStepSize`). The §5.5 transient-aware scale-factor
+selection ships as
+[`transient_scale_index`](crate::transient_scale_index) (the spec's
+`nTmode == 0 → nSSC; nSubSubFrame < nTmode → factor 0 else 1`), the
+`rScale = rStepSize · SCALES · arADJ` composition as
+[`dequant_scale`](crate::dequant_scale) (the `arADJ` multiplier reuses
+the round-241 `ScaleFactorAdjustment`), the eight-sample
+`aSample[m] = rScale · AUDIO[m]` scaling as
+[`scale_subsubframe_samples`](crate::scale_subsubframe_samples), and a
+fused end-to-end one-subsubframe driver as
+[`dequant_subsubframe`](crate::dequant_subsubframe) that reads
+`abits` / `tmode` / `scales` straight off the round-281
+`ChannelSideInfo` plane. 14 in-module tests cross-check the table
+entries against the §D.2 nominal column (`4194304/2²² = 1.0`,
+`146801/2²² ≈ 0.035`, …), the transient split, and the zero-step
+`ABITS 0` path (449 → 463 lib tests). Next toward PCM: the §5.5
+per-subsubframe `Audio Data` driver composing this scaling with the
+§C.2.1 quantization-index decode + the §C.2.2 inverse-ADPCM pass + the
+DSYNC trailer, and the Table 5-21 header decoder feeding the §5.4.1
+walker.
+
 **Round 286 — fused 32-band synthesis QMF driver (ETSI Annex C
 §C.2.5 `QMFInterpolation()`, staged PDF p.185 /
 `dts-core-extracts.md` §2.4).**
