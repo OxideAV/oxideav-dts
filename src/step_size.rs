@@ -101,7 +101,7 @@ pub const STEP_SIZE_FIRST_INVALID: usize = 27;
 /// §D.2.1 lossy-quantization step sizes, tabulated as
 /// `Step-size × 2²²` and indexed by the `ABITS` bit-allocation index.
 /// Selected when the frame-header `RATE != 0x1f` (§5.5). Slots
-/// `27..=31` hold [`STEP_SIZE_INVALID`] because the PDF writes them
+/// `27..=31` hold a zero sentinel because the PDF writes them
 /// "invalid".
 pub const STEP_SIZE_LOSSY: [u32; STEP_SIZE_TABLE_LEN] = [
     0, // ABITS 0 — "0,0" nominal: no bits allocated.
@@ -147,7 +147,7 @@ pub const STEP_SIZE_LOSSY: [u32; STEP_SIZE_TABLE_LEN] = [
 /// §D.2.2 lossless-quantization step sizes, tabulated as
 /// `Step-size × 2²²` and indexed by the `ABITS` bit-allocation index.
 /// Selected when the frame-header `RATE == 0x1f` (§5.5). Slots
-/// `27..=31` hold [`STEP_SIZE_INVALID`] because the PDF writes them
+/// `27..=31` hold a zero sentinel because the PDF writes them
 /// "invalid".
 pub const STEP_SIZE_LOSSLESS: [u32; STEP_SIZE_TABLE_LEN] = [
     0, // ABITS 0 — "0,0" nominal: no bits allocated.
