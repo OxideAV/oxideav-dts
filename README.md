@@ -5,6 +5,50 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 300 — §5.5 Table 5-29 `Audio Data` quantization-type dispatch
++ Table 5-26 `(ABITS, SEL)` codebook-group geometry (ETSI Table 5-26,
+staged PDF p.27, and §5.5 Table 5-29, staged PDF p.31-32).**
+Round 300 (2026-06-14) lands the decision core of the §5.5
+per-subsubframe `Audio Data` array decode: the `nQType` resolver that,
+for each `(ch, n)` subband, routes its eight `AUDIO[m]` quantization
+indices into one of the four already-landed extraction paths. The new
+`src/audio_data.rs` transcribes the Table 5-26 "Selection of
+Quantization Levels and Codebooks" geometry verbatim —
+[`QUANT_LEVELS`](crate::QUANT_LEVELS) (the per-`ABITS` mid-tread
+quantizer level count, `ABITS 0..=11`: 0/3/5/7/9/13/17/25/33/65/129/256)
+and [`CODEBOOK_GROUP_SIZE`](crate::CODEBOOK_GROUP_SIZE) (the per-`ABITS`
+`nNumQ` code-book group size read straight off the SEL columns:
+2/4/4/4/4/8/8/8/8/8/1 for `ABITS 1..=11`) — plus the constants
+[`ABITS_TABLE_LEN`](crate::ABITS_TABLE_LEN) (= 12),
+[`ABITS_MAX_SEL`](crate::ABITS_MAX_SEL) (= 11), and
+[`ABITS_MAX_BLOCK_CODE`](crate::ABITS_MAX_BLOCK_CODE) (= 7). The §5.5
+pseudocode's type decision ships as
+[`AudioQuantType`](crate::AudioQuantType) (`NoBits` / `Huffman` /
+`NoEncoding` / `BlockCode` for `nQType` 0/1/2/3) and
+[`audio_quant_type(abits, sel)`](crate::audio_quant_type), the verbatim
+resolver: Huffman by default, `sel == nNumQ - 1`
+([`terminal_sel_index`](crate::terminal_sel_index)) selects the group's
+terminal entry → block code for `ABITS <= 7` (the `V…` column) or
+no-further-encoding for `ABITS >= 8` (the `NFE` slot), `ABITS == 0`
+overrides to no-bits, and `ABITS > 11` (no SEL transmitted, per the
+spec's "no further encoding is used for those quantizers") resolves to
+no-encoding. This wires the §C.2.1 block-code decoder (round 232) and
+the §5.5 dequantization (round 293) to the correct per-subband path
+without reading any §D.6 audio code-book values. 13 in-module tests:
+Table 5-26 levels + group sizes row-by-row, an exhaustive
+`(ABITS, SEL)` dispatch matrix cross-checked against the §5.5
+pseudocode, the terminal-SEL block/NFE split, the `ABITS > 11`
+no-encoding tail, and the constant bounds (463 → 476 lib tests). New
+crate-root re-exports: `oxideav_dts::{audio_quant_type,
+terminal_sel_index, AudioQuantType, ABITS_MAX_BLOCK_CODE, ABITS_MAX_SEL,
+ABITS_TABLE_LEN, CODEBOOK_GROUP_SIZE, QUANT_LEVELS}`. The
+`--no-default-features --lib` standalone build still passes (the module
+has no `oxideav-core` dependency). Next toward PCM: the §D.6 audio
+quantization code books (`A3`/`B12`/… Huffman tables) and the
+`SEL[ch][ABITS]` field decode (Table 5-21 header) the dispatch routes
+into, then the full §5.5 `Audio Data` walker composing this dispatch
+with the §C.2.1 / §C.2.2 / §C.2.5 primitives and the DSYNC trailer.
+
 **Round 293 — §D.2 quantization step-size tables + §5.5 inverse-
 quantization scale composition (ETSI Annex D §D.2.1 / §D.2.2, staged
 PDF p.193-194, and §5.5 Table 5-29 `Audio Data`, staged PDF

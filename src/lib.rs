@@ -416,6 +416,7 @@
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
 
+mod audio_data;
 mod bitreader;
 mod block_code;
 mod cos_mod;
@@ -436,6 +437,10 @@ mod unpack14;
 #[cfg(feature = "registry")]
 mod registry;
 
+pub use crate::audio_data::{
+    audio_quant_type, terminal_sel_index, AudioQuantType, ABITS_MAX_BLOCK_CODE, ABITS_MAX_SEL,
+    ABITS_TABLE_LEN, CODEBOOK_GROUP_SIZE, QUANT_LEVELS,
+};
 pub use crate::block_code::{block_code_max_code, block_code_offset, decode_block_code};
 pub use crate::cos_mod::{
     cos_mod_stage, precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START,

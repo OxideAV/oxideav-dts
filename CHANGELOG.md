@@ -8,6 +8,30 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 300 (2026-06-14) — §5.5 Table 5-29 `Audio Data` quantization-
+  type dispatch + Table 5-26 `(ABITS, SEL)` codebook-group geometry
+  (staged ETSI TS 102 114 V1.3.1 Table 5-26 PDF p.27, §5.5 Table 5-29
+  PDF p.31-32). New module `src/audio_data.rs` lands the decision core
+  of the per-subsubframe audio-data array decode: the `nQType`
+  resolver that routes each subband's eight `AUDIO[m]` indices into
+  one of the four already-landed extraction paths.
+  - `QUANT_LEVELS` (Table 5-26 "Number of Index Quantization Levels",
+    `ABITS 0..=11`) and `CODEBOOK_GROUP_SIZE` (the per-`ABITS` `nNumQ`
+    code-book group size). `ABITS_TABLE_LEN` (= 12), `ABITS_MAX_SEL`
+    (= 11), `ABITS_MAX_BLOCK_CODE` (= 7).
+  - `AudioQuantType` enum (`NoBits` / `Huffman` / `NoEncoding` /
+    `BlockCode` for `nQType` 0/1/2/3) and `audio_quant_type(abits,
+    sel)`, the verbatim §5.5 resolver: Huffman by default;
+    `sel == nNumQ - 1` selects the group's terminal entry → block code
+    (`ABITS <= 7`) or no-further-encoding (`ABITS >= 8`); `ABITS == 0`
+    → no bits; `ABITS > 11` → no further encoding (no SEL transmitted).
+  - `terminal_sel_index(abits)` exposes the §5.5 `nNumQ - 1` top valid
+    `SEL` index per group.
+  - 13 in-module tests: Table 5-26 levels + group sizes row-by-row, the
+    exhaustive `(ABITS, SEL)` dispatch matrix against the spec
+    pseudocode, the terminal-SEL block/NFE split, the `ABITS > 11`
+    no-encoding tail, and the constant bounds. 463 → 476 lib tests.
+
 - Round 293 (2026-06-14) — §D.2 quantization step-size tables + §5.5
   inverse-quantization scale composition (staged ETSI TS 102 114
   V1.3.1 Annex D §D.2.1 / §D.2.2, PDF p.193-194, and §5.5 Table 5-29
