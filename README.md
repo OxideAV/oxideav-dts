@@ -5,6 +5,47 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 306 — §5.5 Table 5-29 `DSYNC` subsubframe synchronization check
+word (ETSI TS 102 114 V1.3.1 Table 5-29 pseudocode, staged PDF p.32, and
+the §5.5 prose, staged PDF p.33).**
+Round 306 (2026-06-15) lands the trailer step of the §5.5
+per-subsubframe `Audio Data` walk: the conditional 16-bit `DSYNC`
+synchronization check word that closes each subsubframe. The new
+`src/dsync.rs` transcribes the Table 5-29 `// Check for DSYNC` clause
+verbatim — [`dsync_present(n_subsubframe, n_ssc, aspf)`](crate::dsync_present)
+is the gating predicate `(nSubSubFrame == nSSC-1) || (ASPF == 1)`: a
+DSYNC word follows the last subsubframe of every subframe regardless of
+`ASPF` (the spec's "there must be at least a DSYNC at the end of each
+subframe" guarantee, PDF p.33) and follows *every* subsubframe when the
+§5.3.2 `ASPF` flag ([`DtsFrameHeader::aspf`](crate::DtsFrameHeader::aspf))
+is set. It composes the round-281 `aspf` header field with the round-249
+[`SubsubframeCount::n_ssc`](crate::SubsubframeCount::n_ssc) count. The
+bit-stream reader [`decode_dsync_at(bytes, bit_offset,
+n_subsubframe)`](crate::decode_dsync_at) reads the 16-bit
+`ExtractBits(16)` field MSB-first and verifies it against
+[`DSYNC_WORD`](crate::DSYNC_WORD) (`0xffff`), returning the bits consumed
+(16) on success; a non-`0xffff` word surfaces the new
+`Error::DsyncMismatch { found, n_subsubframe }` (the spec only `printf`s
+a `"DSYNC error at end of subsubframe #%d"` diagnostic — this crate makes
+it a recoverable typed error, the only in-band integrity check the Core
+profile provides for the audio-data array; the registry layer maps it to
+`CoreError::InvalidData`). [`DSYNC_WIRE_BITS`](crate::DSYNC_WIRE_BITS)
+(= 16) names the field width. 14 in-module tests: the ASPF-clear
+last-subsubframe-only gating, ASPF-set every-subsubframe gating,
+single-subsubframe always-present, an exhaustive
+`(n_subsubframe, n_ssc, aspf)` gating matrix, the degenerate `n_ssc == 0`
+no-underflow guard, byte-aligned / non-aligned / byte-boundary-crossing
+valid reads, mismatch + zero-word rejections carrying the bad word and
+index, two EOF paths, and an exact-16-bits-consumed check (476 → 490 lib
+tests). New crate-root re-exports: `oxideav_dts::{decode_dsync_at,
+dsync_present, DSYNC_WIRE_BITS, DSYNC_WORD}`. The
+`--no-default-features --lib` standalone build still passes (the module
+has no `oxideav-core` dependency). Next toward PCM: the §D.6 audio
+quantization code books (`A3`/`B12`/… Huffman tables) feeding the
+`nQType == 1` Huffman path, and the full §5.5 `Audio Data` walker
+composing the round-300 dispatch + the round-293 dequantization + the
+§C.2.1 / §C.2.2 primitives + this DSYNC trailer.
+
 **Round 300 — §5.5 Table 5-29 `Audio Data` quantization-type dispatch
 + Table 5-26 `(ABITS, SEL)` codebook-group geometry (ETSI Table 5-26,
 staged PDF p.27, and §5.5 Table 5-29, staged PDF p.31-32).**

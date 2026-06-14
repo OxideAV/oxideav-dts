@@ -420,6 +420,7 @@ mod audio_data;
 mod bitreader;
 mod block_code;
 mod cos_mod;
+mod dsync;
 mod filter_bank;
 mod fir_coeff;
 mod header;
@@ -446,6 +447,7 @@ pub use crate::cos_mod::{
     cos_mod_stage, precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START,
     COS_MOD_BLOCK3_START, COS_MOD_BLOCK4_START, COS_MOD_LEN, NUM_SUBBAND,
 };
+pub use crate::dsync::{decode_dsync_at, dsync_present, DSYNC_WIRE_BITS, DSYNC_WORD};
 pub use crate::filter_bank::FilterBankSelection;
 pub use crate::fir_coeff::{FIR_COEFF_LEN, RA_COEFF_LOSSLESS, RA_COEFF_LOSSY};
 pub use crate::header::{
@@ -680,6 +682,21 @@ pub enum Error {
         /// The slice length the caller actually supplied.
         found: usize,
     },
+    /// The §5.5 Table 5-29 `DSYNC` subsubframe synchronization check
+    /// word ([`crate::decode_dsync_at`]) read a 16-bit value other than
+    /// `0xffff` (PDF p.32: `if ( DSYNC != 0xffff )`). The spec text only
+    /// emits a diagnostic and keeps decoding; this crate surfaces it as
+    /// a recoverable typed error carrying the bad word and the
+    /// zero-based subsubframe index it trailed, mirroring the spec's
+    /// `"DSYNC error at end of subsubframe #%d"` message — it is the
+    /// only in-band integrity check the Core profile provides for the
+    /// audio-data array.
+    DsyncMismatch {
+        /// The 16-bit value read where `0xffff` was expected.
+        found: u16,
+        /// The zero-based `nSubSubFrame` index the trailer followed.
+        n_subsubframe: u8,
+    },
 }
 
 impl core::fmt::Display for Error {
@@ -775,6 +792,14 @@ impl core::fmt::Display for Error {
                 f,
                 "oxideav-dts: §5.5 subsubframe dequantization expects {expected} \
                  samples per subband analysis subwindow, got {found}"
+            ),
+            Error::DsyncMismatch {
+                found,
+                n_subsubframe,
+            } => write!(
+                f,
+                "oxideav-dts: §5.5 DSYNC error at end of subsubframe #{n_subsubframe}: \
+                 read 0x{found:04x}, expected 0xffff"
             ),
         }
     }

@@ -83,6 +83,12 @@ impl From<DtsError> for CoreError {
             DtsError::InvalidStepSize { .. } | DtsError::SampleCountMismatch { .. } => {
                 CoreError::InvalidData(e.to_string())
             }
+            // Round 306 §5.5 DSYNC trailer mismatch: a subsubframe
+            // synchronization check word other than `0xffff` is the
+            // Core profile's in-band integrity signal for a corrupt
+            // audio-data array, so map it to `InvalidData` alongside the
+            // other bit-stream-corruption variants above.
+            DtsError::DsyncMismatch { .. } => CoreError::InvalidData(e.to_string()),
         }
     }
 }

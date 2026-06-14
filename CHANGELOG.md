@@ -8,6 +8,35 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 306 (2026-06-15) — §5.5 Table 5-29 `DSYNC` subsubframe
+  synchronization check word (staged ETSI TS 102 114 V1.3.1 Table 5-29
+  pseudocode PDF p.32, prose PDF p.33). New module `src/dsync.rs` lands
+  the trailer step of the per-subsubframe `Audio Data` walk.
+  - `dsync_present(n_subsubframe, n_ssc, aspf)` — the verbatim §5.5
+    gating predicate `(nSubSubFrame == nSSC-1) || (ASPF == 1)`: a DSYNC
+    word follows the last subsubframe of every subframe (regardless of
+    `ASPF`) and follows every subsubframe when `ASPF == 1`. Composes the
+    round-281 `aspf` header field with the round-249
+    `SubsubframeCount::n_ssc` count.
+  - `decode_dsync_at(bytes, bit_offset, n_subsubframe)` — reads the
+    16-bit `ExtractBits(16)` field MSB-first and verifies it against
+    `0xffff`, returning the bits consumed (16) on success.
+  - `DSYNC_WORD` (= `0xffff`) and `DSYNC_WIRE_BITS` (= 16) constants.
+  - New `Error::DsyncMismatch { found, n_subsubframe }` variant
+    surfacing the spec's `"DSYNC error at end of subsubframe #%d"`
+    condition as a recoverable typed error (the registry layer maps it
+    to `CoreError::InvalidData`).
+  - 14 in-module tests: ASPF-clear last-subsubframe-only gating,
+    ASPF-set every-subsubframe gating, single-subsubframe always-present,
+    an exhaustive `(n_subsubframe, n_ssc, aspf)` gating matrix, the
+    degenerate `n_ssc == 0` no-underflow guard, byte-aligned /
+    non-aligned / byte-boundary-crossing valid reads, mismatch +
+    zero-word rejections carrying the bad word and index, two EOF paths,
+    and an exact-16-bits-consumed check (476 → 490 lib tests).
+  - New crate-root re-exports: `oxideav_dts::{decode_dsync_at,
+    dsync_present, DSYNC_WIRE_BITS, DSYNC_WORD}`. The
+    `--no-default-features --lib` standalone build still passes.
+
 - Round 300 (2026-06-14) — §5.5 Table 5-29 `Audio Data` quantization-
   type dispatch + Table 5-26 `(ABITS, SEL)` codebook-group geometry
   (staged ETSI TS 102 114 V1.3.1 Table 5-26 PDF p.27, §5.5 Table 5-29
