@@ -8,6 +8,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 317 (2026-06-16) — Annex D §D.5.7 13-level audio-data
+  quantization-index Huffman code books `A13`/`B13`/`C13` (ABITS 5,
+  SEL 0/1/2), extending the `nQType == 1` `AUDIO[m]` Huffman path to the
+  fifth `ABITS` family (staged ETSI TS 102 114 V1.3.1 Annex D §D.5.7
+  PDF p.202-203; Table 5-26 `(ABITS, SEL)` selector PDF p.27).
+  - Three signed-level books transcribed verbatim; `from_abits_sel`
+    now resolves `(5, 0/1/2)` → `A13/B13/C13` with `(5, 3)` (terminal
+    `V13` 4-element block code, `nQType == 3`) returning `None`.
+  - `MAX_AUDIO_HUFF_CODE_LEN` raised 6 → 7 (the `A13`/`B13` ±6 codes
+    113/112 / 57/56 are 7-bit, the deepest §D.5 codewords transcribed).
+  - `abits()` / `levels()` extended to the 13-level family; the
+    exhaustive max-len-prefix resolve check now covers `A13`. New tests
+    for the 13-level round trip, longest-code decode, and accessors;
+    Kraft-equality + prefix-freeness now verify 13 books.
+  - Remaining §D.5 families (17/25/33/65/129-level) and the §5.5
+    per-subsubframe `Audio Data` walker remain follow-ups.
+
 - Round 314 (2026-06-15) — Annex D §D.5 audio-data quantization-index
   Huffman code books for the four lowest `ABITS` families, feeding the
   §5.5 Table 5-29 `nQType == 1` ("Huffman code") `AUDIO[m]` extraction
