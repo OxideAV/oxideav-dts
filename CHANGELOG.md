@@ -8,6 +8,37 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 314 (2026-06-15) — Annex D §D.5 audio-data quantization-index
+  Huffman code books for the four lowest `ABITS` families, feeding the
+  §5.5 Table 5-29 `nQType == 1` ("Huffman code") `AUDIO[m]` extraction
+  path (staged ETSI TS 102 114 V1.3.1 Annex D §D.5.1/§D.5.3/§D.5.4/
+  §D.5.5 PDF p.198-201, Table 5-26 PDF p.27). New module
+  `src/audio_huff.rs`.
+  - Ten signed-level audio-data books transcribed verbatim: `A3`
+    (§D.5.1, 3 levels), `A5`/`B5`/`C5` (§D.5.3, 5 levels),
+    `A7`/`B7`/`C7` (§D.5.4, 7 levels), `A9`/`B9`/`C9` (§D.5.5,
+    9 levels). Unlike the §5.4.1 side-info books (unsigned indices),
+    these decode to **signed** mid-tread quantizer levels
+    (`0, 1, -1, 2, -2, …`) — the `AUDIO[m]` value §5.5 scales by
+    `rScale`.
+  - `AudioHuffCodebook` typed code book with `abits()` / `levels()`
+    accessors and `from_abits_sel(abits, sel)` resolving a
+    `(ABITS, SEL)` pair through the Table 5-26 `SEL`-column order
+    (terminal `V…` block-code entry and out-of-family pairs return
+    `None`).
+  - `decode_audio_huff_at(bytes, bit_offset, codebook)` — single
+    `AUDIO[m]` symbol decode returning `(signed_level, bits_consumed)`,
+    reusing the existing `Error::{HuffmanDecodeFailed, UnexpectedEof}`
+    variants (no new error added).
+  - 12 in-module tests: per-book printed-code round trip over every
+    symbol, Kraft-equality + prefix-freeness of all ten complete codes,
+    `from_abits_sel` Table 5-26 resolution (including terminal-SEL
+    `None`), level/family accessors, unaligned-offset decode, EOF on a
+    truncated read, and an exhaustive 6-bit-prefix resolve check.
+  - Higher §D.5 audio-data families (13/17/25/33/65/129-level) and the
+    §5.5 per-subsubframe `Audio Data` walker that dispatches into this
+    decoder remain follow-ups.
+
 - Round 309 (2026-06-15) — Annex D §D.6 Block Code Books + the §C.2.1
   table-look-up block-code decoder variant (staged ETSI TS 102 114
   V1.3.1 Annex D §D.6 PDF p.231-236, Annex C §C.2.1 PDF p.182-183).

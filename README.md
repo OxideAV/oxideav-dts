@@ -39,7 +39,11 @@ reconstruction step.
   (`QmfSynthesis`), the §D.2 quantization step-size tables and §5.5
   inverse-quantization scale composition, the §D.8 512-tap
   interpolation FIR coefficient sets, the §5.5 `nQType` dispatch, the
-  §D.6 block code books, and the §5.5 `DSYNC` subsubframe check word.
+  §D.6 block code books, the §D.5.1/§D.5.3/§D.5.4/§D.5.5 audio-data
+  quantization-index Huffman code books (the four lowest `ABITS`
+  families feeding the `nQType == 1` path, decoding to signed
+  `AUDIO[m]` levels via `AudioHuffCodebook` / `decode_audio_huff_at`),
+  and the §5.5 `DSYNC` subsubframe check word.
 
 ### Not yet implemented
 
@@ -47,8 +51,11 @@ reconstruction step.
   dequantization, ADPCM, and QMF primitives into reconstructed subband
   samples — and thus PCM output (the registry `Decoder` returns
   `Unsupported` for this step).
-- The §D.5 audio-data quantization-index Huffman code books feeding the
-  `nQType == 1` Huffman path.
+- The remaining §D.5 audio-data quantization-index Huffman code books
+  feeding the `nQType == 1` Huffman path: the higher `ABITS` families
+  (§D.5.7 13-level, §D.5.8 17-level, §D.5.9 25-level, §D.5.10 33-level,
+  §D.5.11 65-level, §D.5.12 129-level). The four lowest families
+  (§D.5.1/§D.5.3/§D.5.4/§D.5.5) are landed.
 - The Table 5-21 Core Audio Coding Header decoder feeding the §5.4.1
   walker.
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the
