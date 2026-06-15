@@ -8,6 +8,53 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 309 (2026-06-15) — Annex D §D.6 Block Code Books + the §C.2.1
+  table-look-up block-code decoder variant (staged ETSI TS 102 114
+  V1.3.1 Annex D §D.6 PDF p.231-236, Annex C §C.2.1 PDF p.182-183).
+  New module `src/d6_block_book.rs` closes the round-232 follow-up: the
+  §C.2.1 table-look-up decoder that round 232 left blocked on the §D.6
+  code-book rows (enumerated as the §C.2.1 Table C-1).
+  - Seven §D.6 4-element block code books transcribed verbatim:
+    `D6_BOOK_3` / `D6_BOOK_5` / `D6_BOOK_7` / `D6_BOOK_9` /
+    `D6_BOOK_13` / `D6_BOOK_17` / `D6_BOOK_25` (`3/5/7/9/13/17/25`
+    levels, §D.6.1-§D.6.7). Each is the closed form
+    `code(element e, level L) = L · nNumLevel^(e-1)` the printed tables
+    tabulate, with every printed anchor cell asserted against the
+    constructed row. The §D.6.3 (7-level) 3rd-element level-0 print
+    cell reads "47" in the PDF where the table's own `L·49` arithmetic
+    and the §C.2.1 modulus decoder both give 147; the constructed book
+    carries 147 and a test records the print erratum.
+  - `D6BlockBook` typed code book with `levels()` and
+    `code_value(element, level_index)` accessors; `d6_book_for_levels`
+    resolves a level count to the matching §D.6 book; `D6_BLOCK_ELEMENTS`
+    (= 4) names the fixed §D.6 block width.
+  - `decode_block_code_table(code, book, output)` — the §C.2.1
+    table-look-up decoder: walks the book last-element-first,
+    subtracting the largest code value ≤ the residual and recording its
+    quantisation index, with the same `nCode == 0` success criterion
+    surfaced as `Error::BlockCodeResidual`. Reuses the round-232
+    `Error::{BlockCodeResidual, BlockCodeLevelsOutOfRange}` variants
+    (no new error added).
+  - 21 in-module tests: per-book printed-anchor transcription checks
+    (all seven §D.6 sub-clauses, including the 147 erratum), the
+    `code_value` bounds, `d6_book_for_levels` resolution, the §C.2.1
+    worked example (`code 64 → [0, -1, 0, +1]`), all-zero / max-code
+    edge cases, residual + too-many-elements + empty-output rejections,
+    full-domain table-vs-modulus cross-validation for 3/5/7-level books
+    (3^4 / 5^4 / 7^4 codes) and strided cross-validation for
+    9/13/17/25-level books, the in-alphabet index invariant, and the
+    `D6_BLOCK_ELEMENTS` constant (490 → 511 lib tests).
+  - New crate-root re-exports: `oxideav_dts::{decode_block_code_table,
+    d6_book_for_levels, D6BlockBook, D6_BLOCK_ELEMENTS, D6_BOOK_3,
+    D6_BOOK_5, D6_BOOK_7, D6_BOOK_9, D6_BOOK_13, D6_BOOK_17,
+    D6_BOOK_25}`. The `--no-default-features --lib` standalone build
+    still passes (the module has no `oxideav-core` dependency).
+
+  No external library source consulted. No web search. Wall respected
+  per IMPLEMENTOR_ROUND.md guardrails. Trace material read: ETSI TS 102
+  114 V1.3.1 Annex D §D.6 (staged PDF p.231-236) and Annex C §C.2.1
+  (staged PDF p.182-183); no other section, no other docs file.
+
 - Round 306 (2026-06-15) — §5.5 Table 5-29 `DSYNC` subsubframe
   synchronization check word (staged ETSI TS 102 114 V1.3.1 Table 5-29
   pseudocode PDF p.32, prose PDF p.33). New module `src/dsync.rs` lands

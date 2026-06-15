@@ -5,6 +5,51 @@ A pure-Rust DTS audio decoder for the
 
 ## Status
 
+**Round 309 — Annex D §D.6 Block Code Books + §C.2.1 table-look-up
+block-code decoder variant (ETSI TS 102 114 V1.3.1 Annex D §D.6, staged
+PDF p.231-236, and Annex C §C.2.1, staged PDF p.182-183).**
+Round 309 (2026-06-15) closes the round-232 follow-up: the §C.2.1
+*table-look-up* block-code decoder that round 232 deferred, blocked on
+the §D.6 code-book rows enumerated as the §C.2.1 Table C-1. The new
+`src/d6_block_book.rs` transcribes all seven §D.6 4-element block code
+books verbatim — [`D6_BOOK_3`](crate::D6_BOOK_3),
+[`D6_BOOK_5`](crate::D6_BOOK_5), [`D6_BOOK_7`](crate::D6_BOOK_7),
+[`D6_BOOK_9`](crate::D6_BOOK_9), [`D6_BOOK_13`](crate::D6_BOOK_13),
+[`D6_BOOK_17`](crate::D6_BOOK_17), [`D6_BOOK_25`](crate::D6_BOOK_25)
+(`3/5/7/9/13/17/25` levels, §D.6.1-§D.6.7) — each the closed form
+`code(element e, level L) = L · nNumLevel^(e-1)` the printed tables
+tabulate, with every printed anchor cell asserted against the
+constructed row. The §D.6.3 (7-level) 3rd-element level-0 print cell
+reads "47" where the table's own `L·49` arithmetic and the round-232
+§C.2.1 modulus decoder both give 147; the constructed book carries 147
+and a test records the print erratum. The typed
+[`D6BlockBook`](crate::D6BlockBook) exposes
+[`levels()`](crate::D6BlockBook::levels) and
+[`code_value(element, level_index)`](crate::D6BlockBook::code_value);
+[`d6_book_for_levels`](crate::d6_book_for_levels) resolves a level count
+to its book and [`D6_BLOCK_ELEMENTS`](crate::D6_BLOCK_ELEMENTS) (= 4)
+names the fixed §D.6 block width. The decoder
+[`decode_block_code_table(code, book, output)`](crate::decode_block_code_table)
+walks the book last-element-first, subtracting the largest code value
+≤ the residual and recording its quantisation index, with the same
+`nCode == 0` success criterion the modulus variant uses (surfaced as
+the round-232 `Error::BlockCodeResidual`; no new error variant). The
+spec states both decoder variants produce identical output, so the
+table-look-up decoder is cross-validated against the round-232
+[`decode_block_code`](crate::decode_block_code) over the full
+3^4 / 5^4 / 7^4 code domains and strided over the 9/13/17/25-level
+domains. 21 in-module tests (490 → 511 lib tests). New crate-root
+re-exports: `oxideav_dts::{decode_block_code_table, d6_book_for_levels,
+D6BlockBook, D6_BLOCK_ELEMENTS, D6_BOOK_3, D6_BOOK_5, D6_BOOK_7,
+D6_BOOK_9, D6_BOOK_13, D6_BOOK_17, D6_BOOK_25}`. The
+`--no-default-features --lib` standalone build still passes (the module
+has no `oxideav-core` dependency). With both §C.2.1 decoder variants now
+landed, the remaining work toward PCM is the §D.5 audio-data
+quantization-index Huffman code books feeding the round-300 `nQType == 1`
+Huffman path, and the full §5.5 `Audio Data` walker composing the
+round-300 dispatch + round-293 dequantization + §C.2.x primitives + the
+round-306 DSYNC trailer.
+
 **Round 306 — §5.5 Table 5-29 `DSYNC` subsubframe synchronization check
 word (ETSI TS 102 114 V1.3.1 Table 5-29 pseudocode, staged PDF p.32, and
 the §5.5 prose, staged PDF p.33).**

@@ -394,6 +394,16 @@
 //!   `code=64`, `n_levels=3`, four elements → `[0, -1, 0, +1]`.
 //!   Transcribed verbatim from ETSI TS 102 114 V1.3.1 Annex C §C.2.1
 //!   (PDF p.182–183).
+//! - [`decode_block_code_table`] / [`d6_book_for_levels`] /
+//!   [`D6BlockBook`] / [`D6_BOOK_3`]..[`D6_BOOK_25`] /
+//!   [`D6_BLOCK_ELEMENTS`] — the §C.2.1 *table-look-up* block-code
+//!   decoder variant and the Annex D §D.6 "Block Code Books" it walks
+//!   (added in round 309, the named round-232 follow-up). The seven
+//!   §D.6 4-element books (`3/5/7/9/13/17/25` levels) are transcribed
+//!   from ETSI TS 102 114 V1.3.1 Annex D §D.6 (PDF p.231–236); the
+//!   decoder follows the §C.2.1 Table C-1 last-element-first walk and
+//!   produces output identical to [`decode_block_code`] (cross-checked
+//!   over the full §D.6 code domains).
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -420,6 +430,7 @@ mod audio_data;
 mod bitreader;
 mod block_code;
 mod cos_mod;
+mod d6_block_book;
 mod dsync;
 mod filter_bank;
 mod fir_coeff;
@@ -446,6 +457,10 @@ pub use crate::block_code::{block_code_max_code, block_code_offset, decode_block
 pub use crate::cos_mod::{
     cos_mod_stage, precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START,
     COS_MOD_BLOCK3_START, COS_MOD_BLOCK4_START, COS_MOD_LEN, NUM_SUBBAND,
+};
+pub use crate::d6_block_book::{
+    d6_book_for_levels, decode_block_code_table, D6BlockBook, D6_BLOCK_ELEMENTS, D6_BOOK_13,
+    D6_BOOK_17, D6_BOOK_25, D6_BOOK_3, D6_BOOK_5, D6_BOOK_7, D6_BOOK_9,
 };
 pub use crate::dsync::{decode_dsync_at, dsync_present, DSYNC_WIRE_BITS, DSYNC_WORD};
 pub use crate::filter_bank::FilterBankSelection;
