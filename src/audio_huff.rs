@@ -979,18 +979,18 @@ mod tests {
     fn complete_codes_always_resolve_within_max_len() {
         // Every §D.5 book transcribed here is a complete prefix code
         // (Kraft sum = 1, checked above), so any bit pattern long
-        // enough resolves to *some* symbol within
-        // MAX_AUDIO_HUFF_CODE_LEN bits — the `HuffmanDecodeFailed` arm
-        // is only reachable on a truncated read (covered by
+        // enough resolves to *some* symbol within the book's own
+        // `max_code_len` bits — the `HuffmanDecodeFailed` arm is only
+        // reachable on a truncated read (covered by
         // `truncated_stream_surfaces_eof`). Confirm every
-        // MAX_AUDIO_HUFF_CODE_LEN-bit prefix decodes for the deepest
-        // (7-bit) family, A13.
+        // MAX_AUDIO_HUFF_CODE_LEN-bit (= deepest, 12-bit `A17`) prefix
+        // decodes for the deepest family.
         for raw in 0u32..(1 << MAX_AUDIO_HUFF_CODE_LEN) {
             let stream = pack_fields(&[(raw, MAX_AUDIO_HUFF_CODE_LEN as u8)]);
-            let res = decode_audio_huff_at(&stream, 0, AudioHuffCodebook::A13);
+            let res = decode_audio_huff_at(&stream, 0, AudioHuffCodebook::A17);
             assert!(
                 res.is_ok(),
-                "A13: {MAX_AUDIO_HUFF_CODE_LEN}-bit prefix {raw:07b} failed to resolve: {res:?}"
+                "A17: {MAX_AUDIO_HUFF_CODE_LEN}-bit prefix {raw:012b} failed to resolve: {res:?}"
             );
         }
     }
