@@ -24,8 +24,8 @@
 //! The same §D.8 table also carries two LFE interpolation FIR columns
 //! ("64 x Interpolation" / "128 x Interpolation"); those drive the
 //! LFE decimation/interpolation path, not the 32-band synthesis QMF,
-//! and are out of this module's scope (they will land with the LFE
-//! reconstruction step).
+//! and live in a separate module ([`crate::lfe_fir_coeff`], selected
+//! by [`crate::LfeInterpolationSelection`]).
 //!
 //! Both tables are exactly antisymmetric in their printed digits
 //! (`coeff[i] == -coeff[511 - i]` for every `i`); the test suite

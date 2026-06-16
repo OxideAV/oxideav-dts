@@ -37,8 +37,11 @@ reconstruction step.
   inverse-ADPCM predictor, the §C.2.3 / §C.2.4 sum-difference and
   joint-subband steps, the §C.2.5 32-band synthesis QMF
   (`QmfSynthesis`), the §D.2 quantization step-size tables and §5.5
-  inverse-quantization scale composition, the §D.8 512-tap
-  interpolation FIR coefficient sets, the §5.5 `nQType` dispatch, the
+  inverse-quantization scale composition, the §D.8 512-tap 32-band
+  interpolation FIR coefficient sets plus the two §D.8 512-tap **LFE**
+  interpolation FIR sets (`RA_COEFF_LFE64` / `RA_COEFF_LFE128`) with the
+  typed §C.2.6 `LfeInterpolationSelection` (`nDecimationSelect`) driver
+  selector, the §5.5 `nQType` dispatch, the
   §D.6 block code books, the §D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7
   audio-data quantization-index Huffman code books (the five lowest
   `ABITS` families — 3/5/7/9/13-level — feeding the `nQType == 1` path,
@@ -58,6 +61,12 @@ reconstruction step.
   (§D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7) are landed.
 - The Table 5-21 Core Audio Coding Header decoder feeding the §5.4.1
   walker.
+- The §C.2.6 `InterpolationFIR()` LFE-reconstruction driver *body* (the
+  per-sample 512-tap polyphase convolution loop). The §D.8 LFE
+  coefficient tables and the `nDecimationSelect` table selector are
+  landed, but the §C.2.6 loop-body pseudocode is not transcribed in the
+  staged `docs/audio/dts/` material, so the convolution step awaits that
+  staging.
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the
   current Core-profile effort.
 - The `HEADER_CRC` polynomial is not documented in the staged spec

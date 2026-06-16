@@ -439,6 +439,8 @@ mod header;
 mod inverse_adpcm;
 mod iter;
 mod joint_subband;
+mod lfe_fir_coeff;
+mod lfe_interp;
 mod qmf_assemble;
 mod qmf_synth;
 mod side_info;
@@ -486,6 +488,8 @@ pub use crate::joint_subband::{
     joint_source_channel, joint_subband_decode_range_f64, joint_subband_decode_range_i32,
     joint_subband_required,
 };
+pub use crate::lfe_fir_coeff::{LFE_FIR_COEFF_LEN, RA_COEFF_LFE128, RA_COEFF_LFE64};
+pub use crate::lfe_interp::LfeInterpolationSelection;
 pub use crate::qmf_assemble::{
     assemble_xin, fir_step, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
     PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,

@@ -8,6 +8,35 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 321 (2026-06-16) — Annex D §D.8 **LFE interpolation FIR
+  coefficient tables** (`raCoeff64` / `raCoeff128`, the "64 x
+  Interpolation" / "128 x Interpolation" columns of the §D.8 table,
+  staged ETSI TS 102 114 V1.3.1 PDF p.238-246) plus the typed
+  §C.2.6 `InterpolationFIR()` driver selector. New modules
+  `src/lfe_fir_coeff.rs` + `src/lfe_interp.rs`.
+  - Both 512-tap (`NumFIRCoef = 512`) LFE sets transcribed verbatim
+    from the staged §D.8 CSVs (`RA_COEFF_LFE64` / `RA_COEFF_LFE128`).
+    Unlike the two 32-band columns (anti-symmetric,
+    `coeff[i] == -coeff[511-i]`), the LFE columns are **symmetric**
+    (`coeff[i] == coeff[511-i]`); tests verify that whole-table
+    property, the `dts-d8-fir.meta.md` "Sample values" anchor rows,
+    the centre-peak structure, distinctness of the two LFE sets, and
+    non-aliasing with the two 32-band columns.
+  - `LfeInterpolationSelection` (`Decimation64` / `Decimation128`)
+    mirrors the existing `FilterBankSelection`: `from_decimation_select`
+    resolves `nDecimationSelect == 1` → 128x (`raCoeff128`) / else →
+    64x (`raCoeff64`) per `dts-qmf-driver.md` §3, with
+    `coefficients()` / `spec_table_name()` / `decimation_factor()`
+    / `decimation_select()` accessors and a canonical round-trip.
+  - **Docs gap (driver body):** the §C.2.6 `InterpolationFIR()`
+    per-sample convolution *loop body* is not transcribed in the
+    staged `docs/audio/dts/` material — `dts-qmf-driver.md` §3
+    resolves only the table mapping, `NumFIRCoef = 512`, and the
+    absence of a §C.2.5-style output `rScale` (LFE samples are
+    pre-scaled at dequant time, `LFECh.rLFE[k] = LFE[n]*rScale`
+    with `rScale = nScale*0.035`). The convolution driver lands once
+    the §C.2.6 pseudocode body is staged.
+
 - Round 317 (2026-06-16) — Annex D §D.5.7 13-level audio-data
   quantization-index Huffman code books `A13`/`B13`/`C13` (ABITS 5,
   SEL 0/1/2), extending the `nQType == 1` `AUDIO[m]` Huffman path to the
