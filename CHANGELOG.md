@@ -8,6 +8,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 325 (2026-06-16) — Annex D §D.5.8 **17-level audio-data Huffman
+  code books** `A17`/`B17`/`C17`/`D17`/`E17`/`F17`/`G17` (ABITS 6,
+  the `nQType == 1` Huffman path), transcribed verbatim from the
+  staged ETSI TS 102 114 V1.3.1 PDF p.203-205.
+  - Table 5-26 group for ABITS 6 is `A17 B17 C17 D17 E17 F17 G17 V17`,
+    so `AudioHuffCodebook::from_abits_sel(6, sel)` resolves SEL 0..6 to
+    the seven Huffman books and leaves SEL 7 (`V17`, the 4-element
+    block code) to the `nQType == 3` path.
+  - These books are the deepest §D.5 family: `A17`'s ±8 codes (341/340)
+    are 12 bits. The bit-at-a-time decoder now walks to each book's own
+    `AudioHuffCodebook::max_code_len` (new public accessor, derived
+    from the backing table) rather than a single global bound, and the
+    global worst-case cap rose 7 → 12.
+  - Tests cover Table 5-26 resolution for ABITS 6 (incl. the `V17`
+    terminal `None`), the deepest 12-bit `A17` codes, per-book
+    `max_code_len`, and extend the generic prefix-freeness + Kraft
+    completeness + full round-trip sweeps over all seven new books.
 - Round 321 (2026-06-16) — Annex D §D.8 **LFE interpolation FIR
   coefficient tables** (`raCoeff64` / `raCoeff128`, the "64 x
   Interpolation" / "128 x Interpolation" columns of the §D.8 table,

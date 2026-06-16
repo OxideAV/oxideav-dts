@@ -42,11 +42,15 @@ reconstruction step.
   interpolation FIR sets (`RA_COEFF_LFE64` / `RA_COEFF_LFE128`) with the
   typed §C.2.6 `LfeInterpolationSelection` (`nDecimationSelect`) driver
   selector, the §5.5 `nQType` dispatch, the
-  §D.6 block code books, the §D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7
-  audio-data quantization-index Huffman code books (the five lowest
-  `ABITS` families — 3/5/7/9/13-level — feeding the `nQType == 1` path,
-  decoding to signed `AUDIO[m]` levels via `AudioHuffCodebook` /
-  `decode_audio_huff_at`), and the §5.5 `DSYNC` subsubframe check word.
+  §D.6 block code books, the
+  §D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7/§D.5.8 audio-data
+  quantization-index Huffman code books (the six lowest `ABITS`
+  families — 3/5/7/9/13/17-level, the last being the seven §D.5.8
+  books `A17`…`G17` whose deepest codeword reaches 12 bits — feeding
+  the `nQType == 1` path, decoding to signed `AUDIO[m]` levels via
+  `AudioHuffCodebook` / `decode_audio_huff_at` with a per-book
+  `max_code_len` walk bound), and the §5.5 `DSYNC` subsubframe check
+  word.
 
 ### Not yet implemented
 
@@ -56,9 +60,9 @@ reconstruction step.
   `Unsupported` for this step).
 - The remaining §D.5 audio-data quantization-index Huffman code books
   feeding the `nQType == 1` Huffman path: the higher `ABITS` families
-  (§D.5.8 17-level, §D.5.9 25-level, §D.5.10 33-level, §D.5.11 65-level,
-  §D.5.12 129-level). The five lowest families
-  (§D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7) are landed.
+  (§D.5.9 25-level, §D.5.10 33-level, §D.5.11 65-level, §D.5.12
+  129-level). The six lowest families
+  (§D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7/§D.5.8) are landed.
 - The Table 5-21 Core Audio Coding Header decoder feeding the §5.4.1
   walker.
 - The §C.2.6 `InterpolationFIR()` LFE-reconstruction driver *body* (the

@@ -13,21 +13,23 @@
 //! eight `AUDIO[m]` quantization indices are Huffman-coded, decoded
 //! through the §D.5 code book that the `(ABITS, SEL)` pair selects
 //! (Table 5-26, staged PDF p.27). This module transcribes the
-//! **signed-level** audio-data code books for the four lowest `ABITS`
+//! **signed-level** audio-data code books for the lowest `ABITS`
 //! families — the ones whose mid-tread quantizer has a small enough
 //! level count to print a full code book:
 //!
-//! | ABITS | levels | clause  | SEL → book                |
-//! |-------|--------|---------|---------------------------|
-//! | 1     | 3      | §D.5.1  | SEL 0 → `A3`              |
-//! | 2     | 5      | §D.5.3  | SEL 0/1/2 → `A5/B5/C5`   |
-//! | 3     | 7      | §D.5.4  | SEL 0/1/2 → `A7/B7/C7`   |
-//! | 4     | 9      | §D.5.5  | SEL 0/1/2 → `A9/B9/C9`   |
-//! | 5     | 13     | §D.5.7  | SEL 0/1/2 → `A13/B13/C13`|
+//! | ABITS | levels | clause  | SEL → book                       |
+//! |-------|--------|---------|----------------------------------|
+//! | 1     | 3      | §D.5.1  | SEL 0 → `A3`                     |
+//! | 2     | 5      | §D.5.3  | SEL 0/1/2 → `A5/B5/C5`          |
+//! | 3     | 7      | §D.5.4  | SEL 0/1/2 → `A7/B7/C7`          |
+//! | 4     | 9      | §D.5.5  | SEL 0/1/2 → `A9/B9/C9`          |
+//! | 5     | 13     | §D.5.7  | SEL 0/1/2 → `A13/B13/C13`       |
+//! | 6     | 17     | §D.5.8  | SEL 0..6 → `A17/B17/…/G17`      |
 //!
 //! (The terminal `SEL` entry of each group is the `V…` block code —
 //! `nQType == 3`, handled by [`crate::decode_block_code`] — not a
-//! Huffman book, so it is *not* in this module.)
+//! Huffman book, so it is *not* in this module. For the 17-level group
+//! that terminal entry is `V17` at SEL 7.)
 //!
 //! Unlike the §5.4.1 side-information code books (BHUFF/THUFF/SHUFF),
 //! whose symbols are *unsigned* indices, the audio-data books decode
@@ -39,9 +41,9 @@
 //!
 //! # Scope and follow-ups
 //!
-//! The remaining higher-`ABITS` audio-data families (§D.5.8 17-level,
-//! §D.5.9 25-level, §D.5.10 33-level, §D.5.11 65-level, §D.5.12
-//! 129-level) are larger transcriptions and remain follow-ups. Wiring
+//! The remaining higher-`ABITS` audio-data families (§D.5.9 25-level,
+//! §D.5.10 33-level, §D.5.11 65-level, §D.5.12 129-level) are larger
+//! transcriptions and remain follow-ups. Wiring
 //! this decoder into the §5.5 per-subsubframe `Audio Data` walker is
 //! likewise a separate increment; this module exposes the tables and
 //! the single-symbol decode so the walker can dispatch into it once the
@@ -64,13 +66,14 @@ use crate::{Error, Result};
 /// level the §5.5 `AUDIO[m]` index carries.
 type AudioHuffEntry = (i16, u8, u16);
 
-/// Maximum code length across every §D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7
-/// book transcribed here. The longest printed code is 7 bits, in the
-/// 13-level §D.5.7 `A13`/`B13` tables (the ±6 codes 113/112 / 57/56);
-/// the 9-level §D.5.5 books top out at 6 bits. The decoder reads bits
-/// one at a time up to this bound; an unmatched pattern after that many
-/// bits is a stream-format failure.
-const MAX_AUDIO_HUFF_CODE_LEN: u32 = 7;
+/// Maximum code length across every audio-data Huffman book transcribed
+/// here, the bound the bit-at-a-time decoder walks to before declaring a
+/// stream-format failure. The longest printed code is 12 bits, in the
+/// 17-level §D.5.8 `A17` table (the ±8 codes 341/340); the smaller
+/// families top out far below that (7 bits in §D.5.7 `A13`/`B13`). The
+/// decoder still stops at each book's own [`AudioHuffCodebook::max_code_len`]
+/// once a prefix-matched code is found, so this only caps the worst case.
+const MAX_AUDIO_HUFF_CODE_LEN: u32 = 12;
 
 // ---------------------------------------------------------------
 // §D.5.1 — 3 Levels (ABITS 1, SEL 0). Staged PDF p.198.
@@ -231,7 +234,163 @@ const TABLE_C13: &[AudioHuffEntry] = &[
     (-6, 5, 4),
 ];
 
-/// One of the §D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7 audio-data
+// ---------------------------------------------------------------
+// §D.5.8 — 17 Levels (ABITS 6, SEL 0..6). Staged PDF p.203-205.
+//
+// Table 5-26 group for ABITS 6 is `A17 B17 C17 D17 E17 F17 G17 V17`,
+// so SEL 0..6 select the seven Huffman books and SEL 7 the terminal
+// `V17` 4-element block code (`nQType == 3`). Codes reach 12 bits in
+// `A17` (the ±8 codes 341/340) — the deepest of any §D.5 family.
+// ---------------------------------------------------------------
+
+/// Annex D §D.5.8 Table A17.
+const TABLE_A17: &[AudioHuffEntry] = &[
+    (0, 2, 1),
+    (1, 3, 7),
+    (-1, 3, 6),
+    (2, 3, 4),
+    (-2, 3, 1),
+    (3, 4, 11),
+    (-3, 4, 10),
+    (4, 4, 0),
+    (-4, 5, 3),
+    (5, 6, 4),
+    (-5, 7, 11),
+    (6, 8, 20),
+    (-6, 9, 43),
+    (7, 10, 84),
+    (-7, 11, 171),
+    (8, 12, 341),
+    (-8, 12, 340),
+];
+
+/// Annex D §D.5.8 Table B17.
+const TABLE_B17: &[AudioHuffEntry] = &[
+    (0, 2, 0),
+    (1, 3, 6),
+    (-1, 3, 5),
+    (2, 3, 2),
+    (-2, 4, 15),
+    (3, 4, 9),
+    (-3, 4, 8),
+    (4, 5, 29),
+    (-4, 5, 28),
+    (5, 5, 14),
+    (-5, 5, 13),
+    (6, 6, 30),
+    (-6, 6, 25),
+    (7, 6, 24),
+    (-7, 7, 63),
+    (8, 8, 125),
+    (-8, 8, 124),
+];
+
+/// Annex D §D.5.8 Table C17.
+const TABLE_C17: &[AudioHuffEntry] = &[
+    (0, 3, 6),
+    (1, 3, 4),
+    (-1, 3, 3),
+    (2, 3, 0),
+    (-2, 4, 15),
+    (3, 4, 11),
+    (-3, 4, 10),
+    (4, 4, 4),
+    (-4, 4, 3),
+    (5, 5, 29),
+    (-5, 5, 28),
+    (6, 5, 10),
+    (-6, 5, 5),
+    (7, 5, 4),
+    (-7, 6, 23),
+    (8, 7, 45),
+    (-8, 7, 44),
+];
+
+/// Annex D §D.5.8 Table D17.
+const TABLE_D17: &[AudioHuffEntry] = &[
+    (0, 1, 0),
+    (1, 3, 7),
+    (-1, 3, 6),
+    (2, 4, 11),
+    (-2, 4, 10),
+    (3, 5, 19),
+    (-3, 5, 18),
+    (4, 6, 35),
+    (-4, 6, 34),
+    (5, 7, 67),
+    (-5, 7, 66),
+    (6, 8, 131),
+    (-6, 8, 130),
+    (7, 9, 259),
+    (-7, 9, 258),
+    (8, 9, 257),
+    (-8, 9, 256),
+];
+
+/// Annex D §D.5.8 Table E17.
+const TABLE_E17: &[AudioHuffEntry] = &[
+    (0, 1, 0),
+    (1, 3, 5),
+    (-1, 3, 4),
+    (2, 4, 12),
+    (-2, 5, 31),
+    (3, 5, 28),
+    (-3, 5, 27),
+    (4, 6, 60),
+    (-4, 6, 59),
+    (5, 6, 53),
+    (-5, 6, 52),
+    (6, 7, 122),
+    (-6, 7, 117),
+    (7, 8, 247),
+    (-7, 8, 246),
+    (8, 8, 233),
+    (-8, 8, 232),
+];
+
+/// Annex D §D.5.8 Table F17.
+const TABLE_F17: &[AudioHuffEntry] = &[
+    (0, 3, 6),
+    (1, 3, 5),
+    (-1, 3, 4),
+    (2, 3, 2),
+    (-2, 3, 1),
+    (3, 4, 15),
+    (-3, 4, 14),
+    (4, 4, 6),
+    (-4, 4, 1),
+    (5, 5, 14),
+    (-5, 5, 1),
+    (6, 6, 31),
+    (-6, 6, 30),
+    (7, 6, 0),
+    (-7, 7, 3),
+    (8, 8, 5),
+    (-8, 8, 4),
+];
+
+/// Annex D §D.5.8 Table G17.
+const TABLE_G17: &[AudioHuffEntry] = &[
+    (0, 2, 2),
+    (1, 3, 7),
+    (-1, 3, 6),
+    (2, 3, 1),
+    (-2, 3, 0),
+    (3, 4, 5),
+    (-3, 4, 4),
+    (4, 5, 14),
+    (-4, 5, 13),
+    (5, 6, 30),
+    (-5, 6, 25),
+    (6, 7, 62),
+    (-6, 7, 49),
+    (7, 8, 127),
+    (-7, 8, 126),
+    (8, 8, 97),
+    (-8, 8, 96),
+];
+
+/// One of the §D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7/§D.5.8 audio-data
 /// quantization-index Huffman code books, selected by the §5.5
 /// `(ABITS, SEL)` pair.
 ///
@@ -266,6 +425,20 @@ pub enum AudioHuffCodebook {
     B13,
     /// §D.5.7 Table C13 — ABITS 5, SEL 2 (13 levels).
     C13,
+    /// §D.5.8 Table A17 — ABITS 6, SEL 0 (17 levels).
+    A17,
+    /// §D.5.8 Table B17 — ABITS 6, SEL 1 (17 levels).
+    B17,
+    /// §D.5.8 Table C17 — ABITS 6, SEL 2 (17 levels).
+    C17,
+    /// §D.5.8 Table D17 — ABITS 6, SEL 3 (17 levels).
+    D17,
+    /// §D.5.8 Table E17 — ABITS 6, SEL 4 (17 levels).
+    E17,
+    /// §D.5.8 Table F17 — ABITS 6, SEL 5 (17 levels).
+    F17,
+    /// §D.5.8 Table G17 — ABITS 6, SEL 6 (17 levels).
+    G17,
 }
 
 impl AudioHuffCodebook {
@@ -277,10 +450,12 @@ impl AudioHuffCodebook {
     /// * ABITS 2 group `A5 B5 C5 V5` → SEL 0/1/2 = `A5/B5/C5`;
     /// * ABITS 3 group `A7 B7 C7 V7` → SEL 0/1/2 = `A7/B7/C7`;
     /// * ABITS 4 group `A9 B9 C9 V9` → SEL 0/1/2 = `A9/B9/C9`;
-    /// * ABITS 5 group `A13 B13 C13 V13` → SEL 0/1/2 = `A13/B13/C13`.
+    /// * ABITS 5 group `A13 B13 C13 V13` → SEL 0/1/2 = `A13/B13/C13`;
+    /// * ABITS 6 group `A17 B17 C17 D17 E17 F17 G17 V17` → SEL 0..6 =
+    ///   `A17/B17/C17/D17/E17/F17/G17`.
     ///
     /// Returns `None` when the `(ABITS, SEL)` pair does not select a
-    /// Huffman book in this module: an `ABITS` outside `1..=4`, or a
+    /// Huffman book in this module: an `ABITS` outside `1..=6`, or a
     /// `SEL` at (or past) the group's terminal `V…` block-code entry
     /// (the [`crate::AudioQuantType::BlockCode`] path, not Huffman).
     /// Use [`crate::audio_quant_type`] first to confirm the subband is
@@ -301,13 +476,20 @@ impl AudioHuffCodebook {
             (5, 0) => Some(Self::A13),
             (5, 1) => Some(Self::B13),
             (5, 2) => Some(Self::C13),
+            (6, 0) => Some(Self::A17),
+            (6, 1) => Some(Self::B17),
+            (6, 2) => Some(Self::C17),
+            (6, 3) => Some(Self::D17),
+            (6, 4) => Some(Self::E17),
+            (6, 5) => Some(Self::F17),
+            (6, 6) => Some(Self::G17),
             _ => None,
         }
     }
 
     /// The `ABITS` family (= mid-tread quantizer level count) this book
     /// belongs to: 1 (3 levels), 2 (5 levels), 3 (7 levels), 4
-    /// (9 levels), or 5 (13 levels).
+    /// (9 levels), 5 (13 levels), or 6 (17 levels).
     #[must_use]
     pub fn abits(self) -> u8 {
         match self {
@@ -316,12 +498,14 @@ impl AudioHuffCodebook {
             Self::A7 | Self::B7 | Self::C7 => 3,
             Self::A9 | Self::B9 | Self::C9 => 4,
             Self::A13 | Self::B13 | Self::C13 => 5,
+            Self::A17 | Self::B17 | Self::C17 | Self::D17 | Self::E17 | Self::F17 | Self::G17 => 6,
         }
     }
 
     /// The number of quantizer levels of this book's `ABITS` family
     /// (Table 5-26 "Number of Index Quantization Levels"): 3, 5, 7, 9,
-    /// or 13. Equals the number of entries in the underlying §D.5 table.
+    /// 13, or 17. Equals the number of entries in the underlying §D.5
+    /// table.
     #[must_use]
     pub fn levels(self) -> u16 {
         match self.abits() {
@@ -329,7 +513,8 @@ impl AudioHuffCodebook {
             2 => 5,
             3 => 7,
             4 => 9,
-            _ => 13,
+            5 => 13,
+            _ => 17,
         }
     }
 
@@ -350,7 +535,25 @@ impl AudioHuffCodebook {
             Self::A13 => (TABLE_A13, "A13"),
             Self::B13 => (TABLE_B13, "B13"),
             Self::C13 => (TABLE_C13, "C13"),
+            Self::A17 => (TABLE_A17, "A17"),
+            Self::B17 => (TABLE_B17, "B17"),
+            Self::C17 => (TABLE_C17, "C17"),
+            Self::D17 => (TABLE_D17, "D17"),
+            Self::E17 => (TABLE_E17, "E17"),
+            Self::F17 => (TABLE_F17, "F17"),
+            Self::G17 => (TABLE_G17, "G17"),
         }
+    }
+
+    /// The longest codeword length in this book, the bit bound the
+    /// decoder needs to reach to resolve its deepest leaf. Computed from
+    /// the backing §D.5 table so it cannot drift from the data. The
+    /// 17-level §D.5.8 `A17` book is the deepest at 12 bits; the smaller
+    /// families top out at 7 (§D.5.7) or below.
+    #[must_use]
+    pub fn max_code_len(self) -> u8 {
+        let (table, _) = self.table();
+        table.iter().map(|&(_, len, _)| len).max().unwrap_or(0)
     }
 }
 
@@ -361,9 +564,12 @@ impl AudioHuffCodebook {
 /// [`MAX_AUDIO_HUFF_CODE_LEN`] bits.
 fn decode_audio_huff(br: &mut BitReader<'_>, codebook: AudioHuffCodebook) -> Result<i16> {
     let (table, name) = codebook.table();
+    // Each book's own deepest leaf bounds the walk; never read past the
+    // global worst case even if a table is malformed.
+    let bound = codebook.max_code_len().min(MAX_AUDIO_HUFF_CODE_LEN as u8);
     let mut value: u32 = 0;
     let mut bits_read: u8 = 0;
-    while bits_read < MAX_AUDIO_HUFF_CODE_LEN as u8 {
+    while bits_read < bound {
         let bit = br.read_bits(1)?;
         value = (value << 1) | bit;
         bits_read += 1;
@@ -437,6 +643,13 @@ mod tests {
         AudioHuffCodebook::A13,
         AudioHuffCodebook::B13,
         AudioHuffCodebook::C13,
+        AudioHuffCodebook::A17,
+        AudioHuffCodebook::B17,
+        AudioHuffCodebook::C17,
+        AudioHuffCodebook::D17,
+        AudioHuffCodebook::E17,
+        AudioHuffCodebook::F17,
+        AudioHuffCodebook::G17,
     ];
 
     #[test]
@@ -493,6 +706,36 @@ mod tests {
             AudioHuffCodebook::from_abits_sel(5, 2),
             Some(AudioHuffCodebook::C13)
         );
+        // ABITS 6 group `A17 B17 C17 D17 E17 F17 G17 V17`: SEL 0..6 are
+        // the seven Huffman books.
+        assert_eq!(
+            AudioHuffCodebook::from_abits_sel(6, 0),
+            Some(AudioHuffCodebook::A17)
+        );
+        assert_eq!(
+            AudioHuffCodebook::from_abits_sel(6, 1),
+            Some(AudioHuffCodebook::B17)
+        );
+        assert_eq!(
+            AudioHuffCodebook::from_abits_sel(6, 2),
+            Some(AudioHuffCodebook::C17)
+        );
+        assert_eq!(
+            AudioHuffCodebook::from_abits_sel(6, 3),
+            Some(AudioHuffCodebook::D17)
+        );
+        assert_eq!(
+            AudioHuffCodebook::from_abits_sel(6, 4),
+            Some(AudioHuffCodebook::E17)
+        );
+        assert_eq!(
+            AudioHuffCodebook::from_abits_sel(6, 5),
+            Some(AudioHuffCodebook::F17)
+        );
+        assert_eq!(
+            AudioHuffCodebook::from_abits_sel(6, 6),
+            Some(AudioHuffCodebook::G17)
+        );
     }
 
     #[test]
@@ -503,9 +746,9 @@ mod tests {
         assert_eq!(AudioHuffCodebook::from_abits_sel(3, 3), None); // V7
         assert_eq!(AudioHuffCodebook::from_abits_sel(4, 3), None); // V9
         assert_eq!(AudioHuffCodebook::from_abits_sel(5, 3), None); // V13
+        assert_eq!(AudioHuffCodebook::from_abits_sel(6, 7), None); // V17
                                                                    // No bits allocated / outside the transcribed families.
         assert_eq!(AudioHuffCodebook::from_abits_sel(0, 0), None);
-        assert_eq!(AudioHuffCodebook::from_abits_sel(6, 0), None);
         assert_eq!(AudioHuffCodebook::from_abits_sel(7, 0), None);
     }
 
@@ -523,6 +766,10 @@ mod tests {
         assert_eq!(AudioHuffCodebook::A13.levels(), 13);
         assert_eq!(AudioHuffCodebook::C13.abits(), 5);
         assert_eq!(AudioHuffCodebook::C13.levels(), 13);
+        assert_eq!(AudioHuffCodebook::A17.abits(), 6);
+        assert_eq!(AudioHuffCodebook::A17.levels(), 17);
+        assert_eq!(AudioHuffCodebook::G17.abits(), 6);
+        assert_eq!(AudioHuffCodebook::G17.levels(), 17);
     }
 
     #[test]
@@ -655,6 +902,39 @@ mod tests {
         assert_eq!(
             decode_audio_huff_at(&pack_fields(&[(4, 5)]), 0, AudioHuffCodebook::C13).unwrap(),
             (-6, 5)
+        );
+    }
+
+    #[test]
+    fn a17_longest_codes_are_twelve_bits() {
+        // §D.5.8 Table A17 (PDF p.203): ±8 are the 12-bit codes 341/340,
+        // the deepest codewords in any §D.5 family transcribed here. The
+        // decoder must walk all 12 bits to resolve them.
+        assert_eq!(AudioHuffCodebook::A17.max_code_len(), 12);
+        assert_eq!(
+            decode_audio_huff_at(&pack_fields(&[(341, 12)]), 0, AudioHuffCodebook::A17).unwrap(),
+            (8, 12)
+        );
+        assert_eq!(
+            decode_audio_huff_at(&pack_fields(&[(340, 12)]), 0, AudioHuffCodebook::A17).unwrap(),
+            (-8, 12)
+        );
+        // D17's single 1-bit code (level 0) is the shallowest 17-level
+        // entry; max_code_len tracks each book independently.
+        assert_eq!(AudioHuffCodebook::D17.max_code_len(), 9);
+        assert_eq!(
+            decode_audio_huff_at(&pack_fields(&[(0, 1)]), 0, AudioHuffCodebook::D17).unwrap(),
+            (0, 1)
+        );
+        assert_eq!(
+            decode_audio_huff_at(&pack_fields(&[(256, 9)]), 0, AudioHuffCodebook::D17).unwrap(),
+            (-8, 9)
+        );
+        // F17 carries the deepest 1-padded code (level +7 = 6-bit 0):
+        // confirm a mid-table 8-bit leaf resolves.
+        assert_eq!(
+            decode_audio_huff_at(&pack_fields(&[(5, 8)]), 0, AudioHuffCodebook::F17).unwrap(),
+            (8, 8)
         );
     }
 
