@@ -8,6 +8,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 335 (2026-06-18) — **§C.2.5 QMF-driver header bridge**
+  (`DtsFrameHeader::filter_bank_selection` / `output_r_scale`), wiring
+  the newly-staged `docs/audio/dts/dts-qmf-driver.md` resolution of
+  issue #120 into the decode path.
+  - §1 of the driver doc resolves that the `MULTIRATE_INTER` header
+    field **is** the spec's `FILTS` ("Multirate Interpolator Switch")
+    field of §5.3.1 Table 5-15, with the header table and the §C.2.5
+    `QMFInterpolation()` pseudocode agreeing bit-for-bit (no inverted
+    convention). `filter_bank_selection()` now bridges the
+    `multirate_inter` bit directly to `FilterBankSelection`
+    (`false`/`FILTS==0` → non-perfect `raCoeffLossy`, `true`/`FILTS==1`
+    → perfect `raCoeffLossLess`), removing the round-263 "polarity not
+    documented" caveat that had blocked this accessor.
+  - §2 resolves the §C.2.5 output `rScale` as the post-filterbank
+    float→PCM full-scale gain derived from the `PCMR` source resolution
+    (§5.3.1 Table 5-17): `output_r_scale()` returns `2^(bits−1)`
+    (`Some(32768.0/524288.0/8388608.0)` for 16/20/24-bit, `None` for
+    the two reserved PCMR codes). The driver doc notes §C.2.5 is
+    informative example code, so callers carrying their own internal
+    `raZ` normalization or headroom factor may still pass a custom
+    `rScale` to `QmfSynthesis::synthesize`.
+  - A parsed `DtsFrameHeader` now drives `QmfSynthesis::synthesize`
+    end-to-end with both §C.2.5 driver parameters sourced from the
+    header (covered by a new end-to-end test) rather than supplied
+    out-of-band.
+
 - Round 330 (2026-06-18) — Annex D §D.5.9 **25-level audio-data Huffman
   code books** `A25`/`B25`/`C25`/`D25`/`E25`/`F25`/`G25` (ABITS 7, the
   `nQType == 1` Huffman path), transcribed verbatim from the staged

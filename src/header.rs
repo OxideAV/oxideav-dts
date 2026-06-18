@@ -65,6 +65,7 @@
 //! follow-up.
 
 use crate::bitreader::BitReader;
+use crate::filter_bank::FilterBankSelection;
 use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
 use crate::{Error, Result};
 
@@ -677,20 +678,23 @@ pub struct DtsFrameHeader {
     /// for the polynomial to land in `docs/`.
     pub header_crc: Option<u16>,
     /// Multirate-interpolation-filter selector (`MULTIRATE_INTER`,
-    /// 1 bit). The wiki snapshot names the bit but does not
-    /// enumerate the two filter modes — round 5 preserves the raw
-    /// boolean. Per ETSI TS 102 114 §5.3 (cited in the wiki link)
-    /// this bit selects between non-perfect-reconstruction and
-    /// perfect-reconstruction QMF interpolation filters; round 263
-    /// landed the receiving side as [`crate::FilterBankSelection`]
-    /// (`from_filts(u8)` resolves the §C.2.5 `FILTS` flag to the
-    /// named §D.8 coefficient set), but the polarity mapping
-    /// between this header bit and the §C.2.5 `FILTS` parameter
-    /// (`multirate_inter == 0` → `FILTS == 0`, or the inverse) is
-    /// still not documented in the staged extracts under
-    /// `docs/audio/dts/`. Once that mapping lands, a
-    /// `filter_bank_selection()` accessor can be added here that
-    /// bridges this bit to [`crate::FilterBankSelection`] directly.
+    /// 1 bit). This bit **is** the spec's `FILTS` ("Multirate
+    /// Interpolator Switch") field of §5.3.1: per ETSI TS 102 114
+    /// V1.3.1 §5.3.1 Table 5-15 (resolved in
+    /// `docs/audio/dts/dts-qmf-driver.md` §1) it selects which of the
+    /// two §D.8 32-band interpolation FIR coefficient sets the §C.2.5
+    /// `QMFInterpolation()` driver convolves against:
+    ///
+    /// | `multirate_inter` / `FILTS` | 32-band interpolation filter |
+    /// |-----------------------------|------------------------------|
+    /// | `0` (`false`) | Non-Perfect Reconstruction (`raCoeffLossy`)    |
+    /// | `1` (`true`)  | Perfect Reconstruction (`raCoeffLossLess`)     |
+    ///
+    /// The header-field table (§5.3.1 Table 5-15) and the §C.2.5
+    /// driver pseudocode agree bit-for-bit — there is no inverted
+    /// convention. [`Self::filter_bank_selection`] bridges this bit
+    /// directly to [`crate::FilterBankSelection`] for the §C.2.5
+    /// FIR step.
     pub multirate_inter: bool,
     /// Encoder version code (`VERSION`, 4 bits, 0..=15). The wiki
     /// snapshot does not enumerate which integer values correspond
@@ -841,6 +845,66 @@ impl DtsFrameHeader {
     /// alongside the bits-per-sample column.
     pub fn source_pcm_resolution(&self) -> SourcePcmResolution {
         source_pcm_resolution_from_index(self.source_pcm_resolution_index)
+    }
+
+    /// Resolve [`Self::multirate_inter`] (the `FILTS` "Multirate
+    /// Interpolator Switch" bit) to the §D.8 32-band interpolation
+    /// FIR coefficient set the §C.2.5 `QMFInterpolation()` driver
+    /// must convolve against.
+    ///
+    /// Per **ETSI TS 102 114 V1.3.1 §5.3.1 Table 5-15** (resolved in
+    /// `docs/audio/dts/dts-qmf-driver.md` §1, which establishes that
+    /// the `MULTIRATE_INTER` header field *is* the spec's `FILTS`
+    /// field and that the header table and the §C.2.5 driver
+    /// pseudocode agree bit-for-bit):
+    ///
+    /// - `multirate_inter == false` (`FILTS == 0`) →
+    ///   [`FilterBankSelection::NonPerfectReconstruction`]
+    ///   (`raCoeffLossy`);
+    /// - `multirate_inter == true` (`FILTS == 1`) →
+    ///   [`FilterBankSelection::PerfectReconstruction`]
+    ///   (`raCoeffLossLess`).
+    ///
+    /// This is the bridge from a parsed header to the typed
+    /// [`crate::FilterBankSelection`] consumed by the §C.2.5 FIR
+    /// step (`crate::QmfSynthesis::synthesize`); it is
+    /// equivalent to
+    /// `FilterBankSelection::from_filts(u8::from(self.multirate_inter))`.
+    #[must_use]
+    pub fn filter_bank_selection(&self) -> FilterBankSelection {
+        FilterBankSelection::from_filts(u8::from(self.multirate_inter))
+    }
+
+    /// The §C.2.5 `QMFInterpolation()` output gain `rScale` — the
+    /// single post-filterbank float→PCM full-scale conversion factor
+    /// applied at the driver's `naCh[nChIndex++] = int(rScale*raZ[i])`
+    /// step.
+    ///
+    /// Per `docs/audio/dts/dts-qmf-driver.md` §2, the §C.2.5 output
+    /// `rScale` is **not** a normatively-fixed numeric constant
+    /// (§C.2.5 is one informative implementation among many). What the
+    /// spec pins down is its purpose: it brings the normalized
+    /// floating-point filterbank output `raZ[i]` (nominal range ≈
+    /// ±1.0, with the QMF `1/N` normalization already folded into the
+    /// §C.2.5 `raCosMod` scalers) up to the signed-integer full-scale
+    /// range of the source PCM resolution declared by `PCMR` (§5.3.1
+    /// Table 5-17). For a real-valued implementation that keeps `raZ`
+    /// at unit scale, `rScale = 2^(PCMR_bits − 1)` (e.g. 32768.0 for
+    /// 16-bit source PCM).
+    ///
+    /// This accessor returns that canonical derivation
+    /// `2^(bits − 1)` for the six valid `PCMR` codes (16/20/24-bit →
+    /// `Some(32768.0 / 524288.0 / 8388608.0)`), and `None` for the
+    /// two reserved/invalid codes ([`SourcePcmResolution::Invalid`]),
+    /// matching the `Option` semantics of
+    /// [`Self::source_pcm_bits_per_sample`]. Implementations that
+    /// apply their own headroom/clip-guard factor or carry a
+    /// different internal `raZ` normalization should pass their own
+    /// `rScale` to `crate::QmfSynthesis::synthesize` instead.
+    #[must_use]
+    pub fn output_r_scale(&self) -> Option<f64> {
+        self.source_pcm_bits_per_sample()
+            .map(|bits| (2.0_f64).powi(i32::from(bits) - 1))
     }
 
     /// Resolve [`Self::dialog_normalization`] to a Dialog
@@ -4262,5 +4326,141 @@ mod tests {
                 es: false
             }
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Round 335 — §C.2.5 QMF driver wiring: filter_bank_selection()
+    // (FILTS / MULTIRATE_INTER polarity per §5.3.1 Table 5-15,
+    // dts-qmf-driver.md §1) and output_r_scale() (post-filterbank
+    // rScale derivation per dts-qmf-driver.md §2).
+    // ---------------------------------------------------------------
+
+    /// `multirate_inter == false` (`FILTS == 0`) resolves to the
+    /// Non-Perfect Reconstruction §D.8 set per §5.3.1 Table 5-15.
+    #[test]
+    fn filter_bank_selection_false_is_non_perfect_reconstruction() {
+        let h = synth_hdr(|h| h.multirate_inter = false);
+        assert_eq!(
+            h.filter_bank_selection(),
+            FilterBankSelection::NonPerfectReconstruction
+        );
+        // It picks the lossy §D.8 column.
+        assert!(core::ptr::eq(
+            h.filter_bank_selection().coefficients(),
+            &crate::fir_coeff::RA_COEFF_LOSSY,
+        ));
+    }
+
+    /// `multirate_inter == true` (`FILTS == 1`) resolves to the
+    /// Perfect Reconstruction §D.8 set per §5.3.1 Table 5-15.
+    #[test]
+    fn filter_bank_selection_true_is_perfect_reconstruction() {
+        let h = synth_hdr(|h| h.multirate_inter = true);
+        assert_eq!(
+            h.filter_bank_selection(),
+            FilterBankSelection::PerfectReconstruction
+        );
+        assert!(core::ptr::eq(
+            h.filter_bank_selection().coefficients(),
+            &crate::fir_coeff::RA_COEFF_LOSSLESS,
+        ));
+    }
+
+    /// `filter_bank_selection()` is exactly the bit-for-bit bridge the
+    /// driver doc §1 establishes: equivalent to
+    /// `from_filts(u8::from(multirate_inter))` for both polarities,
+    /// and round-trips through the canonical `filts()` value.
+    #[test]
+    fn filter_bank_selection_is_the_from_filts_bridge() {
+        for bit in [false, true] {
+            let h = synth_hdr(|h| h.multirate_inter = bit);
+            assert_eq!(
+                h.filter_bank_selection(),
+                FilterBankSelection::from_filts(u8::from(bit))
+            );
+            // The selection's canonical FILTS value mirrors the bit.
+            assert_eq!(h.filter_bank_selection().filts(), u8::from(bit));
+        }
+    }
+
+    /// `output_r_scale()` returns `2^(bits-1)` for each valid PCMR
+    /// resolution per the dts-qmf-driver.md §2 derivation, and `None`
+    /// for the two reserved/invalid PCMR codes.
+    #[test]
+    fn output_r_scale_is_full_scale_for_each_valid_pcmr() {
+        // Drive every PCMR code 0..=7 and check the rScale derivation
+        // tracks source_pcm_bits_per_sample().
+        for code in 0..8u8 {
+            let h = synth_hdr(|h| h.source_pcm_resolution_index = code);
+            match h.source_pcm_bits_per_sample() {
+                Some(16) => assert_eq!(h.output_r_scale(), Some(32768.0)),
+                Some(20) => assert_eq!(h.output_r_scale(), Some(524_288.0)),
+                Some(24) => assert_eq!(h.output_r_scale(), Some(8_388_608.0)),
+                Some(other) => panic!("unexpected PCMR bits {other} for code {code}"),
+                None => assert_eq!(h.output_r_scale(), None),
+            }
+        }
+    }
+
+    /// The two reserved PCMR codes (`0b100`, `0b111`) yield no rScale,
+    /// mirroring `source_pcm_bits_per_sample()`'s `None`.
+    #[test]
+    fn output_r_scale_is_none_for_reserved_pcmr_codes() {
+        for code in [0b100u8, 0b111u8] {
+            let h = synth_hdr(|h| h.source_pcm_resolution_index = code);
+            assert_eq!(h.source_pcm_bits_per_sample(), None);
+            assert_eq!(h.output_r_scale(), None);
+        }
+    }
+
+    /// End-to-end: a parsed header drives `QmfSynthesis::synthesize`
+    /// directly through `filter_bank_selection()` + `output_r_scale()`
+    /// — the §C.2.5 driver's two header-sourced parameters — producing
+    /// the same PCM as feeding the resolved values manually.
+    #[test]
+    fn header_drives_qmf_synthesis_end_to_end() {
+        use crate::cos_mod::NUM_SUBBAND;
+        use crate::qmf_synth::QmfSynthesis;
+
+        // PCMR=0 → 16-bit → rScale 32768; multirate_inter=true →
+        // perfect reconstruction.
+        let h = synth_hdr(|h| {
+            h.multirate_inter = true;
+            h.source_pcm_resolution_index = 0;
+        });
+        let filter = h.filter_bank_selection();
+        let r_scale = h.output_r_scale().expect("valid PCMR yields rScale");
+        assert_eq!(filter, FilterBankSelection::PerfectReconstruction);
+        assert_eq!(r_scale, 32768.0);
+
+        // A large impulse across several rows so the §D.8 perfect-
+        // reconstruction FIR tail (its leading taps are ~1e-10)
+        // truncates to non-zero integer PCM at the 16-bit gain.
+        let mut row0 = [0.0_f64; NUM_SUBBAND];
+        row0[0] = 1.0e6;
+        let mut rows = vec![[0.0_f64; NUM_SUBBAND]; 16];
+        rows[0] = row0;
+
+        let mut via_header = QmfSynthesis::new();
+        let mut hdr_out = Vec::new();
+        via_header
+            .synthesize(&rows, 4, filter, r_scale, &mut hdr_out)
+            .unwrap();
+
+        // Manually with the values the driver doc resolves them to.
+        let mut manual = QmfSynthesis::new();
+        let mut man_out = Vec::new();
+        manual
+            .synthesize(
+                &rows,
+                4,
+                FilterBankSelection::PerfectReconstruction,
+                32768.0,
+                &mut man_out,
+            )
+            .unwrap();
+
+        assert_eq!(hdr_out, man_out);
+        assert!(hdr_out.iter().any(|&s| s != 0));
     }
 }

@@ -52,6 +52,17 @@ reconstruction step.
   `AudioHuffCodebook` / `decode_audio_huff_at` with a per-book
   `max_code_len` walk bound), and the §5.5 `DSYNC` subsubframe check
   word.
+- **Header → §C.2.5 QMF-driver bridge** — `DtsFrameHeader` now resolves
+  the two header-sourced parameters of the §C.2.5 `QMFInterpolation()`
+  driver directly: `filter_bank_selection()` maps the `MULTIRATE_INTER`
+  bit (the spec's `FILTS` "Multirate Interpolator Switch" of §5.3.1
+  Table 5-15) to the §D.8 coefficient set (`false`/`FILTS==0` →
+  non-perfect `raCoeffLossy`, `true`/`FILTS==1` → perfect
+  `raCoeffLossLess`), and `output_r_scale()` derives the post-filterbank
+  output gain `rScale = 2^(PCMR_bits−1)` from the §5.3.1 Table 5-17
+  source-PCM resolution (`Some(32768/524288/8388608)` for 16/20/24-bit,
+  `None` for the two reserved PCMR codes). A parsed header now feeds
+  `QmfSynthesis::synthesize` end-to-end with no out-of-band parameters.
 
 ### Not yet implemented
 
