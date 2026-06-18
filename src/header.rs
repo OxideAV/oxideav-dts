@@ -4463,4 +4463,80 @@ mod tests {
         assert_eq!(hdr_out, man_out);
         assert!(hdr_out.iter().any(|&s| s != 0));
     }
+
+    // ---------------------------------------------------------------
+    // Round 337 — MultiChannelQmf header convenience: the per-frame
+    // multi-channel driver sources its two frame-wide §C.2.5 parameters
+    // (FILTS via filter_bank_selection(), output rScale via
+    // output_r_scale()) directly from a parsed header.
+    // ---------------------------------------------------------------
+
+    /// `MultiChannelQmf::synthesize_planar_from_header` sources `FILTS`
+    /// and `rScale` from a parsed header and matches a manual planar
+    /// call with the resolved values.
+    #[test]
+    fn multichannel_from_header_matches_manual_resolution() {
+        use crate::cos_mod::NUM_SUBBAND;
+        use crate::qmf_multichannel::MultiChannelQmf;
+
+        // multirate_inter=true → perfect; PCMR=0 → 16-bit → rScale 32768.
+        let h = synth_hdr(|h| {
+            h.multirate_inter = true;
+            h.source_pcm_resolution_index = 0;
+        });
+
+        let rows: Vec<[f64; NUM_SUBBAND]> = (0..6)
+            .map(|s| {
+                let mut r = [0.0; NUM_SUBBAND];
+                r[0] = (s as f64 + 1.0) * 1e6;
+                r
+            })
+            .collect();
+        let refs: Vec<&[[f64; NUM_SUBBAND]]> = vec![rows.as_slice()];
+        let n_subs = [3usize];
+
+        let mut mc_h = MultiChannelQmf::new(1);
+        let mut via_header = vec![Vec::new()];
+        let outcome = mc_h
+            .synthesize_planar_from_header(&h, &refs, &n_subs, &mut via_header)
+            .unwrap();
+        assert_eq!(outcome, Some(()));
+
+        let mut mc_m = MultiChannelQmf::new(1);
+        let mut manual = vec![Vec::new()];
+        mc_m.synthesize_planar(
+            &refs,
+            &n_subs,
+            FilterBankSelection::PerfectReconstruction,
+            32768.0,
+            &mut manual,
+        )
+        .unwrap();
+
+        assert_eq!(via_header, manual);
+        assert!(via_header[0].iter().any(|&s| s != 0));
+    }
+
+    /// A reserved PCMR code yields `Ok(None)` from the multi-channel
+    /// header convenience (no full-scale gain defined) and leaves the
+    /// output untouched.
+    #[test]
+    fn multichannel_from_header_reserved_pcmr_yields_none() {
+        use crate::cos_mod::NUM_SUBBAND;
+        use crate::qmf_multichannel::MultiChannelQmf;
+
+        let h = synth_hdr(|h| h.source_pcm_resolution_index = 0b100); // reserved
+
+        let rows = vec![[0.0_f64; NUM_SUBBAND]; 2];
+        let refs: Vec<&[[f64; NUM_SUBBAND]]> = vec![rows.as_slice()];
+        let n_subs = [4usize];
+
+        let mut mc = MultiChannelQmf::new(1);
+        let mut out = vec![Vec::new()];
+        let outcome = mc
+            .synthesize_planar_from_header(&h, &refs, &n_subs, &mut out)
+            .unwrap();
+        assert_eq!(outcome, None);
+        assert!(out[0].is_empty());
+    }
 }

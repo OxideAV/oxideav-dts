@@ -63,6 +63,17 @@ reconstruction step.
   source-PCM resolution (`Some(32768/524288/8388608)` for 16/20/24-bit,
   `None` for the two reserved PCMR codes). A parsed header now feeds
   `QmfSynthesis::synthesize` end-to-end with no out-of-band parameters.
+- **Per-frame multi-channel synthesis** — `MultiChannelQmf` owns one
+  persistent `QmfSynthesis` per channel (the §C.2.5 `aPrmCh[ch]` filter
+  objects) and runs the per-channel driving call
+  `aPrmCh[ch].QMFInterpolation(FILTS, nSUBS[ch])` for every channel of a
+  frame in one step, with the frame-wide `FILTS` and output `rScale`
+  shared across channels. It reconstructs a whole frame's PCM either
+  **planar** (per-channel `Vec<i32>`) or **interleaved** (sample-major),
+  takes per-channel `nSUBS`, persists every channel's inter-frame filter
+  tail across calls, and offers a `synthesize_planar_from_header`
+  convenience that sources `FILTS`/`rScale` straight from a parsed
+  `DtsFrameHeader` (returning `Ok(None)` for the reserved PCMR codes).
 
 ### Not yet implemented
 

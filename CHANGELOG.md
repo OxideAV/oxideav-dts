@@ -8,6 +8,35 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 337 (2026-06-18) — **per-frame multi-channel 32-band synthesis
+  QMF driver** (`MultiChannelQmf` / `MultiChannelQmfError`), the
+  channel-loop wrapper around the §C.2.5 per-channel driving call
+  `aPrmCh[ch].QMFInterpolation(FILTS, nSUBS[ch])`
+  (`docs/audio/dts/dts-core-extracts.md` §2.4).
+  - Owns one persistent `QmfSynthesis` per channel (the §C.2.5
+    `aPrmCh[ch]` filter objects) and drives all of them over one block
+    of per-channel subband samples with the frame-wide `FILTS` and
+    output `rScale` (constant across channels per
+    `docs/audio/dts/dts-qmf-driver.md` §1/§2). Each channel's
+    inter-frame filter tail (`raX[]`) persists across calls, so a
+    multi-frame stream reuses one instance and feeds frames in order.
+  - `synthesize_planar` appends each channel's PCM to its own
+    `Vec<i32>`; `synthesize_interleaved` appends sample-major
+    (channel 0's value then channel 1's, …). Per-channel `nSUBS` is
+    honoured. Length/row-count mismatches are rejected before any
+    channel's filter state is touched.
+  - `synthesize_planar_from_header` sources `FILTS` (via
+    `DtsFrameHeader::filter_bank_selection`) and the output `rScale`
+    (via `DtsFrameHeader::output_r_scale`) straight from a parsed
+    header — the round-335 bridge — returning `Ok(None)` for the two
+    reserved PCMR codes (no full-scale gain defined).
+  - This is a pure composition of the already-landed §C.2.5
+    `QmfSynthesis` per-sample loop across channels; it adds no new spec
+    step. Tests verify per-channel independence (planar == N
+    independent single-channel runs), interleave == planar transposed,
+    inter-frame state persistence (split == concatenated), the header
+    convenience against manual resolution, and all error paths.
+
 - Round 335 (2026-06-18) — **§C.2.5 QMF-driver header bridge**
   (`DtsFrameHeader::filter_bank_selection` / `output_r_scale`), wiring
   the newly-staged `docs/audio/dts/dts-qmf-driver.md` resolution of
