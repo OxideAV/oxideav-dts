@@ -8,6 +8,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 330 (2026-06-18) — Annex D §D.5.9 **25-level audio-data Huffman
+  code books** `A25`/`B25`/`C25`/`D25`/`E25`/`F25`/`G25` (ABITS 7, the
+  `nQType == 1` Huffman path), transcribed verbatim from the staged
+  ETSI TS 102 114 V1.3.1 PDF p.205-208.
+  - Table 5-26 group for ABITS 7 is `A25 B25 C25 D25 E25 F25 G25 V25`,
+    so `AudioHuffCodebook::from_abits_sel(7, sel)` resolves SEL 0..6 to
+    the seven Huffman books and leaves SEL 7 (`V25`, the 4-element
+    block code) to the `nQType == 3` path.
+  - These books are now the deepest §D.5 family: `A25`'s ±12 codes
+    (10 325/10 324) are 14 bits, so the global worst-case decode cap
+    rose 12 → 14; the bit-at-a-time decoder still stops at each book's
+    own `AudioHuffCodebook::max_code_len`.
+  - Tests cover Table 5-26 resolution for ABITS 7 (incl. the `V25`
+    terminal `None`), the deepest 14-bit `A25` codes, the `D25` 12-bit
+    tail and `G25` 2-bit level-0 entry, and extend the generic
+    prefix-freeness + Kraft completeness + full round-trip sweeps over
+    all seven new books.
 - Round 325 (2026-06-16) — Annex D §D.5.8 **17-level audio-data Huffman
   code books** `A17`/`B17`/`C17`/`D17`/`E17`/`F17`/`G17` (ABITS 6,
   the `nQType == 1` Huffman path), transcribed verbatim from the
