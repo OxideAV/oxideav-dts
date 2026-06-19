@@ -10,8 +10,9 @@
 //! type — none of which depend on `oxideav-core`.
 
 use oxideav_core::{
-    CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry, CodecTag, Confidence,
-    Decoder, Error as CoreError, Frame, Packet, ProbeContext, Result as CoreResult, RuntimeContext,
+    AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry, CodecTag,
+    Confidence, Decoder, Error as CoreError, Frame, Packet, ProbeContext, Result as CoreResult,
+    RuntimeContext,
 };
 
 use crate::header::{detect_sync, parse_frame_header, parse_frame_header_14bit};
@@ -128,16 +129,18 @@ oxideav_core::register!("dts", register);
 /// Returns a handle whose [`Decoder::send_packet`] parses the frame
 /// header eagerly (so structural failures — bad sync, NBLKS below 5,
 /// frame size below 95 bytes, truncated header — surface at the
-/// packet boundary) and whose [`Decoder::receive_frame`] returns
-/// [`CoreError::Unsupported`] because the subframe / subband /
-/// QMF-synthesis decode path required to emit a PCM frame is still
-/// gated on follow-up rounds (the RATE / SFREQ / AMODE / PCMR
-/// header-level value tables landed in rounds 185 / 202, but the
-/// actual subframe walker remains incomplete).
+/// packet boundary) and caches the raw-16-bit frame bytes, and whose
+/// [`Decoder::receive_frame`] runs the §5.3/§5.4/§5.5 + §C.2.5
+/// [`crate::decode_core_frame`] reconstruction to emit a planar S32
+/// [`AudioFrame`] for the common Core case. Frames with a Table 5-28
+/// side-info tail (`DYNF`/`CPF`/`JOINX`), a §D.10 VQ/ADPCM blocker, or a
+/// 14-bit container payload surface [`CoreError::Unsupported`].
 pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
     Ok(Box::new(DtsDecoderHandle {
         codec_id: params.codec_id.clone(),
         last_header: None,
+        last_frame_bytes: None,
+        last_pts: 0,
         eof: false,
     }))
 }
@@ -152,6 +155,14 @@ pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
 pub struct DtsDecoderHandle {
     codec_id: CodecId,
     last_header: Option<DtsFrameHeader>,
+    /// The most recent packet's full (unpacked, raw-16-bit) frame bytes,
+    /// kept so [`Decoder::receive_frame`] can run the §5.3/§5.4/§5.5 +
+    /// §C.2.5 [`crate::decode_core_frame`] reconstruction over the whole
+    /// frame, not just the header.
+    last_frame_bytes: Option<Vec<u8>>,
+    /// The PTS carried by the most recent packet, forwarded onto the
+    /// emitted [`Frame`].
+    last_pts: i64,
     eof: bool,
 }
 
@@ -178,38 +189,70 @@ impl Decoder for DtsDecoderHandle {
         let sync = detect_sync(bytes).map_err(CoreError::from)?;
         let hdr = match sync {
             SyncWordEncoding::RawBigEndian | SyncWordEncoding::RawLittleEndian => {
-                parse_frame_header(bytes)
+                let hdr = parse_frame_header(bytes).map_err(CoreError::from)?;
+                // Raw 16-bit frames are already in the domain
+                // `decode_core_frame` operates on; keep the bytes so
+                // receive_frame can reconstruct PCM.
+                self.last_frame_bytes = Some(bytes.to_vec());
+                hdr
             }
             SyncWordEncoding::FourteenBitBigEndian | SyncWordEncoding::FourteenBitLittleEndian => {
-                parse_frame_header_14bit(bytes)
+                // 14-bit container frames would need unpacking to the
+                // 16-bit-word domain before reconstruction; that path is
+                // not wired here yet, so cache only the header.
+                self.last_frame_bytes = None;
+                parse_frame_header_14bit(bytes).map_err(CoreError::from)?
             }
-        }
-        .map_err(CoreError::from)?;
+        };
         self.last_header = Some(hdr);
+        self.last_pts = packet.pts.unwrap_or(0);
         Ok(())
     }
 
     fn receive_frame(&mut self) -> CoreResult<Frame> {
-        if self.last_header.is_none() {
+        let Some(header) = self.last_header.take() else {
             return if self.eof {
                 Err(CoreError::Eof)
             } else {
                 Err(CoreError::NeedMore)
             };
+        };
+
+        // 14-bit container frames are not reconstructed here (the bytes
+        // would need unpacking to the 16-bit-word domain first); surface
+        // the same Unsupported gap as before for those.
+        let Some(bytes) = self.last_frame_bytes.take() else {
+            return Err(CoreError::unsupported(
+                "oxideav-dts: 14-bit container frame reconstruction is not \
+                 wired; only raw 16-bit Core frames decode to PCM",
+            ));
+        };
+
+        // Run the §5.3/§5.4/§5.5 + §C.2.5 reconstruction for the common
+        // Core case. Frames with a Table 5-28 side-info tail
+        // (DYNF/CPF/JOINX) or a §D.10 VQ blocker surface as Unsupported
+        // so callers can distinguish "needs another packet" from "this
+        // frame's feature isn't decoded yet".
+        let pcm = crate::decode_core_frame(&bytes, &header)
+            .map_err(|e| CoreError::unsupported(format!("oxideav-dts: {e}")))?;
+
+        // Planar S32: one plane per channel, each sample little-endian.
+        let channels = pcm.len();
+        let samples_per_channel = pcm.first().map_or(0, Vec::len) as u32;
+        let mut data: Vec<Vec<u8>> = Vec::with_capacity(channels);
+        for plane in &pcm {
+            let mut bytes = Vec::with_capacity(plane.len() * 4);
+            for &s in plane {
+                bytes.extend_from_slice(&s.to_le_bytes());
+            }
+            data.push(bytes);
         }
-        // The RATE / SFREQ / AMODE / PCMR header-level value tables
-        // landed in rounds 185 (RATE) and 202 (SFREQ / AMODE / PCMR),
-        // but the actual subframe / subband / QMF-synthesis decode
-        // path required to emit a PCM frame is still incomplete (the
-        // §5.4.1 side-info decoders landed in round 195; the
-        // §5.4-onwards subframe walker is the next stage). Surface
-        // that gap as `Unsupported` so callers can distinguish
-        // "decoder hasn't seen a packet" (NeedMore) from "decoder
-        // rejects this build of the codec stack" (Unsupported).
-        Err(CoreError::unsupported(
-            "oxideav-dts: PCM output gated on the §5.4-onwards \
-             subframe / subband / QMF-synthesis decode path",
-        ))
+
+        Ok(Frame::Audio(AudioFrame {
+            samples: samples_per_channel,
+            pts: Some(self.last_pts),
+            data,
+        }))
     }
 
     fn flush(&mut self) -> CoreResult<()> {
@@ -219,6 +262,8 @@ impl Decoder for DtsDecoderHandle {
 
     fn reset(&mut self) -> CoreResult<()> {
         self.last_header = None;
+        self.last_frame_bytes = None;
+        self.last_pts = 0;
         self.eof = false;
         Ok(())
     }
@@ -352,6 +397,8 @@ mod tests {
         let mut handle = DtsDecoderHandle {
             codec_id: CodecId::new(CODEC_ID_STR),
             last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
             eof: false,
         };
         handle.send_packet(&pkt).unwrap();
@@ -377,6 +424,8 @@ mod tests {
         let mut handle = DtsDecoderHandle {
             codec_id: CodecId::new(CODEC_ID_STR),
             last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
             eof: false,
         };
         let err = handle.send_packet(&pkt).unwrap_err();
@@ -389,6 +438,8 @@ mod tests {
         let mut handle = DtsDecoderHandle {
             codec_id: CodecId::new(CODEC_ID_STR),
             last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
             eof: false,
         };
         let err = handle.send_packet(&pkt).unwrap_err();
@@ -401,6 +452,8 @@ mod tests {
         let mut handle = DtsDecoderHandle {
             codec_id: CodecId::new(CODEC_ID_STR),
             last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
             eof: false,
         };
         handle.send_packet(&pkt).unwrap();
@@ -413,6 +466,8 @@ mod tests {
         let mut handle = DtsDecoderHandle {
             codec_id: CodecId::new(CODEC_ID_STR),
             last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
             eof: false,
         };
         let err = handle.receive_frame().unwrap_err();
@@ -424,6 +479,8 @@ mod tests {
         let mut handle = DtsDecoderHandle {
             codec_id: CodecId::new(CODEC_ID_STR),
             last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
             eof: false,
         };
         handle.flush().unwrap();
@@ -437,6 +494,8 @@ mod tests {
         let mut handle = DtsDecoderHandle {
             codec_id: CodecId::new(CODEC_ID_STR),
             last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
             eof: false,
         };
         handle.send_packet(&pkt).unwrap();
@@ -444,5 +503,89 @@ mod tests {
         handle.reset().unwrap();
         assert!(handle.last_header().is_none());
         assert!(!handle.eof);
+    }
+
+    /// Pack `(value, width)` fields MSB-first.
+    fn pack_fields(fields: &[(u32, u8)]) -> Vec<u8> {
+        let total_bits: usize = fields.iter().map(|(_, w)| *w as usize).sum();
+        let mut out = vec![0u8; total_bits.div_ceil(8)];
+        let mut bit_pos = 0usize;
+        for &(value, width) in fields {
+            for i in (0..width).rev() {
+                let bit = ((value >> i) & 1) as u8;
+                out[bit_pos / 8] |= bit << (7 - (bit_pos % 8));
+                bit_pos += 1;
+            }
+        }
+        out
+    }
+
+    /// A complete raw-16-bit Core frame (clean header + a one-channel
+    /// all-`ABITS==0` body) decodes end to end through the registry
+    /// `Decoder`, emitting a planar S32 `AudioFrame` of the right shape
+    /// instead of the historical `Unsupported`.
+    #[test]
+    fn receive_frame_decodes_common_core_case_to_audio() {
+        // Clean header: parse the fixture, clear DYNF/CPF/ASPF, re-encode.
+        let mut header = parse_frame_header(&REAL_DTS_FRAME_HEADER).unwrap();
+        header.dynamic_range = false;
+        header.predictor_history = false;
+        header.aspf = false;
+        let mut bytes = crate::encode_frame_header_be(&header).unwrap();
+
+        // One-channel ACH (nSUBS=2, nVQSUB=2, BHUFF=6 Linear5Bit), then
+        // a one-subframe all-ABITS-0 side info, then a single DSYNC.
+        let mut body: Vec<(u32, u8)> = vec![
+            (0, 4),
+            (0, 3),
+            (0, 5),
+            (1, 5),
+            (0, 3),
+            (0, 2),
+            (0, 3),
+            (6, 3),
+        ];
+        body.push((0, 1));
+        for _ in 1..5 {
+            body.push((0, 2));
+        }
+        for _ in 5..10 {
+            body.push((0, 3));
+        }
+        for _ in 0..10 {
+            body.push((0, 2));
+        }
+        body.push((0, 2)); // SSC
+        body.push((0, 3)); // PSC
+        body.push((0, 1)); // PMODE[0][0]
+        body.push((0, 1)); // PMODE[0][1]
+        body.push((0, 5)); // ABITS[0][0]
+        body.push((0, 5)); // ABITS[0][1]
+        body.push((0xffff, 16)); // DSYNC
+        bytes.extend_from_slice(&pack_fields(&body));
+        bytes.extend_from_slice(&[0u8; 4]);
+
+        let pkt = Packet::new(0, TimeBase::new(1, 48_000), bytes);
+        let mut handle = DtsDecoderHandle {
+            codec_id: CodecId::new(CODEC_ID_STR),
+            last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
+            eof: false,
+        };
+        handle.send_packet(&pkt).unwrap();
+        let frame = handle
+            .receive_frame()
+            .expect("common Core case must decode");
+        match frame {
+            Frame::Audio(a) => {
+                // One channel, one subframe, one subsubframe -> 256 samples.
+                assert_eq!(a.data.len(), 1);
+                assert_eq!(a.samples, 256);
+                assert_eq!(a.data[0].len(), 256 * 4); // S32 planar
+                assert!(a.data[0].iter().all(|&b| b == 0)); // all-zero PCM
+            }
+            other => panic!("expected an audio frame, got {other:?}"),
+        }
     }
 }

@@ -42,6 +42,26 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     side-info gap the driver skips between consecutive §5.5 regions (that
     region — `JOIN_SHUFF` onward — is not yet transcribed, so the caller
     supplies its measured length).
+  - **`decode_core_frame`** — the top-level §5.3/§5.4/§5.5 + §C.2.5
+    orchestrator: chains the §5.3.2 `decode_audio_coding_header_at`
+    (Table 5-21), the per-subframe §5.4.1 `decode_primary_side_info_at`
+    (Table 5-28) walk, and the §5.5 + §C.2.5 reconstruction into a single
+    raw-bytes-to-PCM call for the **empty-tail common Core case** (every
+    `JOINX == 0`, `DYNF == 0`, `CPF == 0`). Non-empty side-info tails
+    surface the typed `CoreFrameDecodeError::UnsupportedSideInfoTail`
+    (the `JOIN_SHUFF`/`JOIN_SCALES`/`RANGE`/`SICRC` region is not yet
+    transcribed in `docs/audio/dts/`); §D.10 VQ blockers and reserved
+    `PCMR` propagate as `CoreFrameDecodeError::Decode`.
+
+### Changed
+
+- Round 346 (2026-06-20) — the registry `Decoder` now **decodes raw
+  16-bit Core frames to PCM**: `send_packet` caches the frame bytes and
+  `receive_frame` runs `decode_core_frame`, emitting a planar S32
+  `AudioFrame` for the common Core case (replacing the historical
+  unconditional `Unsupported`). Frames with an undecoded §5.4.x side-info
+  tail, a §D.10 VQ/ADPCM blocker, or a 14-bit container payload still
+  surface `Unsupported`.
 - Round 340 (2026-06-19) — **§5.5 Primary Audio Data Arrays (`Audio
   Data`) decode walk** (`decode_audio_data_subframe_at` /
   `SubbandSampleMatrix` / `AudioArrayError` / `AudioArrayDecodeError`),

@@ -403,6 +403,162 @@ pub struct Subframe<'a> {
     pub side_info_bits: usize,
 }
 
+/// Why a Core frame could not be decoded straight from its bytes by
+/// [`decode_core_frame`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CoreFrameDecodeError {
+    /// The frame carries a Table 5-28 side-info tail this crate does not
+    /// yet decode, so the bit cursor between a subframe's side info and
+    /// its §5.5 `Audio Data` region cannot be located. The common Core
+    /// case (`DYNF == 0`, `CPF == 0`, every `JOINX == 0`) has an empty
+    /// tail and decodes; any of those set surfaces here. Carries which
+    /// condition tripped.
+    UnsupportedSideInfoTail {
+        /// `DYNF != 0` — embedded dynamic-range `RANGE` field present.
+        dynamic_range: bool,
+        /// `CPF != 0` — a 16-bit `SICRC` side-info CRC trailer present.
+        side_info_crc: bool,
+        /// Some channel carries `JOINX > 0` — a `JOIN_SHUFF`/`JOIN_SCALES`
+        /// block present.
+        joint_intensity: bool,
+    },
+    /// A §5.3.2 / §5.4.1 / §5.5 decode step failed. Carries the
+    /// underlying [`SubframePcmError`] (or a wrapped bit-stream
+    /// [`crate::Error`] for the header/side-info walks).
+    Decode(SubframePcmError),
+    /// A structural bit-stream error in the §5.3.2 audio-coding-header or
+    /// §5.4.1 side-info walk (EOF, reserved selector, …).
+    Bitstream(crate::Error),
+}
+
+impl core::fmt::Display for CoreFrameDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            CoreFrameDecodeError::UnsupportedSideInfoTail {
+                dynamic_range,
+                side_info_crc,
+                joint_intensity,
+            } => write!(
+                f,
+                "frame carries an undecoded §5.4.x side-info tail \
+                 (DYNF={dynamic_range}, CPF/SICRC={side_info_crc}, \
+                 JOINX>0={joint_intensity}); only the empty-tail common \
+                 Core case is decoded to PCM"
+            ),
+            CoreFrameDecodeError::Decode(e) => write!(f, "{e}"),
+            CoreFrameDecodeError::Bitstream(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for CoreFrameDecodeError {}
+
+impl From<SubframePcmError> for CoreFrameDecodeError {
+    fn from(e: SubframePcmError) -> Self {
+        CoreFrameDecodeError::Decode(e)
+    }
+}
+
+impl From<crate::Error> for CoreFrameDecodeError {
+    fn from(e: crate::Error) -> Self {
+        CoreFrameDecodeError::Bitstream(e)
+    }
+}
+
+/// Decode one whole DTS Core frame to planar PCM straight from its
+/// bytes, for the common Core case (§5.3 / §5.4 / §5.5 + §C.2.5).
+///
+/// This is the top-level orchestrator that chains the landed stages:
+///
+/// 1. the §5.3.2 [`crate::decode_audio_coding_header_at`] (Table 5-21)
+///    from the bit just after the §5.3.1 frame header
+///    ([`DtsFrameHeader::header_bit_length`]);
+/// 2. for each of the `nSUBFS` subframes, the §5.4.1
+///    [`crate::decode_primary_side_info_at`] (Table 5-28) walk, then the
+///    §5.5 + §C.2.5 [`SubframePcmDecoder::decode_subframe`] reconstruction;
+///    the per-channel §C.2.5 filter tail carries across subframes.
+///
+/// `header` is the already-parsed §5.3.1 frame header; `bytes` is the
+/// frame's unpacked (16-bit-word-domain) bit-stream buffer.
+///
+/// # Scope
+///
+/// Only the **empty-tail common Core case** is decoded: every channel's
+/// `JOINX == 0`, the frame header's `DYNF == 0`, and `CPF == 0`. Any of
+/// those set means a Table 5-28 side-info tail
+/// (`JOIN_SHUFF`/`JOIN_SCALES` / `RANGE` / `SICRC`) sits between a
+/// subframe's side info and its §5.5 region; that region is not yet
+/// transcribed in `docs/audio/dts/`, so the audio-data bit offset cannot
+/// be located and the function returns
+/// [`CoreFrameDecodeError::UnsupportedSideInfoTail`] rather than guess.
+/// The §D.10 VQ / ADPCM blockers (from the §5.5 walk) surface as
+/// [`CoreFrameDecodeError::Decode`].
+///
+/// Returns planar PCM (one `Vec<i32>` per channel, `Σ nSSC · 256`
+/// samples each).
+///
+/// # Errors
+///
+/// * [`CoreFrameDecodeError::UnsupportedSideInfoTail`] for a non-empty
+///   side-info tail;
+/// * [`CoreFrameDecodeError::Bitstream`] for a §5.3.2 / §5.4.1 walk
+///   failure;
+/// * [`CoreFrameDecodeError::Decode`] for a §5.5 / §C.2.5 failure
+///   (including the §D.10 VQ blockers and a reserved `PCMR`).
+pub fn decode_core_frame(
+    bytes: &[u8],
+    header: &DtsFrameHeader,
+) -> Result<SubframePcm, CoreFrameDecodeError> {
+    // §5.3.2 Primary Audio Coding Header begins right after the §5.3.1
+    // frame header.
+    let header_bits = header.header_bit_length() as usize;
+    let (coding, ach_bits) =
+        crate::decode_audio_coding_header_at(bytes, header_bits, header.predictor_history)?;
+
+    // Gate on the empty-tail common Core case.
+    let joint_intensity = coding.joinx.iter().any(|&j| j > 0);
+    if header.dynamic_range || header.predictor_history || joint_intensity {
+        return Err(CoreFrameDecodeError::UnsupportedSideInfoTail {
+            dynamic_range: header.dynamic_range,
+            side_info_crc: header.predictor_history,
+            joint_intensity,
+        });
+    }
+
+    let channels = coding.n_pchs;
+    let mut decoder = SubframePcmDecoder::new(channels);
+    let mut pcm: SubframePcm = vec![Vec::new(); channels];
+
+    // The §5.4.1 side-info walk needs the per-channel ChannelSideInfoParams.
+    let params: Vec<_> = coding.channel_params.clone();
+
+    let mut bit = header_bits + ach_bits;
+    for _ in 0..coding.n_subframes {
+        // §5.4.1 side info (Table 5-28). The empty-tail gate above means
+        // the cursor after this walk lands exactly on the §5.5 region.
+        let (side, side_bits) = crate::decode_primary_side_info_at(bytes, bit, &params)?;
+        bit += side_bits;
+
+        let n_ssc = side.subsubframe_count.n_ssc() as usize;
+        let (block, audio_bits) = decoder.decode_subframe(
+            bytes,
+            bit,
+            header,
+            &coding,
+            &side.channels,
+            n_ssc,
+            header.aspf,
+        )?;
+        for (ch, samples) in block.into_iter().enumerate() {
+            pcm[ch].extend(samples);
+        }
+        bit += audio_bits;
+    }
+
+    Ok(pcm)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +823,140 @@ mod tests {
         // Sanity: the first subframe's §5.5 region was sf0_bits long.
         assert_eq!(n0, sf0_bits);
         assert!(frame_pcm[0].iter().any(|&s| s != 0));
+    }
+
+    /// Encode a clean §5.3.1 header (single channel, byte-aligned, with
+    /// `dynamic_range`/`predictor_history`/`aspf` as given) by parsing
+    /// the fixture, mutating the flags, and re-encoding. Returns the
+    /// encoded header bytes (a body packed separately concatenates
+    /// straight onto them; the caller parses the assembled buffer).
+    fn encode_clean_header(dynf: bool, cpf: bool) -> Vec<u8> {
+        let hdr_bytes: [u8; 16] = [
+            0x7f, 0xfe, 0x80, 0x01, 0xfc, 0x3c, 0x3f, 0xf0, 0xb5, 0xe0, 0x01, 0x38, 0x00, 0x03,
+            0xef, 0x7f,
+        ];
+        let mut header = crate::parse_frame_header(&hdr_bytes).unwrap();
+        header.dynamic_range = dynf;
+        header.predictor_history = cpf;
+        header.aspf = false;
+        crate::encode_frame_header_be(&header).unwrap()
+    }
+
+    /// A one-channel, one-subframe, all-`ABITS==0` (NoBits) Core frame
+    /// decodes end to end from raw bytes through `decode_core_frame` to
+    /// all-zero PCM of the right length.
+    #[test]
+    fn decode_core_frame_no_bits_round_trips() {
+        let mut bytes = encode_clean_header(false, false);
+
+        // §5.3.2 Audio Coding Header (Table 5-21), one channel:
+        //   SUBFS=0 -> 1 subframe; PCHS=0 -> 1 channel;
+        //   SUBS=0 -> nSUBS=2; VQSUB=1 -> nVQSUB=2 (== nSUBS, no HF VQ);
+        //   JOINX=0; THUFF=0; SHUFF=0; BHUFF=0.
+        //   SEL plane: ABITS1 1 bit, ABITS2-5 4×2 bits, ABITS6-10 5×3 bits.
+        //   With every SEL=0, every group transmits a 2-bit ADJ -> 10 ADJ.
+        let mut body: Vec<(u32, u8)> = vec![
+            (0, 4), // SUBFS
+            (0, 3), // PCHS
+            (0, 5), // SUBS -> nSUBS 2
+            (1, 5), // VQSUB -> nVQSUB 2
+            (0, 3), // JOINX
+            (0, 2), // THUFF
+            (0, 3), // SHUFF
+            (6, 3), // BHUFF=6 -> Linear5Bit (5-bit ABITS reads)
+        ];
+        body.push((0, 1)); // SEL ABITS1
+        for _ in 1..5 {
+            body.push((0, 2));
+        }
+        for _ in 5..10 {
+            body.push((0, 3));
+        }
+        for _ in 0..10 {
+            body.push((0, 2)); // ADJ
+        }
+
+        // §5.4.1 side info (Table 5-28), one subframe:
+        //   SSC=0 -> nSSC=1; PSC=0; PMODE[0][0..2]=0 (2 bits);
+        //   no PVQ (PMODE all 0); ABITS[0][0..2]=0 (2× the BHUFF=6
+        //   Linear5Bit code -> 5 bits each, value 0); nSSC==1 so no
+        //   TMODE plane; all ABITS 0 so no SCALES factors for the two
+        //   primary subbands, and nVQSUB==nSUBS so no HF VQ scales.
+        body.push((0, 2)); // SSC
+        body.push((0, 3)); // PSC
+        body.push((0, 1)); // PMODE[0][0]
+        body.push((0, 1)); // PMODE[0][1]
+        body.push((0, 5)); // ABITS[0][0] (BHUFF=6 Linear5Bit) = 0
+        body.push((0, 5)); // ABITS[0][1] = 0
+
+        // §5.5 Audio Data: nSSC=1, all ABITS 0 -> NoBits -> no audio
+        // bits, then the single DSYNC trailer.
+        body.push((0xffff, 16));
+
+        let body_bytes = pack_fields(&body);
+        bytes.extend_from_slice(&body_bytes);
+        // A little trailing slack so the header parser's lookahead is
+        // always satisfied.
+        bytes.extend_from_slice(&[0u8; 4]);
+
+        let header = crate::parse_frame_header(&bytes).unwrap();
+        assert!(!header.dynamic_range);
+        assert!(!header.predictor_history);
+        assert_eq!(header.header_bit_length() % 8, 0);
+
+        let pcm = decode_core_frame(&bytes, &header).unwrap();
+        assert_eq!(pcm.len(), 1);
+        // One subframe, one subsubframe -> 8 rows -> 256 PCM samples.
+        assert_eq!(pcm[0].len(), SAMPLES_PER_SUBSUBFRAME * PCM_PER_SUBBAND_ROW);
+        assert!(pcm[0].iter().all(|&s| s == 0));
+    }
+
+    /// A frame whose header sets `CPF` (a `SICRC` side-info tail) is
+    /// declined by `decode_core_frame` with the typed
+    /// `UnsupportedSideInfoTail` reason, not a misaligned decode.
+    #[test]
+    fn decode_core_frame_declines_side_info_tail() {
+        // Clean header but with CPF set -> a SICRC side-info tail.
+        let mut bytes = encode_clean_header(false, true);
+
+        // Minimal one-channel ACH so the gate runs after the ACH decode.
+        // (CPF set means the ACH carries a 16-bit AHCRC trailer, which
+        // decode_audio_coding_header_at consumes.)
+        let mut body: Vec<(u32, u8)> = vec![
+            (0, 4), // SUBFS
+            (0, 3), // PCHS
+            (0, 5), // SUBS
+            (1, 5), // VQSUB
+            (0, 3), // JOINX
+            (0, 2), // THUFF
+            (0, 3), // SHUFF
+            (0, 3), // BHUFF
+        ];
+        body.push((0, 1));
+        for _ in 1..5 {
+            body.push((0, 2));
+        }
+        for _ in 5..10 {
+            body.push((0, 3));
+        }
+        for _ in 0..10 {
+            body.push((0, 2));
+        }
+        body.push((0, 16)); // AHCRC (CPF set)
+        let body_bytes = pack_fields(&body);
+        bytes.extend_from_slice(&body_bytes);
+        bytes.extend_from_slice(&[0u8; 4]);
+
+        let header = crate::parse_frame_header(&bytes).unwrap();
+        assert!(header.predictor_history);
+
+        let err = decode_core_frame(&bytes, &header).unwrap_err();
+        assert!(matches!(
+            err,
+            CoreFrameDecodeError::UnsupportedSideInfoTail {
+                side_info_crc: true,
+                ..
+            }
+        ));
     }
 }

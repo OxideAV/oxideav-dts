@@ -7,11 +7,13 @@ from a locally-staged copy of ETSI TS 102 114 V1.3.1.
 ## Status
 
 This crate is an **in-progress Core-profile decoder**. The frame
-container and structural parsing are complete; the DSP chain that
-reconstructs PCM is being built up primitive by primitive and is **not
-yet wired into an end-to-end audio decoder** — the registry `Decoder`
-impl currently returns `CoreError::Unsupported` for the audio-data
-reconstruction step.
+container, structural parsing, and the full DSP reconstruction chain are
+in place: the registry `Decoder` now **decodes raw 16-bit DTS Core
+frames to PCM end to end** for the common Core case (§5.3 → §5.4 → §5.5 →
+§C.2.5), emitting a planar S32 `AudioFrame`. Frames that exercise the
+not-yet-decoded §5.4.x side-info tail (`JOINX > 0` joint intensity,
+`DYNF` dynamic range, `CPF` side-info CRC) or the §D.10 VQ / ADPCM code
+books still surface `CoreError::Unsupported`.
 
 ### What works today
 
@@ -75,19 +77,33 @@ reconstruction step.
   convenience that sources `FILTS`/`rScale` straight from a parsed
   `DtsFrameHeader` (returning `Ok(None)` for the reserved PCMR codes).
 
+- **End-to-end frame decode** — `decode_core_frame(bytes, &header)`
+  chains the §5.3.2 Audio Coding Header (Table 5-21), the per-subframe
+  §5.4.1 side-info walk (Table 5-28), and the §5.5 + §C.2.5
+  reconstruction into one raw-bytes-to-PCM call for the **empty-tail
+  common Core case** (every `JOINX == 0`, `DYNF == 0`, `CPF == 0`).
+  `SubframePcmDecoder` (with `decode_subframe` / `decode_frame`) is the
+  lower-level composition of the §5.5 `decode_audio_data_subframe_at`
+  walk and the §C.2.5 `MultiChannelQmf` synthesis, owning a persistent
+  per-channel filter so the inter-subframe filter tail carries across
+  subframes. The registry `Decoder::receive_frame` runs
+  `decode_core_frame` and emits a planar S32 `AudioFrame`; non-empty
+  side-info tails and §D.10 VQ/ADPCM blockers return a typed
+  `CoreFrameDecodeError` (mapped to `Unsupported`).
+
 ### Not yet implemented
 
-- The §5.5 `Audio Data` walker that composes the side-info, dispatch,
-  dequantization, ADPCM, and QMF primitives into reconstructed subband
-  samples — and thus PCM output (the registry `Decoder` returns
-  `Unsupported` for this step).
-- The remaining §D.5 audio-data quantization-index Huffman code books
-  feeding the `nQType == 1` Huffman path: the higher `ABITS` families
-  (§D.5.10 33-level, §D.5.11 65-level, §D.5.12 129-level). The seven
-  lowest families
-  (§D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7/§D.5.8/§D.5.9) are landed.
-- The Table 5-21 Core Audio Coding Header decoder feeding the §5.4.1
-  walker.
+- The §5.4.x side-info tail between the §5.4.1 SCALES block and the §5.5
+  `Audio Data` region — the `JOIN_SHUFF` / `JOIN_SCALES` block (when
+  `JOINX > 0`), the `RANGE` field (when `DYNF != 0`), and the `SICRC`
+  side-info CRC (when `CPF == 1`). The §C.2.3 joint-subband decode itself
+  is landed, but its `JOIN_SCALES` Huffman side-info decode (clause D.4
+  table) is not, so `decode_core_frame` decodes only the empty-tail
+  common Core case and declines frames that set any of those flags.
+- The §D.10.1 ADPCM-coefficient VQ and §D.10.2 high-frequency-subband VQ
+  code books (a `PMODE != 0` or `nVQSUB < nSUBS` subband surfaces a typed
+  blocker) — those Annex D VQ tables are not transcribed in
+  `docs/audio/dts/`.
 - The §C.2.6 `InterpolationFIR()` LFE-reconstruction driver *body* (the
   per-sample 512-tap polyphase convolution loop). The §D.8 LFE
   coefficient tables and the `nDecimationSelect` table selector are
@@ -115,6 +131,15 @@ if let Ok(_hdr) = parse_frame_header(bytes) {
 // Walk a multi-frame stream.
 for frame in iter_frames(bytes) {
     let _payload = frame.payload();
+}
+
+// Decode one whole Core frame to planar PCM (common Core case).
+use oxideav_dts::decode_core_frame;
+if let Ok(hdr) = parse_frame_header(bytes) {
+    match decode_core_frame(bytes, &hdr) {
+        Ok(pcm) => { /* pcm[ch] is a Vec<i32> of reconstructed samples */ }
+        Err(_unsupported_tail_or_vq) => { /* not the common Core case */ }
+    }
 }
 ```
 
