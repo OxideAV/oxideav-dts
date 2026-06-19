@@ -427,6 +427,7 @@
 #![warn(missing_docs)]
 
 mod audio_data;
+mod audio_header;
 mod audio_huff;
 mod bitreader;
 mod block_code;
@@ -457,6 +458,7 @@ pub use crate::audio_data::{
     audio_quant_type, terminal_sel_index, AudioQuantType, ABITS_MAX_BLOCK_CODE, ABITS_MAX_SEL,
     ABITS_TABLE_LEN, CODEBOOK_GROUP_SIZE, QUANT_LEVELS,
 };
+pub use crate::audio_header::{decode_audio_coding_header_at, AudioCodingHeader, SEL_PLANE_LEN};
 pub use crate::audio_huff::{decode_audio_huff_at, AudioHuffCodebook};
 pub use crate::block_code::{block_code_max_code, block_code_offset, decode_block_code};
 pub use crate::cos_mod::{

@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 340 (2026-06-19) — **§5.3.2 Primary Audio Coding Header
+  (Table 5-21) decoder** (`decode_audio_coding_header_at` /
+  `AudioCodingHeader` / `SEL_PLANE_LEN`), the previously-deferred
+  Table 5-21 header that produces the per-channel side-info loop
+  bounds + codebook selectors the round-281
+  `decode_primary_side_info_at` walk consumes
+  (ETSI TS 102 114 §5.3.2, staged PDF p.24-28).
+  - Decodes `SUBFS`/`nSUBFS`, `PCHS`/`nPCHS`, the per-channel
+    `SUBS`→`nSUBS`, `VQSUB`→`nVQSUB`, `JOINX`, and the
+    `THUFF`/`SHUFF`/`BHUFF` Huffman-codebook selectors (resolved into
+    the round-195 `ChannelSideInfoParams`).
+  - Decodes the transposed `SEL[ch][n]` quantization-index codebook
+    plane (ABITS-major / channel-minor, 1/2/3-bit groups for
+    ABITS 1 / 2-5 / 6-10, zero beyond) and the `arADJ[ch][n]`
+    scale-factor adjustment plane (an `ADJ` field only where `SEL`
+    indicates a Huffman code book). `AudioCodingHeader::sel` /
+    `::adj` apply the `nABITS-1` ABITS→plane shift the §5.5 walk
+    reads with.
+  - Consumes the optional 16-bit `AHCRC` Header CRC trailer when
+    `CPF == 1` (skipped, not verified — CRC polynomial undocumented).
+  - Reserved `BHUFF`/`SHUFF == 7`, `nPCHS > 5`, `nSUBS > 32`, and
+    `nVQSUB > nSUBS` surface `Error::InvalidSideInfo`.
+
 - Round 337 (2026-06-18) — **per-frame multi-channel 32-band synthesis
   QMF driver** (`MultiChannelQmf` / `MultiChannelQmfError`), the
   channel-loop wrapper around the §C.2.5 per-channel driving call
