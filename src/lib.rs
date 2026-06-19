@@ -426,6 +426,7 @@
 #![warn(missing_debug_implementations)]
 #![warn(missing_docs)]
 
+mod audio_array;
 mod audio_data;
 mod audio_header;
 mod audio_huff;
@@ -454,6 +455,9 @@ mod unpack14;
 #[cfg(feature = "registry")]
 mod registry;
 
+pub use crate::audio_array::{
+    decode_audio_data_subframe_at, AudioArrayDecodeError, AudioArrayError, SubbandSampleMatrix,
+};
 pub use crate::audio_data::{
     audio_quant_type, terminal_sel_index, AudioQuantType, ABITS_MAX_BLOCK_CODE, ABITS_MAX_SEL,
     ABITS_TABLE_LEN, CODEBOOK_GROUP_SIZE, QUANT_LEVELS,

@@ -93,6 +93,28 @@ impl<'a> BitReader<'a> {
     pub(crate) fn absolute_bit_position(&self) -> usize {
         self.pos
     }
+
+    /// Borrow the backing byte buffer. The round-340 §5.5 audio-array
+    /// walk uses this to bridge a running reader into the byte-offset
+    /// [`crate::audio_huff::decode_audio_huff_at`] entry point (which
+    /// re-seeks over the same buffer) and then re-advance this reader.
+    pub(crate) fn backing_bytes(&self) -> &'a [u8] {
+        self.bytes
+    }
+
+    /// Advance the reader by `n` bits without materialising a value,
+    /// returning [`Error::UnexpectedEof`] if the skip would walk past
+    /// the end of the buffer. Used by the round-340 §5.5 audio-array
+    /// walk after a Huffman index was decoded through the byte-offset
+    /// entry point.
+    pub(crate) fn skip_bits(&mut self, n: u32) -> Result<()> {
+        let end = self.pos + n as usize;
+        if end > self.bytes.len() * 8 {
+            return Err(Error::UnexpectedEof);
+        }
+        self.pos = end;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

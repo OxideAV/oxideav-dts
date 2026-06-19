@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 340 (2026-06-19) — **§5.5 Primary Audio Data Arrays (`Audio
+  Data`) decode walk** (`decode_audio_data_subframe_at` /
+  `SubbandSampleMatrix` / `AudioArrayError` / `AudioArrayDecodeError`),
+  composing the landed per-subband primitives into the Table 5-29
+  per-subsubframe loop (ETSI TS 102 114 §5.5, staged PDF p.31-33).
+  - Extracts the eight `AUDIO[m]` quantization indices for every
+    `(ch, n)` subband, dispatching on the round-258 `AudioQuantType`
+    `(ABITS, SEL)` resolution: NoBits (zeros), Huffman (§D.5 books via
+    `from_abits_sel`), NoEncoding (sign-extended `ABITS-3`-bit binary
+    code), BlockCode (two §D.6 `V…`-book words of the table-title
+    widths — V3 7-bit … V25 19-bit — each expanded to four samples).
+  - Applies the round-293 §5.5 transient-aware `rScale = rStepSize ·
+    SCALES[ch][n][transient] · arADJ[ch][SEL]` dequantization into the
+    per-channel subband-sample matrix the §C.2.5 QMF consumes, and
+    consumes the §5.5 `DSYNC` trailers (every subsubframe when
+    `ASPF == 1`, else only the last).
+  - High-frequency VQ subbands (`nVQSUB < nSUBS`, §D.10.2) and
+    `PMODE != 0` ADPCM subbands (§D.10.1 coefficient VQ) surface
+    `AudioArrayError::VqCodebookUnavailable` — those Annex D VQ code
+    books are not yet transcribed into `docs/audio/dts/`. The common
+    Core case (all-linear/Huffman/block, `PMODE == 0`,
+    `nVQSUB == nSUBS`) decodes end-to-end.
+
 - Round 340 (2026-06-19) — **§5.3.2 Primary Audio Coding Header
   (Table 5-21) decoder** (`decode_audio_coding_header_at` /
   `AudioCodingHeader` / `SEL_PLANE_LEN`), the previously-deferred
