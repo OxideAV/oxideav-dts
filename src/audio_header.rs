@@ -130,6 +130,56 @@ impl AudioCodingHeader {
         }
         self.adj[ch][idx]
     }
+
+    /// The per-channel `nSUBS[ch]` loop bound (number of active subbands)
+    /// collected from [`Self::channel_params`], in channel order. This
+    /// is the slice the §5.5 [`crate::decode_audio_data_subframe_at`]
+    /// walk and the §C.2.5 [`crate::MultiChannelQmf`] driver both take.
+    #[must_use]
+    pub fn n_subs(&self) -> Vec<usize> {
+        self.channel_params.iter().map(|p| p.n_subs).collect()
+    }
+
+    /// The per-channel `nVQSUB[ch]` loop bound (the highest
+    /// non-high-frequency-VQ subband index) collected from
+    /// [`Self::channel_params`], in channel order. The §5.5 walk uses it
+    /// as its inner-loop bound and to detect the §D.10.2 high-frequency
+    /// VQ region (`nVQSUB < nSUBS`).
+    #[must_use]
+    pub fn n_vqsub(&self) -> Vec<usize> {
+        self.channel_params.iter().map(|p| p.n_vqsub).collect()
+    }
+
+    /// Test-only constructor for a single-channel [`AudioCodingHeader`]
+    /// with a uniform `sel` across the whole SEL plane, used by the
+    /// `subframe_pcm` bridge tests that need a header without parsing a
+    /// full §5.3.2 bit stream. `n_subs` / `n_vqsub` set the channel's
+    /// loop bounds; `joinx` defaults to 0 (no joint coding).
+    #[cfg(test)]
+    pub(crate) fn single_channel_for_test(n_subs: usize, n_vqsub: usize, sel: u8) -> Self {
+        use crate::subframe::ChannelSideInfoParams;
+        AudioCodingHeader {
+            n_subframes: 1,
+            n_pchs: 1,
+            joinx: vec![0],
+            channel_params: vec![ChannelSideInfoParams {
+                n_subs,
+                n_vqsub,
+                abits_codebook: AbitsCodebook::from_bhuff(0).unwrap(),
+                tmode_codebook: TmodeCodebook::from_thuff(0),
+                scales_codebook: ScalesCodebook::from_shuff(0).unwrap(),
+            }],
+            sel: vec![[sel; SEL_PLANE_LEN]],
+            adj: vec![[ScaleFactorAdjustment::Adj0; SEL_PLANE_LEN]],
+        }
+    }
+
+    /// Test-only setter for `joinx[ch]`, used by the `subframe_pcm`
+    /// bridge test that checks the joint-intensity decline path.
+    #[cfg(test)]
+    pub(crate) fn set_joinx_for_test(&mut self, ch: usize, joinx: u8) {
+        self.joinx[ch] = joinx;
+    }
 }
 
 /// The §5.3.2 `SEL` plane bit width for `ABITS` index `n` (`0..26`),

@@ -449,6 +449,7 @@ mod qmf_synth;
 mod side_info;
 mod step_size;
 mod subframe;
+mod subframe_pcm;
 mod sum_diff;
 mod unpack14;
 
@@ -516,6 +517,9 @@ pub use crate::step_size::{
 pub use crate::subframe::{
     decode_primary_side_info_at, ChannelSideInfo, ChannelSideInfoParams, PrimarySideInfo,
     MAX_PRIMARY_CHANNELS,
+};
+pub use crate::subframe_pcm::{
+    SubframePcm, SubframePcmDecoder, SubframePcmError, PCM_PER_SUBBAND_ROW,
 };
 pub use crate::sum_diff::{
     front_sum_difference_required, sum_difference_decode_f64, sum_difference_decode_i32,

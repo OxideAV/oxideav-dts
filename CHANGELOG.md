@@ -8,6 +8,32 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 346 (2026-06-20) — **§5.5 + §C.2.5 end-to-end subframe→PCM
+  bridge** (`SubframePcmDecoder` / `SubframePcm` / `SubframePcmError` /
+  `PCM_PER_SUBBAND_ROW`), composing the round-340 §5.5
+  `decode_audio_data_subframe_at` walk and the round-330 §C.2.5
+  `MultiChannelQmf` synthesis into one per-subframe call (ETSI TS 102 114
+  §5.4/§5.5 + Annex C §C.2.5).
+  - `SubframePcmDecoder::decode_subframe` takes the parsed §5.3.1
+    `DtsFrameHeader` (for the frame-wide `FILTS` and output `rScale`),
+    the §5.3.2 `AudioCodingHeader` (for the `SEL`/`arADJ` planes and the
+    per-channel `nSUBS`/`nVQSUB`/`JOINX`), and the §5.4.1
+    `ChannelSideInfo`, runs the §5.5 audio-data walk to per-channel
+    subband-sample matrices, then the §C.2.5 32-band synthesis to planar
+    PCM (`nSSC * 256` samples per channel).
+  - Owns one persistent `MultiChannelQmf`, so a caller feeding a frame's
+    `nSUBFS` subframes (or a stream's frames) in order carries each
+    channel's inter-subframe filter tail (`raX[]`/`raZ[]`) as the §C.2.5
+    driver requires.
+  - Declines cleanly (without disturbing the filter state) on a reserved
+    `PCMR` code (`ReservedPcmResolution`), a `JOINX[ch] > 0`
+    joint-intensity channel (`JointSubbandUnsupported` — the §C.2.3
+    joint-subband decode is landed but its `JOIN_SCALES` side-info is not
+    yet wired), and a channel-count mismatch (`ChannelCountMismatch`).
+    The §D.10 VQ blockers propagate from the walk as `AudioData(...)`.
+  - Adds `AudioCodingHeader::n_subs()` / `n_vqsub()` accessors that
+    collect the per-channel loop bounds the walk and the QMF driver both
+    take.
 - Round 340 (2026-06-19) — **§5.5 Primary Audio Data Arrays (`Audio
   Data`) decode walk** (`decode_audio_data_subframe_at` /
   `SubbandSampleMatrix` / `AudioArrayError` / `AudioArrayDecodeError`),
