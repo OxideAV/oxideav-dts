@@ -519,7 +519,7 @@ pub use crate::subframe::{
     MAX_PRIMARY_CHANNELS,
 };
 pub use crate::subframe_pcm::{
-    SubframePcm, SubframePcmDecoder, SubframePcmError, PCM_PER_SUBBAND_ROW,
+    Subframe, SubframePcm, SubframePcmDecoder, SubframePcmError, PCM_PER_SUBBAND_ROW,
 };
 pub use crate::sum_diff::{
     front_sum_difference_required, sum_difference_decode_f64, sum_difference_decode_i32,

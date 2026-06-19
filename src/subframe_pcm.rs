@@ -319,6 +319,88 @@ impl SubframePcmDecoder {
 
         Ok((pcm, bits_consumed))
     }
+
+    /// Decode all `nSUBFS` subframes of one core frame to a single block
+    /// of planar PCM, appending each subframe's output (in order) onto
+    /// the per-channel vectors so the persistent §C.2.5 filter tail
+    /// carries across subframe boundaries (§5.3.2 `nSUBFS`; §C.2.5
+    /// per-channel filter continuity).
+    ///
+    /// `bytes` is the frame's bit-stream buffer; `first_audio_bit` is the
+    /// bit offset of the **first** subframe's §5.5 `Audio Data` region
+    /// (the cursor a caller is left at after the first subframe's §5.4.1
+    /// side info). Each [`Subframe`] supplies that subframe's already-
+    /// decoded §5.4.1 [`ChannelSideInfo`], its `n_ssc`, and the byte gap
+    /// (`side_info_bits`) the caller must skip between this subframe's
+    /// §5.5 region and the next subframe's §5.5 region — i.e. the bits of
+    /// the *next* subframe's side info, which this driver does not itself
+    /// decode (that §5.4.x region — `JOIN_SHUFF` onward — is not yet
+    /// transcribed). The last subframe's `side_info_bits` is ignored.
+    ///
+    /// Returns the concatenated planar PCM (one `Vec<i32>` per channel,
+    /// `Σ nSSC · 256` samples each) plus the total bits consumed from
+    /// `first_audio_bit`.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`SubframePcmDecoder::decode_subframe`], plus
+    /// [`SubframePcmError::ChannelCountMismatch`] if a subframe's
+    /// side-info channel count disagrees with the driver. A failure on
+    /// the *k*-th subframe leaves the PCM from subframes `0..k` already
+    /// appended (the §C.2.5 filter state is likewise advanced through
+    /// `k-1`); callers that need all-or-nothing semantics should clone
+    /// the decoder first.
+    pub fn decode_frame(
+        &mut self,
+        bytes: &[u8],
+        first_audio_bit: usize,
+        header: &DtsFrameHeader,
+        coding: &AudioCodingHeader,
+        subframes: &[Subframe<'_>],
+        aspf: bool,
+    ) -> Result<(SubframePcm, usize), SubframePcmError> {
+        let channels = self.qmf.channel_count();
+        let mut pcm: SubframePcm = vec![Vec::new(); channels];
+        let mut bit = first_audio_bit;
+
+        for (k, sf) in subframes.iter().enumerate() {
+            let (block, audio_bits) =
+                self.decode_subframe(bytes, bit, header, coding, sf.side, sf.n_ssc, aspf)?;
+            for (ch, samples) in block.into_iter().enumerate() {
+                pcm[ch].extend(samples);
+            }
+            bit += audio_bits;
+            // Skip the next subframe's §5.4.1 side-info region (the bits
+            // the caller pre-measured); the last subframe has no
+            // successor side info to skip.
+            if k + 1 < subframes.len() {
+                bit += sf.side_info_bits;
+            }
+        }
+
+        Ok((pcm, bit - first_audio_bit))
+    }
+}
+
+/// One subframe's already-decoded inputs for
+/// [`SubframePcmDecoder::decode_frame`].
+///
+/// The driver decodes each subframe's §5.5 `Audio Data` region from the
+/// shared bit-stream buffer; this struct carries the per-subframe §5.4.1
+/// side information the audio-data walk needs plus the framing offsets
+/// the driver uses to step from one subframe's §5.5 region to the next.
+#[derive(Debug, Clone, Copy)]
+pub struct Subframe<'a> {
+    /// This subframe's decoded §5.4.1 per-channel side information (the
+    /// round-281 [`crate::decode_primary_side_info_at`] output).
+    pub side: &'a [ChannelSideInfo],
+    /// This subframe's subsubframe count `nSSC = SSC + 1` (§5.4.1).
+    pub n_ssc: usize,
+    /// The bit length of the **next** subframe's §5.4.1 side-info region
+    /// — the gap the driver skips after this subframe's §5.5 region to
+    /// reach the next subframe's §5.5 region. Ignored for the last
+    /// subframe of the frame.
+    pub side_info_bits: usize,
 }
 
 #[cfg(test)]
@@ -510,5 +592,80 @@ mod tests {
         assert_eq!(pcm.len(), 1);
         assert_eq!(pcm[0].len(), SAMPLES_PER_SUBSUBFRAME * PCM_PER_SUBBAND_ROW);
         assert!(pcm[0].iter().all(|&s| s == 0));
+    }
+
+    /// `decode_frame` over two NFE subframes equals running
+    /// `decode_subframe` twice on the same persistent decoder — the
+    /// §C.2.5 filter tail carries across the subframe boundary and the
+    /// PCM is concatenated in order.
+    #[test]
+    fn decode_frame_concatenates_and_carries_filter_state() {
+        let hdr_bytes: [u8; 16] = [
+            0x7f, 0xfe, 0x80, 0x01, 0xfc, 0x3c, 0x3f, 0xf0, 0xb5, 0xe0, 0x01, 0x38, 0x00, 0x03,
+            0xef, 0x7f,
+        ];
+        let header = crate::parse_frame_header(&hdr_bytes).unwrap();
+        let coding = AudioCodingHeader::single_channel_for_test(1, 1, 7);
+
+        // Two subframes, each: 8 NFE 5-bit values + a 16-bit DSYNC. The
+        // second subframe's §5.5 region directly follows the first (no
+        // inter-subframe side info in this synthetic stream, so
+        // side_info_bits = 0).
+        let mut ch = ChannelSideInfo::cleared();
+        ch.abits[0] = 8;
+        ch.scales[0][0] = 4;
+        let side = vec![ch];
+
+        let mk_sf = |base: i32| -> Vec<(u32, u8)> {
+            let mut f: Vec<(u32, u8)> = (0..8).map(|i| (((base + i) as u32) & 0x1f, 5u8)).collect();
+            f.push((0xffff, 16));
+            f
+        };
+        let mut fields = mk_sf(1);
+        let sf0_bits: usize = fields.iter().map(|(_, w)| *w as usize).sum();
+        fields.extend(mk_sf(-4));
+        let stream = pack_fields(&fields);
+
+        let subframes = [
+            Subframe {
+                side: &side,
+                n_ssc: 1,
+                side_info_bits: 0, // next subframe's §5.5 immediately follows
+            },
+            Subframe {
+                side: &side,
+                n_ssc: 1,
+                side_info_bits: 0,
+            },
+        ];
+
+        let mut frame_dec = SubframePcmDecoder::new(1);
+        let (frame_pcm, frame_bits) = frame_dec
+            .decode_frame(&stream, 0, &header, &coding, &subframes, false)
+            .unwrap();
+
+        // Reference: two decode_subframe calls on one persistent decoder.
+        let mut seq_dec = SubframePcmDecoder::new(1);
+        let (b0, n0) = seq_dec
+            .decode_subframe(&stream, 0, &header, &coding, &side, 1, false)
+            .unwrap();
+        let (b1, n1) = seq_dec
+            .decode_subframe(&stream, n0, &header, &coding, &side, 1, false)
+            .unwrap();
+        let mut expect = b0;
+        for (ch, samples) in b1.into_iter().enumerate() {
+            expect[ch].extend(samples);
+        }
+
+        assert_eq!(frame_pcm, expect);
+        assert_eq!(frame_bits, n0 + n1);
+        // Each subframe is one subsubframe -> 256 PCM samples; two -> 512.
+        assert_eq!(
+            frame_pcm[0].len(),
+            2 * SAMPLES_PER_SUBSUBFRAME * PCM_PER_SUBBAND_ROW
+        );
+        // Sanity: the first subframe's §5.5 region was sf0_bits long.
+        assert_eq!(n0, sf0_bits);
+        assert!(frame_pcm[0].iter().any(|&s| s != 0));
     }
 }

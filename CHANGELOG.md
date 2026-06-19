@@ -34,6 +34,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   - Adds `AudioCodingHeader::n_subs()` / `n_vqsub()` accessors that
     collect the per-channel loop bounds the walk and the QMF driver both
     take.
+  - `SubframePcmDecoder::decode_frame` + the `Subframe` descriptor drive
+    all §5.3.2 `nSUBFS` subframes of one core frame through the persistent
+    decoder, concatenating each subframe's PCM in order so the §C.2.5
+    per-channel filter tail carries across subframe boundaries. The
+    `Subframe::side_info_bits` field carries the inter-subframe §5.4.x
+    side-info gap the driver skips between consecutive §5.5 regions (that
+    region — `JOIN_SHUFF` onward — is not yet transcribed, so the caller
+    supplies its measured length).
 - Round 340 (2026-06-19) — **§5.5 Primary Audio Data Arrays (`Audio
   Data`) decode walk** (`decode_audio_data_subframe_at` /
   `SubbandSampleMatrix` / `AudioArrayError` / `AudioArrayDecodeError`),
