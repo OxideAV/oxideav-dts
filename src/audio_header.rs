@@ -213,10 +213,12 @@ fn adj_transmitted(n: usize, sel: u8) -> bool {
 /// Decode the §5.3.2 Primary Audio Coding Header (Table 5-21) from
 /// `bytes` starting at `bit_offset` (MSB-first from `bytes[0]`).
 ///
-/// `cpf` is the §5.3.1 frame-header `CPF` (Predictor History Flag /
-/// CRC-present-for-side-info) bit — when set, a 16-bit `AHCRC` Header
-/// CRC trailer is consumed (but not verified; see the module docs).
-/// Pass [`crate::DtsFrameHeader::predictor_history`].
+/// `cpf` is the §5.3.1 frame-header `CPF` (CRC Present Flag, Table 5-1)
+/// bit — when set, a 16-bit `AHCRC` Header CRC trailer is consumed (but
+/// not verified; see the module docs). Pass
+/// [`crate::DtsFrameHeader::crc_present`], **not** `predictor_history`:
+/// `CPF` is the same flag that gates the §5.3.1 `HCRC`, the §5.4.1
+/// `SICRC`, and this `AHCRC`.
 ///
 /// Returns `(AudioCodingHeader, bits_consumed)`; the cursor
 /// `bit_offset + bits_consumed` is the first bit of the §5.4 subframe

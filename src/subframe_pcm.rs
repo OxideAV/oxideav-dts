@@ -76,7 +76,7 @@ use crate::filter_bank::FilterBankSelection;
 use crate::header::DtsFrameHeader;
 use crate::qmf_multichannel::{MultiChannelQmf, MultiChannelQmfError};
 use crate::step_size::StepSizeTable;
-use crate::subframe::ChannelSideInfo;
+use crate::subframe::{ChannelSideInfo, SideInfoTail};
 
 /// One subframe's reconstructed PCM, planar (one `Vec<i32>` per
 /// channel). Every channel's vec has the same length — `nSSC * 256`
@@ -408,19 +408,25 @@ pub struct Subframe<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CoreFrameDecodeError {
-    /// The frame carries a Table 5-28 side-info tail this crate does not
-    /// yet decode, so the bit cursor between a subframe's side info and
-    /// its §5.5 `Audio Data` region cannot be located. The common Core
-    /// case (`DYNF == 0`, `CPF == 0`, every `JOINX == 0`) has an empty
-    /// tail and decodes; any of those set surfaces here. Carries which
-    /// condition tripped.
+    /// The frame carries a Table 5-28 joint-intensity side-info tail
+    /// this crate does not yet decode: some channel has `JOINX > 0`,
+    /// so a variable-length `JOIN_SHUFF` / `JOIN_SCALES` block (gated on
+    /// the unstaged joint-scale table) sits between a subframe's side
+    /// info and its §5.5 `Audio Data` region, and the audio-data bit
+    /// offset cannot be located. The `DYNF` (`RANGE`) and `CPF`
+    /// (`SICRC`) tail fields are decoded (see [`decode_core_frame`]);
+    /// only joint-intensity surfaces here.
     UnsupportedSideInfoTail {
         /// `DYNF != 0` — embedded dynamic-range `RANGE` field present.
+        /// Retained for source compatibility; no longer a decline
+        /// reason (the `RANGE` field is decoded and applied post-QMF).
         dynamic_range: bool,
         /// `CPF != 0` — a 16-bit `SICRC` side-info CRC trailer present.
+        /// Retained for source compatibility; no longer a decline
+        /// reason (the `SICRC` word is consumed for framing).
         side_info_crc: bool,
         /// Some channel carries `JOINX > 0` — a `JOIN_SHUFF`/`JOIN_SCALES`
-        /// block present.
+        /// block present. This is the sole remaining decline reason.
         joint_intensity: bool,
     },
     /// A §5.3.2 / §5.4.1 / §5.5 decode step failed. Carries the
@@ -484,14 +490,20 @@ impl From<crate::Error> for CoreFrameDecodeError {
 ///
 /// # Scope
 ///
-/// Only the **empty-tail common Core case** is decoded: every channel's
-/// `JOINX == 0`, the frame header's `DYNF == 0`, and `CPF == 0`. Any of
-/// those set means a Table 5-28 side-info tail
-/// (`JOIN_SHUFF`/`JOIN_SCALES` / `RANGE` / `SICRC`) sits between a
-/// subframe's side info and its §5.5 region; that region is not yet
-/// transcribed in `docs/audio/dts/`, so the audio-data bit offset cannot
-/// be located and the function returns
+/// Every channel must have `JOINX == 0` (no joint-intensity sub-band
+/// coding): a `JOINX > 0` channel carries a variable-length
+/// `JOIN_SHUFF` / `JOIN_SCALES` Table 5-28 tail gated on the unstaged
+/// joint-scale table, so the §5.5 bit offset cannot be located and the
+/// function returns
 /// [`CoreFrameDecodeError::UnsupportedSideInfoTail`] rather than guess.
+///
+/// The frame header's `DYNF` (embedded dynamic range) and `CPF`
+/// (side-info CRC) tail fields **are** handled: each subframe's
+/// [`crate::decode_primary_side_info_tail_at`] consumes the 8-bit
+/// `RANGE` index (`DYNF != 0`) and the 16-bit `SICRC` word (`CPF == 1`),
+/// and the §D.4 [`crate::drc_range`] multiplier is applied to that
+/// subframe's reconstructed PCM after QMF synthesis (per §5.4.1).
+///
 /// The §D.10 VQ / ADPCM blockers (from the §5.5 walk) surface as
 /// [`CoreFrameDecodeError::Decode`].
 ///
@@ -500,8 +512,8 @@ impl From<crate::Error> for CoreFrameDecodeError {
 ///
 /// # Errors
 ///
-/// * [`CoreFrameDecodeError::UnsupportedSideInfoTail`] for a non-empty
-///   side-info tail;
+/// * [`CoreFrameDecodeError::UnsupportedSideInfoTail`] for a
+///   joint-intensity (`JOINX > 0`) side-info tail;
 /// * [`CoreFrameDecodeError::Bitstream`] for a §5.3.2 / §5.4.1 walk
 ///   failure;
 /// * [`CoreFrameDecodeError::Decode`] for a §5.5 / §C.2.5 failure
@@ -511,17 +523,20 @@ pub fn decode_core_frame(
     header: &DtsFrameHeader,
 ) -> Result<SubframePcm, CoreFrameDecodeError> {
     // §5.3.2 Primary Audio Coding Header begins right after the §5.3.1
-    // frame header.
+    // frame header. The §5.3.1 CRC-present flag (CPF == `crc_present`)
+    // controls the optional 16-bit SICRC trailer of every subframe's
+    // §5.4.1 side info.
     let header_bits = header.header_bit_length() as usize;
-    let (coding, ach_bits) =
-        crate::decode_audio_coding_header_at(bytes, header_bits, header.predictor_history)?;
+    let cpf = header.crc_present;
+    let (coding, ach_bits) = crate::decode_audio_coding_header_at(bytes, header_bits, cpf)?;
 
-    // Gate on the empty-tail common Core case.
+    // Joint-intensity (JOINX > 0) is the only side-info tail still
+    // undecodable; DYNF / CPF are handled below.
     let joint_intensity = coding.joinx.iter().any(|&j| j > 0);
-    if header.dynamic_range || header.predictor_history || joint_intensity {
+    if joint_intensity {
         return Err(CoreFrameDecodeError::UnsupportedSideInfoTail {
             dynamic_range: header.dynamic_range,
-            side_info_crc: header.predictor_history,
+            side_info_crc: cpf,
             joint_intensity,
         });
     }
@@ -535,13 +550,25 @@ pub fn decode_core_frame(
 
     let mut bit = header_bits + ach_bits;
     for _ in 0..coding.n_subframes {
-        // §5.4.1 side info (Table 5-28). The empty-tail gate above means
-        // the cursor after this walk lands exactly on the §5.5 region.
+        // §5.4.1 side info (Table 5-28) through the end of the SCALES
+        // block.
         let (side, side_bits) = crate::decode_primary_side_info_at(bytes, bit, &params)?;
         bit += side_bits;
 
+        // The Table 5-28 RANGE (DYNF) / SICRC (CPF) tail sits between
+        // the SCALES block and the §5.5 region. (JOINX == 0 here, so no
+        // JOIN_SHUFF / JOIN_SCALES bits.)
+        let (tail, tail_bits): (SideInfoTail, usize) = crate::decode_primary_side_info_tail_at(
+            bytes,
+            bit,
+            &coding.joinx,
+            header.dynamic_range,
+            cpf,
+        )?;
+        bit += tail_bits;
+
         let n_ssc = side.subsubframe_count.n_ssc() as usize;
-        let (block, audio_bits) = decoder.decode_subframe(
+        let (mut block, audio_bits) = decoder.decode_subframe(
             bytes,
             bit,
             header,
@@ -550,6 +577,14 @@ pub fn decode_core_frame(
             n_ssc,
             header.aspf,
         )?;
+
+        // §5.4.1: when DYNF != 0, multiply every reconstructed PCM
+        // sample of this subframe by the §D.4 RANGE multiplier, applied
+        // after QMF synthesis.
+        if let Some(idx) = tail.range_index {
+            apply_range(&mut block, crate::drc_range(idx));
+        }
+
         for (ch, samples) in block.into_iter().enumerate() {
             pcm[ch].extend(samples);
         }
@@ -557,6 +592,28 @@ pub fn decode_core_frame(
     }
 
     Ok(pcm)
+}
+
+/// Apply the §5.4.1 `RANGE` dynamic-range multiplier (the §D.4
+/// [`crate::drc_range`] linear gain) to every reconstructed PCM sample
+/// of one subframe, in place, after QMF synthesis. Results are rounded
+/// to the nearest integer and saturated to the `i32` range.
+fn apply_range(block: &mut SubframePcm, range: f64) {
+    if range == 1.0 {
+        return;
+    }
+    for channel in block.iter_mut() {
+        for sample in channel.iter_mut() {
+            let scaled = (*sample as f64 * range).round();
+            *sample = if scaled >= i32::MAX as f64 {
+                i32::MAX
+            } else if scaled <= i32::MIN as f64 {
+                i32::MIN
+            } else {
+                scaled as i32
+            };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -837,7 +894,13 @@ mod tests {
         ];
         let mut header = crate::parse_frame_header(&hdr_bytes).unwrap();
         header.dynamic_range = dynf;
-        header.predictor_history = cpf;
+        // CPF is the §5.3.1 CRC-Present-Flag (`crc_present`), the flag
+        // that gates HCRC / AHCRC / SICRC — NOT `predictor_history`.
+        header.crc_present = cpf;
+        // When CPF is set the header carries a 16-bit HCRC; supply a
+        // value so the BE encoder serialises the field (its value is not
+        // verified on decode per §5.3.1).
+        header.header_crc = if cpf { Some(0) } else { None };
         header.aspf = false;
         crate::encode_frame_header_be(&header).unwrap()
     }
@@ -901,7 +964,7 @@ mod tests {
 
         let header = crate::parse_frame_header(&bytes).unwrap();
         assert!(!header.dynamic_range);
-        assert!(!header.predictor_history);
+        assert!(!header.crc_present);
         assert_eq!(header.header_bit_length() % 8, 0);
 
         let pcm = decode_core_frame(&bytes, &header).unwrap();
@@ -911,26 +974,119 @@ mod tests {
         assert!(pcm[0].iter().all(|&s| s == 0));
     }
 
-    /// A frame whose header sets `CPF` (a `SICRC` side-info tail) is
-    /// declined by `decode_core_frame` with the typed
-    /// `UnsupportedSideInfoTail` reason, not a misaligned decode.
-    #[test]
-    fn decode_core_frame_declines_side_info_tail() {
-        // Clean header but with CPF set -> a SICRC side-info tail.
-        let mut bytes = encode_clean_header(false, true);
+    /// The §5.3.2 one-channel NoBits ACH body shared by the tail tests:
+    /// SUBFS=0/PCHS=0/SUBS=0(nSUBS 2)/VQSUB=1(nVQSUB 2)/JOINX=0, all
+    /// codebook selectors 0 except BHUFF=6 (Linear5Bit), the SEL plane,
+    /// and the 10 ADJ groups. When `cpf` is set a 16-bit AHCRC trailer
+    /// is appended (consumed by `decode_audio_coding_header_at`).
+    fn nobits_ach_body(cpf: bool) -> Vec<(u32, u8)> {
+        let mut body: Vec<(u32, u8)> = vec![
+            (0, 4), // SUBFS
+            (0, 3), // PCHS
+            (0, 5), // SUBS -> nSUBS 2
+            (1, 5), // VQSUB -> nVQSUB 2
+            (0, 3), // JOINX
+            (0, 2), // THUFF
+            (0, 3), // SHUFF
+            (6, 3), // BHUFF=6 -> Linear5Bit
+        ];
+        body.push((0, 1)); // SEL ABITS1
+        for _ in 1..5 {
+            body.push((0, 2));
+        }
+        for _ in 5..10 {
+            body.push((0, 3));
+        }
+        for _ in 0..10 {
+            body.push((0, 2)); // ADJ
+        }
+        if cpf {
+            body.push((0, 16)); // AHCRC
+        }
+        body
+    }
 
-        // Minimal one-channel ACH so the gate runs after the ACH decode.
-        // (CPF set means the ACH carries a 16-bit AHCRC trailer, which
-        // decode_audio_coding_header_at consumes.)
+    /// The §5.4.1 one-subframe NoBits side-info SCALES block (SSC/PSC,
+    /// 2 PMODE bits, 2 zero ABITS Linear5Bit reads — no SCALES, no HF
+    /// VQ since nVQSUB==nSUBS).
+    fn nobits_side_info() -> Vec<(u32, u8)> {
+        vec![
+            (0, 2), // SSC
+            (0, 3), // PSC
+            (0, 1), // PMODE[0][0]
+            (0, 1), // PMODE[0][1]
+            (0, 5), // ABITS[0][0] = 0
+            (0, 5), // ABITS[0][1] = 0
+        ]
+    }
+
+    /// A frame whose header sets `CPF` (a 16-bit `SICRC` side-info tail)
+    /// now decodes end to end: the `SICRC` word is consumed for framing
+    /// (its CRC test is not applied per §5.4.1) and the §5.5 region lands
+    /// at the right cursor, yielding all-zero PCM of the right length.
+    #[test]
+    fn decode_core_frame_consumes_sicrc_tail() {
+        let mut bytes = encode_clean_header(false, true); // DYNF=0, CPF=1
+        let mut body = nobits_ach_body(true);
+        body.extend(nobits_side_info());
+        body.push((0xABCD, 16)); // SICRC (CPF=1) — consumed, not verified
+        body.push((0xffff, 16)); // §5.5 DSYNC
+        let body_bytes = pack_fields(&body);
+        bytes.extend_from_slice(&body_bytes);
+        bytes.extend_from_slice(&[0u8; 4]);
+
+        let header = crate::parse_frame_header(&bytes).unwrap();
+        assert!(header.crc_present);
+
+        let pcm = decode_core_frame(&bytes, &header).unwrap();
+        assert_eq!(pcm.len(), 1);
+        assert_eq!(pcm[0].len(), SAMPLES_PER_SUBSUBFRAME * PCM_PER_SUBBAND_ROW);
+        assert!(pcm[0].iter().all(|&s| s == 0));
+    }
+
+    /// A frame whose header sets `DYNF` carries an 8-bit `RANGE` index in
+    /// each subframe's side-info tail; `decode_core_frame` consumes it
+    /// and (for a non-unity index) the §D.4 multiplier scales the PCM.
+    /// With an all-zero (NoBits) subframe the PCM is zero regardless of
+    /// `RANGE`, which proves only the framing/cursor is correct — the
+    /// `apply_range` value is covered by `range_unity_is_noop` /
+    /// `range_scales_pcm`.
+    #[test]
+    fn decode_core_frame_consumes_range_tail() {
+        let mut bytes = encode_clean_header(true, false); // DYNF=1, CPF=0
+        let mut body = nobits_ach_body(false);
+        body.extend(nobits_side_info());
+        body.push((127, 8)); // RANGE index 127 -> unity (no SICRC, CPF=0)
+        body.push((0xffff, 16)); // §5.5 DSYNC
+        let body_bytes = pack_fields(&body);
+        bytes.extend_from_slice(&body_bytes);
+        bytes.extend_from_slice(&[0u8; 4]);
+
+        let header = crate::parse_frame_header(&bytes).unwrap();
+        assert!(header.dynamic_range);
+
+        let pcm = decode_core_frame(&bytes, &header).unwrap();
+        assert_eq!(pcm.len(), 1);
+        assert_eq!(pcm[0].len(), SAMPLES_PER_SUBSUBFRAME * PCM_PER_SUBBAND_ROW);
+        assert!(pcm[0].iter().all(|&s| s == 0));
+    }
+
+    /// A frame with a `JOINX > 0` channel is still declined — the
+    /// joint-intensity `JOIN_SHUFF`/`JOIN_SCALES` tail needs the unstaged
+    /// joint-scale table.
+    #[test]
+    fn decode_core_frame_declines_joint_intensity() {
+        let mut bytes = encode_clean_header(false, false);
+        // ACH with JOINX[0] = 1 (> 0).
         let mut body: Vec<(u32, u8)> = vec![
             (0, 4), // SUBFS
             (0, 3), // PCHS
             (0, 5), // SUBS
             (1, 5), // VQSUB
-            (0, 3), // JOINX
+            (1, 3), // JOINX = 1 (> 0)
             (0, 2), // THUFF
             (0, 3), // SHUFF
-            (0, 3), // BHUFF
+            (6, 3), // BHUFF
         ];
         body.push((0, 1));
         for _ in 1..5 {
@@ -942,21 +1098,40 @@ mod tests {
         for _ in 0..10 {
             body.push((0, 2));
         }
-        body.push((0, 16)); // AHCRC (CPF set)
         let body_bytes = pack_fields(&body);
         bytes.extend_from_slice(&body_bytes);
         bytes.extend_from_slice(&[0u8; 4]);
 
         let header = crate::parse_frame_header(&bytes).unwrap();
-        assert!(header.predictor_history);
-
         let err = decode_core_frame(&bytes, &header).unwrap_err();
         assert!(matches!(
             err,
             CoreFrameDecodeError::UnsupportedSideInfoTail {
-                side_info_crc: true,
+                joint_intensity: true,
                 ..
             }
         ));
+    }
+
+    /// `apply_range` with the §D.4 unity index leaves the PCM untouched.
+    #[test]
+    fn range_unity_is_noop() {
+        let mut block: SubframePcm = vec![vec![100, -200, 0, i32::MAX, i32::MIN]];
+        apply_range(&mut block, crate::drc_range(127)); // 1.0
+        assert_eq!(block[0], vec![100, -200, 0, i32::MAX, i32::MIN]);
+    }
+
+    /// `apply_range` scales every sample by the §D.4 multiplier with
+    /// round-to-nearest and `i32` saturation.
+    #[test]
+    fn range_scales_pcm() {
+        // Index 47 -> 0.1; index 207 -> 10.0.
+        let mut down: SubframePcm = vec![vec![1000, -1000, 5]];
+        apply_range(&mut down, crate::drc_range(47)); // 0.1
+        assert_eq!(down[0], vec![100, -100, 1]); // 5*0.1=0.5 -> round 1
+
+        let mut up: SubframePcm = vec![vec![10, -10, i32::MAX]];
+        apply_range(&mut up, crate::drc_range(207)); // 10.0
+        assert_eq!(up[0], vec![100, -100, i32::MAX]); // saturates
     }
 }
