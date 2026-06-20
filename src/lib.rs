@@ -434,6 +434,7 @@ mod bitreader;
 mod block_code;
 mod cos_mod;
 mod d6_block_book;
+mod drc_range;
 mod dsync;
 mod filter_bank;
 mod fir_coeff;
@@ -474,6 +475,7 @@ pub use crate::d6_block_book::{
     d6_book_for_levels, decode_block_code_table, D6BlockBook, D6_BLOCK_ELEMENTS, D6_BOOK_13,
     D6_BOOK_17, D6_BOOK_25, D6_BOOK_3, D6_BOOK_5, D6_BOOK_7, D6_BOOK_9,
 };
+pub use crate::drc_range::{drc_range, DRC_RANGE_LEN, DRC_RANGE_MULTIPLIER, DRC_RANGE_UNITY_INDEX};
 pub use crate::dsync::{decode_dsync_at, dsync_present, DSYNC_WIRE_BITS, DSYNC_WORD};
 pub use crate::filter_bank::FilterBankSelection;
 pub use crate::fir_coeff::{FIR_COEFF_LEN, RA_COEFF_LOSSLESS, RA_COEFF_LOSSY};
