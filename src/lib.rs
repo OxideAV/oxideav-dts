@@ -517,8 +517,8 @@ pub use crate::step_size::{
     STEP_SIZE_LOSSLESS, STEP_SIZE_LOSSY, STEP_SIZE_SCALE_SHIFT, STEP_SIZE_TABLE_LEN,
 };
 pub use crate::subframe::{
-    decode_primary_side_info_at, ChannelSideInfo, ChannelSideInfoParams, PrimarySideInfo,
-    MAX_PRIMARY_CHANNELS,
+    decode_primary_side_info_at, decode_primary_side_info_tail_at, ChannelSideInfo,
+    ChannelSideInfoParams, PrimarySideInfo, SideInfoTail, MAX_PRIMARY_CHANNELS,
 };
 pub use crate::subframe_pcm::{
     decode_core_frame, CoreFrameDecodeError, Subframe, SubframePcm, SubframePcmDecoder,

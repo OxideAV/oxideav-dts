@@ -24,10 +24,12 @@
 //!
 //! # Scope
 //!
-//! The walk covers Table 5-28 from `SSC = ExtractBits(2)` through
-//! the end of the SCALES block (the high-frequency VQ subband
-//! loop). Three trailing pieces of Table 5-28 are *not* walked and
-//! remain follow-ups, each blocked on material outside this round:
+//! [`decode_primary_side_info_at`] covers Table 5-28 from
+//! `SSC = ExtractBits(2)` through the end of the SCALES block (the
+//! high-frequency VQ subband loop); the companion
+//! [`decode_primary_side_info_tail_at`] handles the `RANGE` (`DYNF`)
+//! and `SICRC` (`CPF`) tail that follows. Two pieces remain
+//! follow-ups, each blocked on material outside this round:
 //!
 //! * the ADPCM prediction-coefficient lookup
 //!   (`ADPCMCoeffVQ.LookUp(nVQIndex, PVQ[ch][n])`) needs the clause
@@ -35,14 +37,16 @@
 //!   in [`ChannelSideInfo::pvq_index`] so the lookup can be applied
 //!   later without re-walking the bit stream;
 //! * the `JOIN_SHUFF` / `JOIN_SCALES` block (transmitted only when
-//!   `JOINX[ch] > 0`) needs the clause D.4 joint-scale-factor table
-//!   to resolve the biased index into a multiplier;
-//! * the `RANGE` (transmitted when `DYNF != 0`; clause D.4 table)
-//!   and `SICRC` (when `CPF == 1`) tail.
+//!   `JOINX[ch] > 0`) needs the joint-scale-factor table to resolve
+//!   the biased index into a multiplier — the tail decoder declines
+//!   (`Error::InvalidSideInfo { field: "JOINX", .. }`) rather than
+//!   guess the variable `JOIN_SCALES` bit count.
 //!
-//! The returned `bits_consumed` cursor points at the first bit after
-//! the SCALES block, exactly where the JOIN_SHUFF reads begin, so a
-//! follow-up can continue the walk without re-decoding.
+//! The `RANGE` index the tail decoder captures feeds the §D.4
+//! [`crate::drc_range`] multiplier table; the §5.4.1 pseudocode
+//! applies that gain to every reconstructed PCM sample *after* QMF
+//! synthesis. The `bits_consumed` cursor of the SCALES-block walk
+//! points exactly where the JOIN_SHUFF / RANGE / SICRC reads begin.
 
 use crate::bitreader::BitReader;
 use crate::cos_mod::NUM_SUBBAND;
@@ -327,6 +331,112 @@ pub fn decode_primary_side_info_at(
         PrimarySideInfo {
             subsubframe_count,
             channels,
+        },
+        bits_consumed,
+    ))
+}
+
+/// The §5.4.1 Table 5-28 side-information **tail** that follows the
+/// SCALES block: the optional `RANGE` (dynamic-range) and `SICRC`
+/// (side-info CRC) fields.
+///
+/// Produced by [`decode_primary_side_info_tail_at`]. The cursor it
+/// reports lands on the first bit of the §5.5 Audio Data region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct SideInfoTail {
+    /// The 8-bit `nIndex` of the §5.4.1 `RANGE = RANGEtbl.LookUp(nIndex)`
+    /// dynamic-range field — `Some` iff the frame header's `DYNF != 0`,
+    /// `None` otherwise. Feed it to [`crate::drc_range`] to obtain the
+    /// linear multiplier the §5.4.1 pseudocode applies to every
+    /// reconstructed PCM sample **after** QMF synthesis.
+    pub range_index: Option<u8>,
+    /// Whether a 16-bit `SICRC` side-info CRC word was present and
+    /// skipped (`true` iff the frame header's `CPF == 1`). Per §5.4.1
+    /// "the CRC value test shall not be applied", so the word is
+    /// consumed for framing but not verified.
+    pub side_info_crc_present: bool,
+}
+
+/// Walk the §5.4.1 Table 5-28 side-information **tail** — the
+/// `JOIN_SHUFF` / `JOIN_SCALES` / `RANGE` / `SICRC` fields that follow
+/// the SCALES block — starting at `bit_offset` (the cursor
+/// [`decode_primary_side_info_at`] leaves a caller at).
+///
+/// Field order, exactly as Table 5-28 fixes it (staged PDF p.29):
+///
+/// 1. `for (ch) if (JOINX[ch]>0) JOIN_SHUFF[ch] = ExtractBits(3)`;
+/// 2. `for (ch) if (JOINX[ch]>0) { … JOIN_SCALES … }` (variable bits);
+/// 3. `if (DYNF != 0) { nIndex = ExtractBits(8); RANGEtbl.LookUp(…) }`;
+/// 4. `if (CPF == 1) SICRC = ExtractBits(16)`.
+///
+/// `joinx` is the §5.3.2 per-channel `JOINX` array (length `nPCHS`);
+/// `dynf` / `cpf` are the §5.3.1 frame-header `DYNF` / `CPF` flags.
+///
+/// # Scope
+///
+/// The joint-intensity sub-band path (`JOINX[ch] > 0`) needs the
+/// joint-scale (`JScaleTbl`) table and the `JOIN_SCALES` codebook
+/// decode, neither of which is transcribed under `docs/audio/dts/`;
+/// when any `JOINX[ch] > 0` this walker returns
+/// [`Error::InvalidSideInfo`] with field `"JOINX"` rather than guess
+/// the variable-length `JOIN_SCALES` bit count and mis-align the §5.5
+/// cursor. The `RANGE` (DYNF) and `SICRC` (CPF) fields are both fully
+/// specified and handled: `RANGE`'s 8-bit index is captured (the §D.4
+/// [`crate::drc_range`] lookup is applied later, post-QMF) and `SICRC`'s
+/// 16 bits are consumed for framing.
+///
+/// Returns `(SideInfoTail, bits_consumed)`.
+///
+/// # Errors
+///
+/// * [`Error::InvalidSideInfo`] with field `"JOINX"` when any
+///   `joinx[ch] > 0` (joint-intensity tail not yet decodable);
+/// * [`Error::UnexpectedEof`] when the buffer ends mid-walk.
+pub fn decode_primary_side_info_tail_at(
+    bytes: &[u8],
+    bit_offset: usize,
+    joinx: &[u8],
+    dynf: bool,
+    cpf: bool,
+) -> Result<(SideInfoTail, usize)> {
+    // The JOIN_SHUFF / JOIN_SCALES block (JOINX[ch] > 0) needs the
+    // joint-scale table that is not staged; decline rather than guess
+    // the variable JOIN_SCALES bit count.
+    if let Some(&j) = joinx.iter().find(|&&j| j > 0) {
+        return Err(Error::InvalidSideInfo {
+            field: "JOINX",
+            value: j as u32,
+        });
+    }
+
+    let byte_offset = bit_offset / 8;
+    let intra_byte = bit_offset % 8;
+    let mut br = BitReader::from_byte_offset(bytes, byte_offset);
+    if intra_byte > 0 {
+        br.read_bits(intra_byte as u32)?;
+    }
+
+    // 3. if (DYNF != 0) { nIndex = ExtractBits(8); RANGEtbl.LookUp(…) }
+    let range_index = if dynf {
+        Some(br.read_bits(8)? as u8)
+    } else {
+        None
+    };
+
+    // 4. if (CPF == 1) SICRC = ExtractBits(16). The CRC value test
+    //    shall not be applied (§5.4.1); the 16 bits are consumed for
+    //    framing only.
+    let side_info_crc_present = cpf;
+    if cpf {
+        let _sicrc = br.read_bits(16)?;
+    }
+
+    let bits_consumed = br.absolute_bit_position() - bit_offset;
+    Ok((
+        SideInfoTail {
+            range_index,
+            side_info_crc_present,
         },
         bits_consumed,
     ))
@@ -690,5 +800,72 @@ mod tests {
             assert_eq!(scales[0], RMS_6BIT[n]);
         }
         assert_eq!(bits, 5 + 32 + 160 + 192);
+    }
+
+    #[test]
+    fn tail_empty_when_no_dynf_no_cpf() {
+        // JOINX all zero, DYNF=0, CPF=0 -> the tail is empty.
+        let stream = pack_fields(&[(0, 8)]); // any padding
+        let (tail, bits) =
+            decode_primary_side_info_tail_at(&stream, 0, &[0, 0], false, false).unwrap();
+        assert_eq!(bits, 0);
+        assert_eq!(tail.range_index, None);
+        assert!(!tail.side_info_crc_present);
+    }
+
+    #[test]
+    fn tail_captures_range_index_when_dynf() {
+        // DYNF=1 -> 8-bit RANGE index; CPF=0.
+        let stream = pack_fields(&[(207, 8)]); // index 207 -> +20 dB / 10.0x
+        let (tail, bits) = decode_primary_side_info_tail_at(&stream, 0, &[0], true, false).unwrap();
+        assert_eq!(bits, 8);
+        assert_eq!(tail.range_index, Some(207));
+        assert!(!tail.side_info_crc_present);
+        assert_eq!(crate::drc_range(tail.range_index.unwrap()), 10.0);
+    }
+
+    #[test]
+    fn tail_skips_sicrc_when_cpf() {
+        // DYNF=0, CPF=1 -> 16-bit SICRC consumed, value not surfaced.
+        let stream = pack_fields(&[(0xABCD, 16)]);
+        let (tail, bits) = decode_primary_side_info_tail_at(&stream, 0, &[0], false, true).unwrap();
+        assert_eq!(bits, 16);
+        assert_eq!(tail.range_index, None);
+        assert!(tail.side_info_crc_present);
+    }
+
+    #[test]
+    fn tail_range_then_sicrc_when_both() {
+        // DYNF=1 and CPF=1 -> 8-bit RANGE then 16-bit SICRC, in order.
+        let stream = pack_fields(&[(127, 8), (0x1234, 16)]); // index 127 -> unity
+        let (tail, bits) =
+            decode_primary_side_info_tail_at(&stream, 0, &[0, 0], true, true).unwrap();
+        assert_eq!(bits, 24);
+        assert_eq!(tail.range_index, Some(127));
+        assert!(tail.side_info_crc_present);
+        assert_eq!(crate::drc_range(127), 1.0);
+    }
+
+    #[test]
+    fn tail_declines_joint_intensity() {
+        // Any JOINX[ch] > 0 -> the joint-scale tail is not decodable.
+        let stream = pack_fields(&[(0, 8)]);
+        assert_eq!(
+            decode_primary_side_info_tail_at(&stream, 0, &[0, 2], false, false).unwrap_err(),
+            Error::InvalidSideInfo {
+                field: "JOINX",
+                value: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn tail_honours_nonzero_bit_offset() {
+        // The tail decoder must respect a non-byte-aligned start cursor
+        // (the SCALES block rarely ends on a byte boundary).
+        let stream = pack_fields(&[(0b101, 3), (207, 8)]); // 3-bit prefix, then RANGE
+        let (tail, bits) = decode_primary_side_info_tail_at(&stream, 3, &[0], true, false).unwrap();
+        assert_eq!(bits, 8);
+        assert_eq!(tail.range_index, Some(207));
     }
 }
