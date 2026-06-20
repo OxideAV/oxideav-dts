@@ -4,9 +4,7 @@
 //! Transcribed verbatim from ETSI TS 102 114 V1.3.1 (2011-08) Annex D
 //! §D.4 "Dynamic Range Control" (staged at
 //! `docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf`, PDF
-//! p.195-197; CSV mirror + provenance at
-//! `docs/audio/dts/tables/dts-d4-drc-range.csv` /
-//! `dts-d4-drc.meta.md`). The spec table is laid out as two
+//! p.195-197). The spec table is laid out as two
 //! index/value groups per printed row; this module preserves the
 //! `Multiplier` column only (the linear gain factor), indexed by the
 //! 8-bit `nIndex` field `0..=255`. The companion `Q18 binary` column
