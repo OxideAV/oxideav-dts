@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 350 (2026-06-20) — **§5.4.1 Table 5-28 `RANGE`/`SICRC` side-info
+  tail + §D.4 Dynamic Range Control**, extending `decode_core_frame`
+  beyond the empty-tail common Core case to all `JOINX == 0` frames.
+  - `drc_range` / `DRC_RANGE_MULTIPLIER` — the §D.4 "Dynamic Range
+    Control" 256-entry linear-gain `RANGE` look-up table (ETSI TS 102 114
+    Annex D §D.4, transcribed from the staged spec PDF; CSV +
+    provenance under `docs/audio/dts/tables/dts-d4-drc-range.csv`).
+  - `decode_primary_side_info_tail_at` / `SideInfoTail` — the Table 5-28
+    tail after the SCALES block: the 8-bit `RANGE` index (`DYNF != 0`,
+    captured) and the 16-bit `SICRC` (`CPF == 1`, consumed for framing,
+    not verified per §5.4.1). Joint-intensity (`JOINX > 0`) is declined.
+  - `decode_core_frame` now reads each subframe's tail, applies the §D.4
+    `RANGE` multiplier to that subframe's PCM after QMF synthesis when
+    `DYNF != 0`, and consumes `SICRC` when `CPF == 1`.
+
+### Fixed
+
+- Round 350 — the `decode_core_frame` empty-tail gate and the
+  `decode_audio_coding_header_at` `AHCRC` read were both keyed off
+  `DtsFrameHeader::predictor_history` (the §5.3.1 `PRED_HISTORY` flag),
+  but the field that gates `HCRC` / `AHCRC` / `SICRC` is `CPF`
+  (`crc_present`, §5.3.1 Table 5-1). Both now use `crc_present`.
+
 - Round 346 (2026-06-20) — **§5.5 + §C.2.5 end-to-end subframe→PCM
   bridge** (`SubframePcmDecoder` / `SubframePcm` / `SubframePcmError` /
   `PCM_PER_SUBBAND_ROW`), composing the round-340 §5.5

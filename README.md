@@ -10,9 +10,12 @@ This crate is an **in-progress Core-profile decoder**. The frame
 container, structural parsing, and the full DSP reconstruction chain are
 in place: the registry `Decoder` now **decodes raw 16-bit DTS Core
 frames to PCM end to end** for the common Core case (§5.3 → §5.4 → §5.5 →
-§C.2.5), emitting a planar S32 `AudioFrame`. Frames that exercise the
-not-yet-decoded §5.4.x side-info tail (`JOINX > 0` joint intensity,
-`DYNF` dynamic range, `CPF` side-info CRC) or the §D.10 VQ / ADPCM code
+§C.2.5), emitting a planar S32 `AudioFrame`. The §5.4.1 Table 5-28
+side-info tail is now handled for **dynamic range** (`DYNF`: the 8-bit
+`RANGE` index is read and the §D.4 multiplier applied to the
+reconstructed PCM after QMF synthesis) and the **side-info CRC** (`CPF`:
+the 16-bit `SICRC` is consumed for framing, not verified). Only
+**joint-intensity** frames (`JOINX > 0`) and the §D.10 VQ / ADPCM code
 books still surface `CoreError::Unsupported`.
 
 ### What works today
@@ -79,27 +82,35 @@ books still surface `CoreError::Unsupported`.
 
 - **End-to-end frame decode** — `decode_core_frame(bytes, &header)`
   chains the §5.3.2 Audio Coding Header (Table 5-21), the per-subframe
-  §5.4.1 side-info walk (Table 5-28), and the §5.5 + §C.2.5
-  reconstruction into one raw-bytes-to-PCM call for the **empty-tail
-  common Core case** (every `JOINX == 0`, `DYNF == 0`, `CPF == 0`).
-  `SubframePcmDecoder` (with `decode_subframe` / `decode_frame`) is the
-  lower-level composition of the §5.5 `decode_audio_data_subframe_at`
-  walk and the §C.2.5 `MultiChannelQmf` synthesis, owning a persistent
-  per-channel filter so the inter-subframe filter tail carries across
-  subframes. The registry `Decoder::receive_frame` runs
-  `decode_core_frame` and emits a planar S32 `AudioFrame`; non-empty
-  side-info tails and §D.10 VQ/ADPCM blockers return a typed
-  `CoreFrameDecodeError` (mapped to `Unsupported`).
+  §5.4.1 side-info walk (Table 5-28) **including the `RANGE`/`SICRC`
+  tail**, and the §5.5 + §C.2.5 reconstruction into one raw-bytes-to-PCM
+  call. It decodes every frame whose channels all have `JOINX == 0`,
+  including `DYNF != 0` frames (the §D.4 dynamic-range multiplier is
+  applied to each subframe's PCM after synthesis) and `CPF == 1` frames
+  (the `SICRC` word is consumed). `SubframePcmDecoder` (with
+  `decode_subframe` / `decode_frame`) is the lower-level composition of
+  the §5.5 `decode_audio_data_subframe_at` walk and the §C.2.5
+  `MultiChannelQmf` synthesis, owning a persistent per-channel filter so
+  the inter-subframe filter tail carries across subframes. The registry
+  `Decoder::receive_frame` runs `decode_core_frame` and emits a planar
+  S32 `AudioFrame`; joint-intensity tails and §D.10 VQ/ADPCM blockers
+  return a typed `CoreFrameDecodeError` (mapped to `Unsupported`).
+- **§5.4.1 side-info tail** — `decode_primary_side_info_tail_at` /
+  `SideInfoTail` walk the Table 5-28 tail after the SCALES block: the
+  8-bit `RANGE` dynamic-range index (`DYNF`, looked up via the §D.4
+  `drc_range` 256-entry multiplier table) and the 16-bit `SICRC`
+  (`CPF`). Joint-intensity (`JOINX > 0`) is declined pending the
+  joint-scale table.
 
 ### Not yet implemented
 
-- The §5.4.x side-info tail between the §5.4.1 SCALES block and the §5.5
-  `Audio Data` region — the `JOIN_SHUFF` / `JOIN_SCALES` block (when
-  `JOINX > 0`), the `RANGE` field (when `DYNF != 0`), and the `SICRC`
-  side-info CRC (when `CPF == 1`). The §C.2.3 joint-subband decode itself
-  is landed, but its `JOIN_SCALES` Huffman side-info decode (clause D.4
-  table) is not, so `decode_core_frame` decodes only the empty-tail
-  common Core case and declines frames that set any of those flags.
+- The §5.4.1 `JOIN_SHUFF` / `JOIN_SCALES` joint-intensity tail (when
+  `JOINX > 0`). The §C.2.3 joint-subband decode itself is landed, but its
+  `JOIN_SCALES` Huffman side-info decode needs the joint-scale-factor
+  table, which is not transcribed in `docs/audio/dts/`, so
+  `decode_core_frame` still declines `JOINX > 0` frames. (The `RANGE` /
+  `DYNF` and `SICRC` / `CPF` tail fields *are* handled — see "What works
+  today".)
 - The §D.10.1 ADPCM-coefficient VQ and §D.10.2 high-frequency-subband VQ
   code books (a `PMODE != 0` or `nVQSUB < nSUBS` subband surfaces a typed
   blocker) — those Annex D VQ tables are not transcribed in
