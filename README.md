@@ -10,11 +10,19 @@ This crate is an **in-progress Core-profile decoder**. The frame
 container, structural parsing, and the full DSP reconstruction chain are
 in place: the registry `Decoder` now **decodes raw 16-bit DTS Core
 frames to PCM end to end** for the common Core case (§5.3 → §5.4 → §5.5 →
-§C.2.5), emitting a planar S32 `AudioFrame`. The §5.4.1 Table 5-28
-side-info tail is now handled for **dynamic range** (`DYNF`: the 8-bit
-`RANGE` index is read and the §D.4 multiplier applied to the
-reconstructed PCM after QMF synthesis) and the **side-info CRC** (`CPF`:
-the 16-bit `SICRC` is consumed for framing, not verified). Only
+§C.2.5), emitting a planar S32 `AudioFrame`, and **carries the §C.2.5
+per-channel QMF filter tail across frames** (`CoreStreamDecoder`) so a
+multi-frame elementary stream reconstructs without a per-frame
+filter-warmup transient. This full-chain output is **validated against a
+black-box `ffmpeg -c:a dca` reference decode** of the bundled 5-frame
+fixture: our PCM is shape-identical to the reference (Pearson
+correlation 1.0, 100 % sign agreement on both channels), confirming the
+reconstruction chain is correct up to the implementation-defined output
+`rScale` gain (the spec leaves §C.2.5 `rScale` non-normative). The
+§5.4.1 Table 5-28 side-info tail is handled for **dynamic range**
+(`DYNF`: the 8-bit `RANGE` index is read and the §D.4 multiplier applied
+to the reconstructed PCM after QMF synthesis) and the **side-info CRC**
+(`CPF`: the 16-bit `SICRC` is consumed for framing, not verified). Only
 **joint-intensity** frames (`JOINX > 0`) and the §D.10 VQ / ADPCM code
 books still surface `CoreError::Unsupported`.
 
@@ -91,10 +99,21 @@ books still surface `CoreError::Unsupported`.
   `decode_subframe` / `decode_frame`) is the lower-level composition of
   the §5.5 `decode_audio_data_subframe_at` walk and the §C.2.5
   `MultiChannelQmf` synthesis, owning a persistent per-channel filter so
-  the inter-subframe filter tail carries across subframes. The registry
-  `Decoder::receive_frame` runs `decode_core_frame` and emits a planar
-  S32 `AudioFrame`; joint-intensity tails and §D.10 VQ/ADPCM blockers
-  return a typed `CoreFrameDecodeError` (mapped to `Unsupported`).
+  the inter-subframe filter tail carries across subframes.
+- **Streaming decode** — `CoreStreamDecoder` wraps a stream-lifetime
+  `SubframePcmDecoder` so the §C.2.5 per-channel filter tail (`raX[]` /
+  `raZ[]`) carries across **frame** boundaries of a contiguous
+  elementary stream — the spec's QMF filter is a continuous per-channel
+  object, not reset between frames. `decode_core_frame` (a fresh
+  per-call decoder) keeps single-frame semantics; `CoreStreamDecoder` is
+  the multi-frame path. The registry `Decoder::receive_frame` holds a
+  persistent `CoreStreamDecoder` so multi-packet streams carry the
+  filter tail across packets, and emits a planar S32 `AudioFrame`;
+  joint-intensity tails and §D.10 VQ/ADPCM blockers return a typed
+  `CoreFrameDecodeError` (mapped to `Unsupported`). Carrying the
+  inter-frame tail is what makes the decode match the `ffmpeg` reference
+  (correlation 1.0 vs 0.73 with a per-frame reset — see
+  `tests/black_box_ffmpeg_pcm.rs`).
 - **§5.4.1 side-info tail** — `decode_primary_side_info_tail_at` /
   `SideInfoTail` walk the Table 5-28 tail after the SCALES block: the
   8-bit `RANGE` dynamic-range index (`DYNF`, looked up via the §D.4

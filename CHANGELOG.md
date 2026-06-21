@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 356 (2026-06-21) — **§C.2.5 inter-frame filter continuity +
+  black-box `ffmpeg` PCM validation**, driving the Core decode to a
+  reference-matching multi-frame stream.
+  - `CoreStreamDecoder` — a stream-lifetime Core decoder that persists
+    the §C.2.5 per-channel QMF filter tail (`raX[]` / `raZ[]`) across
+    frame boundaries of a contiguous elementary stream. The §C.2.5
+    filter is a continuous per-channel object; `decode_core_frame` (a
+    fresh per-call decoder) reset it at every frame boundary, injecting a
+    warmup transient. `decode_core_frame`'s per-frame body is factored
+    into `SubframePcmDecoder::decode_core_frame_into`, shared by both
+    paths.
+  - The registry `Decoder::receive_frame` now holds a persistent
+    `CoreStreamDecoder` so multi-packet streams carry the filter tail
+    across packets (restarted on a channel-count change or `reset()`).
+  - `tests/black_box_ffmpeg_pcm.rs` — validates the full
+    §5.3/§5.4/§5.5 + §C.2.5 chain against a committed `ffmpeg -c:a dca`
+    reference decode of the bundled 5-frame fixture
+    (`tests/fixtures/dts_5_frames_ffmpeg_ref.s32`): our PCM is
+    shape-identical (Pearson correlation 1.0, 100 % sign agreement on
+    both channels) up to the implementation-defined output `rScale`.
+    Carrying the inter-frame tail raises correlation from 0.73 (per-frame
+    reset) to 1.0. `ffmpeg` is used as an opaque reference generator
+    only; its source was not consulted.
 - Round 350 (2026-06-20) — **§5.4.1 Table 5-28 `RANGE`/`SICRC` side-info
   tail + §D.4 Dynamic Range Control**, extending `decode_core_frame`
   beyond the empty-tail common Core case to all `JOINX == 0` frames.
