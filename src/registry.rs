@@ -141,6 +141,7 @@ pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
         last_header: None,
         last_frame_bytes: None,
         last_pts: 0,
+        stream: None,
         eof: false,
     }))
 }
@@ -157,12 +158,20 @@ pub struct DtsDecoderHandle {
     last_header: Option<DtsFrameHeader>,
     /// The most recent packet's full (unpacked, raw-16-bit) frame bytes,
     /// kept so [`Decoder::receive_frame`] can run the §5.3/§5.4/§5.5 +
-    /// §C.2.5 [`crate::decode_core_frame`] reconstruction over the whole
-    /// frame, not just the header.
+    /// §C.2.5 reconstruction over the whole frame, not just the header.
     last_frame_bytes: Option<Vec<u8>>,
     /// The PTS carried by the most recent packet, forwarded onto the
     /// emitted [`Frame`].
     last_pts: i64,
+    /// The persistent §C.2.5 stream decoder, carrying each channel's
+    /// inter-frame filter tail (`raX[]` / `raZ[]`) across packets — a
+    /// DTS elementary stream's QMF filter is continuous, so resetting it
+    /// per packet would inject a warmup transient at every frame
+    /// boundary. Lazily (re)constructed on the first packet and whenever
+    /// the channel count changes (a stream's `nPCHS` is constant in
+    /// practice, but the handle tolerates a mid-stream change by
+    /// restarting the filter for the new layout).
+    stream: Option<crate::CoreStreamDecoder>,
     eof: bool,
 }
 
@@ -229,12 +238,29 @@ impl Decoder for DtsDecoderHandle {
         };
 
         // Run the §5.3/§5.4/§5.5 + §C.2.5 reconstruction for the common
-        // Core case. Frames with a Table 5-28 side-info tail
-        // (DYNF/CPF/JOINX) or a §D.10 VQ blocker surface as Unsupported
-        // so callers can distinguish "needs another packet" from "this
-        // frame's feature isn't decoded yet".
-        let pcm = crate::decode_core_frame(&bytes, &header)
+        // Core case through the persistent §C.2.5 stream decoder so the
+        // per-channel filter tail carries across packets (a DTS
+        // elementary stream's QMF filter is continuous; resetting it per
+        // packet injects a warmup transient at every frame boundary).
+        // The frame's channel count (§5.3.2 nPCHS) sizes the filter; a
+        // mismatch with the running stream restarts it for the new
+        // layout. Frames with a Table 5-28 side-info tail (JOINX) or a
+        // §D.10 VQ blocker surface as Unsupported so callers can
+        // distinguish "needs another packet" from "this frame's feature
+        // isn't decoded yet".
+        let channels = frame_channel_count(&bytes, &header)
             .map_err(|e| CoreError::unsupported(format!("oxideav-dts: {e}")))?;
+        let stream = match self.stream.take() {
+            Some(s) if s.channel_count() == channels => s,
+            // First packet, or a channel-count change: (re)start the
+            // continuous filter for this layout.
+            _ => crate::CoreStreamDecoder::new(channels),
+        };
+        let mut stream = stream;
+        let pcm = stream
+            .decode_frame(&bytes, &header)
+            .map_err(|e| CoreError::unsupported(format!("oxideav-dts: {e}")))?;
+        self.stream = Some(stream);
 
         // Planar S32: one plane per channel, each sample little-endian.
         let channels = pcm.len();
@@ -264,9 +290,25 @@ impl Decoder for DtsDecoderHandle {
         self.last_header = None;
         self.last_frame_bytes = None;
         self.last_pts = 0;
+        // Drop the persistent §C.2.5 stream decoder so the next packet
+        // starts a fresh continuous filter (cleared history) — a reset
+        // means the caller seeked / restarted, so the inter-frame filter
+        // tail must not bleed across the discontinuity.
+        self.stream = None;
         self.eof = false;
         Ok(())
     }
+}
+
+/// Read the §5.3.2 Primary Audio Coding Header just enough to recover
+/// the frame's primary-channel count (`nPCHS`), which sizes the
+/// persistent §C.2.5 stream filter. Returns the §5.3.2 audio-coding
+/// header decode error on a structurally-bad frame.
+fn frame_channel_count(bytes: &[u8], header: &DtsFrameHeader) -> Result<usize, DtsError> {
+    let header_bits = header.header_bit_length() as usize;
+    let (coding, _ach_bits) =
+        crate::decode_audio_coding_header_at(bytes, header_bits, header.crc_present)?;
+    Ok(coding.n_pchs)
 }
 
 /// Standalone confidence probe for DTS Core bitstreams.
@@ -399,6 +441,7 @@ mod tests {
             last_header: None,
             last_frame_bytes: None,
             last_pts: 0,
+            stream: None,
             eof: false,
         };
         handle.send_packet(&pkt).unwrap();
@@ -426,6 +469,7 @@ mod tests {
             last_header: None,
             last_frame_bytes: None,
             last_pts: 0,
+            stream: None,
             eof: false,
         };
         let err = handle.send_packet(&pkt).unwrap_err();
@@ -440,6 +484,7 @@ mod tests {
             last_header: None,
             last_frame_bytes: None,
             last_pts: 0,
+            stream: None,
             eof: false,
         };
         let err = handle.send_packet(&pkt).unwrap_err();
@@ -454,6 +499,7 @@ mod tests {
             last_header: None,
             last_frame_bytes: None,
             last_pts: 0,
+            stream: None,
             eof: false,
         };
         handle.send_packet(&pkt).unwrap();
@@ -468,6 +514,7 @@ mod tests {
             last_header: None,
             last_frame_bytes: None,
             last_pts: 0,
+            stream: None,
             eof: false,
         };
         let err = handle.receive_frame().unwrap_err();
@@ -481,6 +528,7 @@ mod tests {
             last_header: None,
             last_frame_bytes: None,
             last_pts: 0,
+            stream: None,
             eof: false,
         };
         handle.flush().unwrap();
@@ -496,6 +544,7 @@ mod tests {
             last_header: None,
             last_frame_bytes: None,
             last_pts: 0,
+            stream: None,
             eof: false,
         };
         handle.send_packet(&pkt).unwrap();
@@ -571,6 +620,7 @@ mod tests {
             last_header: None,
             last_frame_bytes: None,
             last_pts: 0,
+            stream: None,
             eof: false,
         };
         handle.send_packet(&pkt).unwrap();
@@ -587,5 +637,84 @@ mod tests {
             }
             other => panic!("expected an audio frame, got {other:?}"),
         }
+    }
+
+    /// The bundled 5-frame `ffmpeg -c:a dca` fixture (real 48 kHz stereo
+    /// DTS Core). Each 1024-byte frame is a self-delimited raw-16-bit
+    /// Core frame.
+    const FIXTURE_5_FRAMES: &[u8] = include_bytes!("../tests/fixtures/dts_5_frames.bin");
+
+    /// Driving two consecutive real Core frames through the registry
+    /// `Decoder` emits two 512-sample stereo S32 frames, and the handle's
+    /// persistent §C.2.5 stream filter carries the inter-frame tail: the
+    /// second frame's PCM differs from what a freshly-reset decoder would
+    /// produce for that same frame in isolation. This is the registry-
+    /// level expression of the round-356 CoreStreamDecoder continuity
+    /// fix.
+    #[test]
+    fn registry_decoder_carries_filter_state_across_real_packets() {
+        // Frame 0 and frame 1 are the first two 1024-byte frames.
+        let f0 = &FIXTURE_5_FRAMES[0..1024];
+        let f1 = &FIXTURE_5_FRAMES[1024..2048];
+
+        let decode_two = || {
+            let mut handle = DtsDecoderHandle {
+                codec_id: CodecId::new(CODEC_ID_STR),
+                last_header: None,
+                last_frame_bytes: None,
+                last_pts: 0,
+                stream: None,
+                eof: false,
+            };
+            let tb = TimeBase::new(1, 48_000);
+            handle
+                .send_packet(&Packet::new(0, tb, f0.to_vec()))
+                .unwrap();
+            let a0 = match handle.receive_frame().unwrap() {
+                Frame::Audio(a) => a,
+                other => panic!("expected audio, got {other:?}"),
+            };
+            handle
+                .send_packet(&Packet::new(1, tb, f1.to_vec()))
+                .unwrap();
+            let a1 = match handle.receive_frame().unwrap() {
+                Frame::Audio(a) => a,
+                other => panic!("expected audio, got {other:?}"),
+            };
+            (a0, a1)
+        };
+
+        let (a0, a1) = decode_two();
+        // Real 48 kHz stereo: 16 blocks * 32 samples = 512 samples/ch.
+        assert_eq!(a0.data.len(), 2);
+        assert_eq!(a0.samples, 512);
+        assert_eq!(a0.data[0].len(), 512 * 4);
+        assert_eq!(a1.samples, 512);
+        // Both frames carry real (non-silent) audio.
+        assert!(a1.data[0].iter().any(|&b| b != 0));
+
+        // Decode frame 1 in isolation with a fresh handle (no carried
+        // tail). Its PCM must differ from the streamed frame 1 — the
+        // persistent filter bled frame 0's tail into the streamed result.
+        let mut fresh = DtsDecoderHandle {
+            codec_id: CodecId::new(CODEC_ID_STR),
+            last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
+            stream: None,
+            eof: false,
+        };
+        fresh
+            .send_packet(&Packet::new(1, TimeBase::new(1, 48_000), f1.to_vec()))
+            .unwrap();
+        let isolated1 = match fresh.receive_frame().unwrap() {
+            Frame::Audio(a) => a,
+            other => panic!("expected audio, got {other:?}"),
+        };
+        assert_ne!(
+            a1.data, isolated1.data,
+            "streamed frame 1 must carry frame 0's §C.2.5 filter tail, \
+             differing from an isolated decode of frame 1"
+        );
     }
 }
