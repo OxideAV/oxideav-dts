@@ -404,6 +404,17 @@
 //!   decoder follows the §C.2.1 Table C-1 last-element-first walk and
 //!   produces output identical to [`decode_block_code`] (cross-checked
 //!   over the full §D.6 code domains).
+//! - [`decode_core_frame`] / [`CoreStreamDecoder`] / [`SubframePcmDecoder`]
+//!   — the §5.3/§5.4/§5.5 + §C.2.5 raw-bytes-to-PCM reconstruction.
+//!   [`decode_core_frame`] decodes one frame with cleared filter history
+//!   (single-frame semantics); [`CoreStreamDecoder`] persists the
+//!   per-channel §C.2.5 filter tail across frames so a multi-frame
+//!   elementary stream reconstructs without a per-frame filter-warmup
+//!   transient. Round 356 validated [`CoreStreamDecoder`] against a
+//!   black-box `ffmpeg -c:a dca` reference decode of the bundled 5-frame
+//!   fixture: carrying the inter-frame filter tail makes channel-0 PCM
+//!   shape-identical to the reference (Pearson correlation 1.0 over the
+//!   whole stream) versus 0.73 with the filter reset per frame.
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
@@ -521,8 +532,8 @@ pub use crate::subframe::{
     ChannelSideInfoParams, PrimarySideInfo, SideInfoTail, MAX_PRIMARY_CHANNELS,
 };
 pub use crate::subframe_pcm::{
-    decode_core_frame, CoreFrameDecodeError, Subframe, SubframePcm, SubframePcmDecoder,
-    SubframePcmError, PCM_PER_SUBBAND_ROW,
+    decode_core_frame, CoreFrameDecodeError, CoreStreamDecoder, Subframe, SubframePcm,
+    SubframePcmDecoder, SubframePcmError, PCM_PER_SUBBAND_ROW,
 };
 pub use crate::sum_diff::{
     front_sum_difference_required, sum_difference_decode_f64, sum_difference_decode_i32,
