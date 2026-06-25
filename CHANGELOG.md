@@ -30,6 +30,12 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     noted on `lfe_interp` / `lfe_fir_coeff`; those modules now point at
     `LfeInterpolator` for the loop body. The `LfeInterpolationSelection`
     table selector feeds it directly.
+  - `LfeChannel` — the §5.5 LFE phase (doc §2.2) composed on top of the
+    interpolator: dequantises the 8-bit two's-complement `LFE[n]` samples
+    with the `LFEscaleIndex`-selected §D.1.2 `RMS_7BIT` scale and the
+    `0.035` step (`rLFE[n] = LFE[n]·nScale·0.035`), then runs
+    `InterpolationFIR(LFF)` (`LFF == 1 → 128×`, else `→ 64×`). Reserved
+    §D.1.2 scale indices (125..=127) and `LFF == 0` surface typed errors.
 
 - Round 356 (2026-06-21) — **§C.2.5 inter-frame filter continuity +
   black-box `ffmpeg` PCM validation**, driving the Core decode to a

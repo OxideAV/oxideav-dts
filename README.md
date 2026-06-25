@@ -57,8 +57,10 @@ books still surface `CoreError::Unsupported`.
   selector **and the §C.2.6 `InterpolationFIR()` polyphase convolution
   driver body** (`LfeInterpolator`, `src/lfe_synth.rs`: each decimated
   LFE sample expands to 64/128 interpolated PCM samples, carrying the
-  `taps_per_phase − 1` inter-sub-frame history), the §5.5 `nQType`
-  dispatch, the
+  `taps_per_phase − 1` inter-sub-frame history) and the **§5.5 LFE phase
+  dequant** (`LfeChannel`: 8-bit `LFE[n]` → `rLFE[n] = LFE[n]·nScale·
+  0.035` with the §D.1.2 `RMS_7BIT` scale, then `InterpolationFIR(LFF)`),
+  the §5.5 `nQType` dispatch, the
   §D.6 block code books, the
   §D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7/§D.5.8/§D.5.9 audio-data
   quantization-index Huffman code books (the seven lowest `ABITS`
