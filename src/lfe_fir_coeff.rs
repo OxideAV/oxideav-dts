@@ -35,14 +35,10 @@
 //!
 //! This module lands the §D.8 LFE coefficient *data* and the typed
 //! [`crate::LfeInterpolationSelection`] selector. The §C.2.6
-//! `InterpolationFIR()` driver's per-sample convolution loop body is
-//! **not** transcribed in the staged `docs/audio/dts/` material —
-//! `dts-qmf-driver.md` §3 resolves only the table mapping
-//! (`nDecimationSelect`), `NumFIRCoef = 512`, and the absence of the
-//! §C.2.5 output `rScale` (LFE samples are pre-scaled at dequant
-//! time), not the loop structure itself. The convolution driver
-//! therefore lands once the §C.2.6 pseudocode body is staged; see
-//! the crate `CHANGELOG.md` docs-gap note.
+//! `InterpolationFIR()` driver's per-sample polyphase convolution loop
+//! body consumes these tables and is implemented in
+//! [`crate::LfeInterpolator`] (`src/lfe_synth.rs`), transcribed from
+//! `docs/audio/dts/dts-lfe-interpolation-and-audio-walker.md` §1.
 
 /// Number of taps in each §D.8 LFE interpolation FIR set, fixed by
 /// the §C.2.6 `InterpolationFIR()` driver's `NumFIRCoef = 512`

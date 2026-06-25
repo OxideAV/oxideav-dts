@@ -54,7 +54,11 @@ books still surface `CoreError::Unsupported`.
   interpolation FIR coefficient sets plus the two §D.8 512-tap **LFE**
   interpolation FIR sets (`RA_COEFF_LFE64` / `RA_COEFF_LFE128`) with the
   typed §C.2.6 `LfeInterpolationSelection` (`nDecimationSelect`) driver
-  selector, the §5.5 `nQType` dispatch, the
+  selector **and the §C.2.6 `InterpolationFIR()` polyphase convolution
+  driver body** (`LfeInterpolator`, `src/lfe_synth.rs`: each decimated
+  LFE sample expands to 64/128 interpolated PCM samples, carrying the
+  `taps_per_phase − 1` inter-sub-frame history), the §5.5 `nQType`
+  dispatch, the
   §D.6 block code books, the
   §D.5.1/§D.5.3/§D.5.4/§D.5.5/§D.5.7/§D.5.8/§D.5.9 audio-data
   quantization-index Huffman code books (the seven lowest `ABITS`
@@ -134,12 +138,6 @@ books still surface `CoreError::Unsupported`.
   code books (a `PMODE != 0` or `nVQSUB < nSUBS` subband surfaces a typed
   blocker) — those Annex D VQ tables are not transcribed in
   `docs/audio/dts/`.
-- The §C.2.6 `InterpolationFIR()` LFE-reconstruction driver *body* (the
-  per-sample 512-tap polyphase convolution loop). The §D.8 LFE
-  coefficient tables and the `nDecimationSelect` table selector are
-  landed, but the §C.2.6 loop-body pseudocode is not transcribed in the
-  staged `docs/audio/dts/` material, so the convolution step awaits that
-  staging.
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the
   current Core-profile effort.
 - The `HEADER_CRC` polynomial is not documented in the staged spec

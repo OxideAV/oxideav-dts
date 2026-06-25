@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 370 (2026-06-25) — **§C.2.6 `InterpolationFIR()` driver body**:
+  the DTS Core low-frequency-effects (LFE) polyphase upsampling
+  convolution loop, transcribed from the now-staged
+  `docs/audio/dts/dts-lfe-interpolation-and-audio-walker.md` §1 (ETSI
+  TS 102 114 V1.3.1 Annex C §C.2.6, PDF p.186).
+  - `LfeInterpolator` (`src/lfe_synth.rs`) — a persistent per-channel
+    filter that runs the §C.2.6 polyphase convolution
+    `output[nDeciFactor·j + k] = Σ_J prCoeff[k + J·nDeciFactor]·rLFE[j − J]`,
+    expanding each decimated LFE sample to `nDeciFactor` (64 or 128)
+    interpolated PCM samples. `process` / `process_to_vec` /
+    `interpolate` cover the slice, owned-`Vec<f64>`, and integer-cast
+    (`(int)rTmp`, truncate-toward-zero) variants.
+  - The driver carries the `taps_per_phase − 1` decimated-sample history
+    (≥ 7 for the 64× filter, ≥ 3 for the 128×) across sub-frame
+    boundaries per the doc §1 "History buffer requirement", and follows
+    the doc's resolution of the spec's spurious trailing `nDeciIndex++`
+    (a transcription artefact that would otherwise read every second
+    decimated sample).
+  - This closes the long-standing §C.2.6 driver-body docs gap previously
+    noted on `lfe_interp` / `lfe_fir_coeff`; those modules now point at
+    `LfeInterpolator` for the loop body. The `LfeInterpolationSelection`
+    table selector feeds it directly.
+
 - Round 356 (2026-06-21) — **§C.2.5 inter-frame filter continuity +
   black-box `ffmpeg` PCM validation**, driving the Core decode to a
   reference-matching multi-frame stream.

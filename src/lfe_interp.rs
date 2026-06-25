@@ -31,14 +31,14 @@
 //!
 //! # Driver-body scope
 //!
-//! Only the table *selection* and the table *data* are landed here:
-//! the §C.2.6 `InterpolationFIR()` per-sample convolution loop body is
-//! **not** transcribed in the staged `docs/audio/dts/` material
-//! (`dts-qmf-driver.md` §3 resolves only the table mapping, the
-//! `NumFIRCoef = 512` length, and the absence of a §C.2.5-style output
-//! `rScale` — LFE samples are pre-scaled at dequant time:
-//! `LFECh.rLFE[k] = LFE[n]*rScale` with `rScale = nScale*0.035`). The
-//! convolution driver lands once the §C.2.6 pseudocode body is staged.
+//! This module lands the table *selection* and the table *data*. The
+//! §C.2.6 `InterpolationFIR()` per-sample polyphase convolution loop
+//! **body** is implemented in [`crate::LfeInterpolator`]
+//! (`src/lfe_synth.rs`), transcribed from
+//! `docs/audio/dts/dts-lfe-interpolation-and-audio-walker.md` §1. LFE
+//! samples are pre-scaled at dequant time
+//! (`LFECh.rLFE[k] = LFE[n]*rScale` with `rScale = nScale*0.035`), so
+//! the convolution body carries no §C.2.5-style output `rScale`.
 
 /// The two named 512-tap LFE-interpolation FIR coefficient sets
 /// referenced by `InterpolationFIR()` per ETSI TS 102 114 V1.3.1

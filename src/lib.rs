@@ -455,6 +455,7 @@ mod iter;
 mod joint_subband;
 mod lfe_fir_coeff;
 mod lfe_interp;
+mod lfe_synth;
 mod qmf_assemble;
 mod qmf_multichannel;
 mod qmf_synth;
@@ -511,6 +512,7 @@ pub use crate::joint_subband::{
 };
 pub use crate::lfe_fir_coeff::{LFE_FIR_COEFF_LEN, RA_COEFF_LFE128, RA_COEFF_LFE64};
 pub use crate::lfe_interp::LfeInterpolationSelection;
+pub use crate::lfe_synth::{LfeInterpError, LfeInterpolator, LFE_HISTORY_LEN};
 pub use crate::qmf_assemble::{
     assemble_xin, fir_step, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
     PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,
