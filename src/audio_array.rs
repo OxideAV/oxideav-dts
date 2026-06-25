@@ -98,6 +98,10 @@ pub enum AudioArrayError {
         /// coefficient VQ (§D.10.1).
         high_frequency_vq: bool,
     },
+    /// The §5.5 LFE phase (§2.2) dequant failed — a reserved §D.1.2
+    /// `RMS_7BIT` scale index or an absent LFE channel
+    /// ([`crate::LfeChannelError`]).
+    LfePhase(crate::LfeChannelError),
 }
 
 impl core::fmt::Display for AudioArrayError {
@@ -119,6 +123,7 @@ impl core::fmt::Display for AudioArrayError {
                      book, which is not yet transcribed into docs/audio/dts/"
                 )
             }
+            AudioArrayError::LfePhase(e) => write!(f, "oxideav-dts: §5.5 LFE phase: {e}"),
         }
     }
 }
@@ -240,6 +245,67 @@ fn decode_audio_huff_in(br: &mut BitReader<'_>, codebook: AudioHuffCodebook) -> 
 /// `[aSubband[0].aSample[s], …, aSubband[31].aSample[s]]` for one
 /// channel. The QMF synthesis consumes this directly.
 pub type SubbandSampleMatrix = Vec<[f64; NUM_SUBBAND]>;
+
+/// Decode the §5.5 LFE phase (the `if (LFF > 0) { … }` block of the
+/// `docs/audio/dts/dts-lfe-interpolation-and-audio-walker.md` §2.2
+/// walker) for one subframe, returning the interpolated LFE PCM and the
+/// number of bits consumed.
+///
+/// The LFE phase sits between the high-frequency-VQ phase (§2.1, empty
+/// for the accepted Core case where `nVQSUB == nSUBS`) and the
+/// per-subsubframe audio-data phase (§2.3). It reads `2·LFF·nSSC` 8-bit
+/// two's-complement decimated LFE samples followed by an 8-bit
+/// `LFEscaleIndex`, dequantises (`rLFE[n] = LFE[n]·nScale·0.035` with the
+/// §D.1.2 `RMS_7BIT` scale), then upsamples via the §C.2.6
+/// `InterpolationFIR(LFF)` polyphase convolution ([`crate::LfeChannel`]).
+///
+/// * `bytes` / `bit_offset` — positioned at the first LFE-phase bit.
+/// * `lff` — the frame header's non-zero `LFF` (1 → 128×, 2 → 64×).
+/// * `n_ssc` — the subframe's subsubframe count (`SSC + 1`).
+/// * `lfe` — the persistent per-channel [`crate::LfeChannel`] whose
+///   §C.2.6 history carries across subframes.
+///
+/// Returns `(lfe_pcm, bits_consumed)`. The PCM length is
+/// `2·LFF·nSSC·(64 | 128)`.
+///
+/// # Errors
+///
+/// * [`Error::UnexpectedEof`] on a truncated LFE region;
+/// * [`AudioArrayError::LfePhase`] wrapping a [`crate::LfeChannelError`]
+///   (a reserved §D.1.2 scale index, or `lff == 0`).
+pub fn decode_lfe_phase_at(
+    bytes: &[u8],
+    bit_offset: usize,
+    lff: u8,
+    n_ssc: usize,
+    lfe: &mut crate::LfeChannel,
+) -> core::result::Result<(Vec<i32>, usize), AudioArrayDecodeError> {
+    let byte_offset = bit_offset / 8;
+    let intra_byte = bit_offset % 8;
+    let mut br = BitReader::from_byte_offset(bytes, byte_offset);
+    if intra_byte > 0 {
+        br.read_bits(intra_byte as u32)?;
+    }
+
+    // 2·LFF·nSSC 8-bit two's-complement decimated LFE samples.
+    let n_lfe = 2 * (lff as usize) * n_ssc;
+    let mut samples: Vec<i8> = Vec::with_capacity(n_lfe);
+    for _ in 0..n_lfe {
+        // ExtractBits(8) read as a signed char.
+        samples.push(br.read_bits(8)? as u8 as i8);
+    }
+
+    // 8-bit LFEscaleIndex.
+    let scale_index = br.read_bits(8)? as u8;
+
+    let bits_consumed = br.absolute_bit_position() - bit_offset;
+
+    let pcm = lfe
+        .decode_subframe(&samples, scale_index, lff)
+        .map_err(AudioArrayError::LfePhase)?;
+
+    Ok((pcm, bits_consumed))
+}
 
 /// Decode the §5.5 `Audio Data` block for one subframe, given the
 /// already-decoded §5.4.1 side information and §5.3.2 header context.
@@ -600,5 +666,75 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bits, 32);
+    }
+
+    // -----------------------------------------------------------
+    // §5.5 LFE phase walker (§2.2).
+    // -----------------------------------------------------------
+
+    /// The LFE phase consumes `2·LFF·nSSC` 8-bit samples + an 8-bit
+    /// scale index, and reports exactly that many bits.
+    #[test]
+    fn lfe_phase_consumes_samples_plus_scale_index() {
+        let lff = 1u8; // 128×
+        let n_ssc = 2usize;
+        let n_lfe = 2 * (lff as usize) * n_ssc; // 4 samples
+                                                // 4 sample bytes (all 0) + 1 scale-index byte (10).
+        let mut fields: Vec<(u32, u8)> = vec![(0, 8); n_lfe];
+        fields.push((10, 8));
+        let stream = pack_fields(&fields);
+        let mut lfe = crate::LfeChannel::new();
+        let (pcm, bits) = decode_lfe_phase_at(&stream, 0, lff, n_ssc, &mut lfe).unwrap();
+        assert_eq!(bits, (n_lfe + 1) * 8);
+        // Each decimated sample expands to 128 PCM samples.
+        assert_eq!(pcm.len(), n_lfe * 128);
+        // All-zero LFE samples decode to silence.
+        assert!(pcm.iter().all(|&s| s == 0));
+    }
+
+    /// 8-bit two's-complement LFE samples are read as signed: a 0xFF byte
+    /// is -1, which (with a non-zero scale) produces non-zero PCM of the
+    /// correct sign at phase 0.
+    #[test]
+    fn lfe_phase_reads_signed_samples() {
+        let lff = 2u8; // 64×
+        let n_ssc = 1usize;
+        let n_lfe = 2 * (lff as usize) * n_ssc; // 4 samples
+        let scale_index = 60u8;
+        // First sample = 0xFF (= -1), rest 0.
+        let mut fields: Vec<(u32, u8)> = vec![(0xFF, 8)];
+        fields.extend(vec![(0, 8); n_lfe - 1]);
+        fields.push((u32::from(scale_index), 8));
+        let stream = pack_fields(&fields);
+
+        let mut lfe = crate::LfeChannel::new();
+        let (pcm, _) = decode_lfe_phase_at(&stream, 0, lff, n_ssc, &mut lfe).unwrap();
+
+        // Reference: phase-0 first output = (int)((-1)·nScale·0.035·c0).
+        let n_scale = crate::side_info::RMS_7BIT[scale_index as usize] as f64;
+        let r_scale = n_scale * crate::LFE_SCALE_STEP;
+        let sel = crate::LfeInterpolationSelection::Decimation64;
+        let c0 = sel.coefficients()[0];
+        let expected0 = (-(r_scale * c0)) as i32;
+        assert_eq!(pcm[0], expected0);
+    }
+
+    /// A reserved §D.1.2 scale index surfaces the typed LFE-phase blocker.
+    #[test]
+    fn lfe_phase_rejects_reserved_scale_index() {
+        let lff = 1u8;
+        let n_ssc = 1usize;
+        let n_lfe = 2 * (lff as usize) * n_ssc;
+        let mut fields: Vec<(u32, u8)> = vec![(0, 8); n_lfe];
+        fields.push((126, 8)); // reserved
+        let stream = pack_fields(&fields);
+        let mut lfe = crate::LfeChannel::new();
+        let err = decode_lfe_phase_at(&stream, 0, lff, n_ssc, &mut lfe).unwrap_err();
+        assert!(matches!(
+            err,
+            AudioArrayDecodeError::Blocked(AudioArrayError::LfePhase(
+                crate::LfeChannelError::ReservedScaleIndex { index: 126 }
+            ))
+        ));
     }
 }

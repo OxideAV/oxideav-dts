@@ -36,6 +36,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     `0.035` step (`rLFE[n] = LFE[n]·nScale·0.035`), then runs
     `InterpolationFIR(LFF)` (`LFF == 1 → 128×`, else `→ 64×`). Reserved
     §D.1.2 scale indices (125..=127) and `LFF == 0` surface typed errors.
+  - `decode_lfe_phase_at` — the §5.5 LFE-phase **bitstream walker** (the
+    doc §2.2 `if (LFF > 0)` block): reads `2·LFF·nSSC` 8-bit signed
+    samples + the 8-bit `LFEscaleIndex` and returns the interpolated LFE
+    PCM plus bits consumed, surfaced through the new
+    `AudioArrayError::LfePhase`.
+  - **LFE-present frames now decode correctly.** `SubframePcmDecoder`
+    holds a persistent `LfeChannel` and consumes the §5.5 LFE phase
+    *before* the audio-data phase when `LFF != 0`, advancing the
+    audio-data cursor past the LFE region — previously the cursor skipped
+    the LFE bytes entirely, mis-aligning the audio-data decode of every
+    LFE-bearing frame. The decoded LFE PCM is surfaced via
+    `SubframePcmDecoder::take_last_lfe_pcm` (accumulated across a frame's
+    subframes in `decode_frame`), leaving the primary-channel return
+    tuple unchanged.
 
 - Round 356 (2026-06-21) — **§C.2.5 inter-frame filter continuity +
   black-box `ffmpeg` PCM validation**, driving the Core decode to a

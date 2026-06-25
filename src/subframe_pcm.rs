@@ -68,7 +68,7 @@
 //! joint step.
 
 use crate::audio_array::{
-    decode_audio_data_subframe_at, AudioArrayDecodeError, SubbandSampleMatrix,
+    decode_audio_data_subframe_at, decode_lfe_phase_at, AudioArrayDecodeError, SubbandSampleMatrix,
 };
 use crate::audio_header::AudioCodingHeader;
 use crate::cos_mod::NUM_SUBBAND;
@@ -182,6 +182,17 @@ impl From<MultiChannelQmfError> for SubframePcmError {
 #[derive(Debug, Clone)]
 pub struct SubframePcmDecoder {
     qmf: MultiChannelQmf,
+    /// The persistent §5.5/§C.2.6 LFE channel (the `LFECh` filter
+    /// object). Drives the §5.5 LFE phase (§2.2) when the frame header's
+    /// `LFF` is non-zero, carrying the §C.2.6 inter-subframe
+    /// interpolation history. Idle (and never read from the bitstream)
+    /// for LFF-absent frames.
+    lfe: crate::LfeChannel,
+    /// The LFE PCM decoded from the most recent [`Self::decode_subframe`]
+    /// call (empty when the frame had no LFE channel). Surfaced via
+    /// [`Self::take_last_lfe_pcm`] so the primary-channel return tuple is
+    /// unchanged.
+    last_lfe_pcm: Vec<i32>,
 }
 
 impl SubframePcmDecoder {
@@ -192,7 +203,20 @@ impl SubframePcmDecoder {
     pub fn new(channels: usize) -> Self {
         Self {
             qmf: MultiChannelQmf::new(channels),
+            lfe: crate::LfeChannel::new(),
+            last_lfe_pcm: Vec::new(),
         }
+    }
+
+    /// Take the LFE PCM decoded by the most recent
+    /// [`Self::decode_subframe`] / [`Self::decode_frame`] call, leaving
+    /// the decoder's buffer empty. Returns an empty `Vec` when the last
+    /// frame carried no LFE channel (`LFF == 0`). The samples are the
+    /// §5.5 LFE phase (§2.2) output: `2·LFF·nSSC·(64 | 128)` interpolated
+    /// PCM samples per decoded subframe.
+    #[must_use]
+    pub fn take_last_lfe_pcm(&mut self) -> Vec<i32> {
+        core::mem::take(&mut self.last_lfe_pcm)
     }
 
     /// The configured channel count (`nPCHS`).
@@ -295,11 +319,28 @@ impl SubframePcmDecoder {
 
         let table = StepSizeTable::for_rate(header.rate_index);
 
+        // (0) §5.5 LFE phase (§2.2): present only when the header's `LFF`
+        // is non-zero. The high-frequency-VQ phase (§2.1) is empty for
+        // the accepted Core case (`nVQSUB == nSUBS`), so the LFE phase is
+        // the first thing in the §5.5 region; reading it advances the
+        // cursor to the audio-data phase. Its bits count toward the
+        // subframe's total so the caller advances correctly.
+        let lff = header.lfe.code();
+        let mut cursor = bit_offset;
+        if lff != 0 {
+            let (lfe_pcm, lfe_bits) =
+                decode_lfe_phase_at(bytes, cursor, lff, n_ssc, &mut self.lfe)?;
+            self.last_lfe_pcm = lfe_pcm;
+            cursor += lfe_bits;
+        } else {
+            self.last_lfe_pcm = Vec::new();
+        }
+
         // (1) §5.5 Audio Data -> per-channel subband-sample matrices.
-        let (matrices, bits_consumed): (Vec<SubbandSampleMatrix>, usize) =
+        let (matrices, audio_bits): (Vec<SubbandSampleMatrix>, usize) =
             decode_audio_data_subframe_at(
                 bytes,
-                bit_offset,
+                cursor,
                 side,
                 |ch, abits| coding.sel(ch, abits),
                 |ch, abits| coding.adj(ch, abits),
@@ -309,6 +350,7 @@ impl SubframePcmDecoder {
                 table,
                 aspf,
             )?;
+        let bits_consumed = (cursor - bit_offset) + audio_bits;
 
         // (2) §C.2.5 per-channel 32-band synthesis -> planar PCM.
         let channel_samples: Vec<&[[f64; NUM_SUBBAND]]> =
@@ -362,10 +404,15 @@ impl SubframePcmDecoder {
         let channels = self.qmf.channel_count();
         let mut pcm: SubframePcm = vec![Vec::new(); channels];
         let mut bit = first_audio_bit;
+        // Accumulate the per-subframe LFE PCM across the whole frame so
+        // take_last_lfe_pcm() returns the frame's full LFE output (each
+        // decode_subframe call leaves only its own subframe's LFE PCM).
+        let mut frame_lfe: Vec<i32> = Vec::new();
 
         for (k, sf) in subframes.iter().enumerate() {
             let (block, audio_bits) =
                 self.decode_subframe(bytes, bit, header, coding, sf.side, sf.n_ssc, aspf)?;
+            frame_lfe.append(&mut self.last_lfe_pcm);
             for (ch, samples) in block.into_iter().enumerate() {
                 pcm[ch].extend(samples);
             }
@@ -378,6 +425,7 @@ impl SubframePcmDecoder {
             }
         }
 
+        self.last_lfe_pcm = frame_lfe;
         Ok((pcm, bit - first_audio_bit))
     }
 }

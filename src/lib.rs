@@ -470,7 +470,8 @@ mod unpack14;
 mod registry;
 
 pub use crate::audio_array::{
-    decode_audio_data_subframe_at, AudioArrayDecodeError, AudioArrayError, SubbandSampleMatrix,
+    decode_audio_data_subframe_at, decode_lfe_phase_at, AudioArrayDecodeError, AudioArrayError,
+    SubbandSampleMatrix,
 };
 pub use crate::audio_data::{
     audio_quant_type, terminal_sel_index, AudioQuantType, ABITS_MAX_BLOCK_CODE, ABITS_MAX_SEL,

@@ -22,9 +22,16 @@ reconstruction chain is correct up to the implementation-defined output
 §5.4.1 Table 5-28 side-info tail is handled for **dynamic range**
 (`DYNF`: the 8-bit `RANGE` index is read and the §D.4 multiplier applied
 to the reconstructed PCM after QMF synthesis) and the **side-info CRC**
-(`CPF`: the 16-bit `SICRC` is consumed for framing, not verified). Only
-**joint-intensity** frames (`JOINX > 0`) and the §D.10 VQ / ADPCM code
-books still surface `CoreError::Unsupported`.
+(`CPF`: the 16-bit `SICRC` is consumed for framing, not verified).
+**LFE-bearing frames** (`LFF != 0`) now decode correctly: the §5.5 LFE
+phase (`2·LFF·nSSC` 8-bit samples + `LFEscaleIndex`) is consumed before
+the audio-data phase so the audio-data cursor stays aligned, and the LFE
+samples are dequantised (§D.1.2 `RMS_7BIT` scale + `0.035` step) and
+upsampled through the §C.2.6 `InterpolationFIR()` polyphase convolution
+(`LfeChannel`); the decoded LFE PCM is surfaced via
+`SubframePcmDecoder::take_last_lfe_pcm`. Only **joint-intensity** frames
+(`JOINX > 0`) and the §D.10 VQ / ADPCM code books still surface
+`CoreError::Unsupported`.
 
 ### What works today
 
