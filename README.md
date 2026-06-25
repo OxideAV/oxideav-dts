@@ -28,8 +28,10 @@ phase (`2·LFF·nSSC` 8-bit samples + `LFEscaleIndex`) is consumed before
 the audio-data phase so the audio-data cursor stays aligned, and the LFE
 samples are dequantised (§D.1.2 `RMS_7BIT` scale + `0.035` step) and
 upsampled through the §C.2.6 `InterpolationFIR()` polyphase convolution
-(`LfeChannel`); the decoded LFE PCM is surfaced via
-`SubframePcmDecoder::take_last_lfe_pcm`. Only **joint-intensity** frames
+(`LfeChannel`); the registry `Decoder` emits the decoded LFE channel as
+a trailing equal-length plane of the planar S32 `AudioFrame` (the
+interpolation lands exactly the primary `nSSC·256` per-frame length).
+Only **joint-intensity** frames
 (`JOINX > 0`) and the §D.10 VQ / ADPCM code books still surface
 `CoreError::Unsupported`.
 

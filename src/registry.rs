@@ -257,9 +257,19 @@ impl Decoder for DtsDecoderHandle {
             _ => crate::CoreStreamDecoder::new(channels),
         };
         let mut stream = stream;
-        let pcm = stream
+        let mut pcm = stream
             .decode_frame(&bytes, &header)
             .map_err(|e| CoreError::unsupported(format!("oxideav-dts: {e}")))?;
+        // For an LFE-bearing frame (LFF != 0), append the §5.5/§C.2.6 LFE
+        // channel as a trailing plane. The §C.2.6 interpolation expands
+        // the decimated LFE samples to exactly the primary per-frame
+        // sample rate (2·LFF·nSSC·nDeciFactor == nSSC·256 for both LFF
+        // modes), so the LFE plane is the same length as the primary
+        // planes and slots in as one more channel.
+        let lfe = stream.take_last_lfe_pcm();
+        if !lfe.is_empty() {
+            pcm.push(lfe);
+        }
         self.stream = Some(stream);
 
         // Planar S32: one plane per channel, each sample little-endian.

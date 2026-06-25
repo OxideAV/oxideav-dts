@@ -637,6 +637,18 @@ impl CoreStreamDecoder {
         &self.decoder
     }
 
+    /// Take the LFE PCM decoded by the most recent
+    /// [`Self::decode_frame`] call (empty when the frame carried no LFE
+    /// channel, `LFF == 0`). See
+    /// [`SubframePcmDecoder::take_last_lfe_pcm`]. The LFE PCM is at the
+    /// same per-frame sample rate as the primary channels (the §C.2.6
+    /// interpolation expands each decimated sample by exactly the factor
+    /// that matches the primary `nSSC·256` per-subframe length).
+    #[must_use]
+    pub fn take_last_lfe_pcm(&mut self) -> Vec<i32> {
+        self.decoder.take_last_lfe_pcm()
+    }
+
     /// Decode one whole Core frame to planar PCM, carrying the
     /// per-channel §C.2.5 filter tail into the next call.
     ///
@@ -973,6 +985,49 @@ mod tests {
         assert_eq!(pcm.len(), 1);
         assert_eq!(pcm[0].len(), SAMPLES_PER_SUBSUBFRAME * PCM_PER_SUBBAND_ROW);
         assert!(pcm[0].iter().all(|&s| s == 0));
+    }
+
+    /// An LFE-present frame (`LFF != 0`) consumes the §5.5 LFE phase
+    /// before the audio-data phase, and the decoded LFE PCM has the same
+    /// per-subframe length as the primary channels (`nSSC·256`): the
+    /// §C.2.6 interpolation expands `2·LFF·nSSC` decimated samples by
+    /// `nDeciFactor` to exactly that length. The cursor stays aligned, so
+    /// the trailing DSYNC still validates.
+    #[test]
+    fn lfe_present_subframe_consumes_lfe_phase_and_matches_primary_length() {
+        let hdr_bytes: [u8; 16] = [
+            0x7f, 0xfe, 0x80, 0x01, 0xfc, 0x3c, 0x3f, 0xf0, 0xb5, 0xe0, 0x01, 0x38, 0x00, 0x03,
+            0xef, 0x7f,
+        ];
+        let mut header = crate::parse_frame_header(&hdr_bytes).unwrap();
+        header.lfe = crate::LfeMode::Mode1; // LFF == 1 -> 128×
+        let side = vec![ChannelSideInfo::cleared()]; // ABITS all 0
+        let coding = AudioCodingHeader::single_channel_for_test(1, 1, 0);
+
+        // §5.5 region for nSSC = 1, LFF = 1:
+        //   LFE phase: 2·1·1 = 2 sample bytes + 1 scale-index byte
+        //   audio-data phase: ABITS all 0 -> just a 16-bit DSYNC.
+        let mut fields: Vec<(u32, u8)> = vec![(0, 8), (0, 8), (10, 8)];
+        fields.push((0xffff, 16));
+        let stream = pack_fields(&fields);
+
+        let mut dec = SubframePcmDecoder::new(1);
+        let (pcm, bits) = dec
+            .decode_subframe(&stream, 0, &header, &coding, &side, 1, false)
+            .unwrap();
+
+        // Primary channel: nSSC·256 samples, all zero (no audio bits).
+        assert_eq!(pcm.len(), 1);
+        assert_eq!(pcm[0].len(), SAMPLES_PER_SUBSUBFRAME * PCM_PER_SUBBAND_ROW);
+        // The cursor consumed LFE (3 bytes) + DSYNC (2 bytes) = 40 bits.
+        assert_eq!(bits, (3 + 2) * 8);
+        // LFE PCM is the same per-subframe length as the primary channel.
+        let lfe = dec.take_last_lfe_pcm();
+        assert_eq!(lfe.len(), SAMPLES_PER_SUBSUBFRAME * PCM_PER_SUBBAND_ROW);
+        // All-zero LFE samples -> silence.
+        assert!(lfe.iter().all(|&s| s == 0));
+        // Taking it again yields empty (it was moved out).
+        assert!(dec.take_last_lfe_pcm().is_empty());
     }
 
     /// `decode_frame` over two NFE subframes equals running

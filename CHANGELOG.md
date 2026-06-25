@@ -50,6 +50,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     `SubframePcmDecoder::take_last_lfe_pcm` (accumulated across a frame's
     subframes in `decode_frame`), leaving the primary-channel return
     tuple unchanged.
+  - The registry `Decoder` now **emits the LFE channel** as a trailing
+    plane of the planar S32 `AudioFrame` for LFE-bearing frames. The
+    §C.2.6 interpolation expands the `2·LFF·nSSC` decimated LFE samples
+    to exactly the primary per-frame sample length (`nSSC·256` for both
+    `LFF` modes), so the LFE plane slots in as one more channel of equal
+    length. `CoreStreamDecoder::take_last_lfe_pcm` exposes it from the
+    stream decoder.
 
 - Round 356 (2026-06-21) — **§C.2.5 inter-frame filter continuity +
   black-box `ffmpeg` PCM validation**, driving the Core decode to a
