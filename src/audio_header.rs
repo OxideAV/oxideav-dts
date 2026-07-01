@@ -180,6 +180,31 @@ impl AudioCodingHeader {
     pub(crate) fn set_joinx_for_test(&mut self, ch: usize, joinx: u8) {
         self.joinx[ch] = joinx;
     }
+
+    /// Test-only constructor for a two-channel header, used by the
+    /// `subframe_pcm` bridge tests that exercise the §C.2.3
+    /// joint-intensity sub-band copy. Both channels default to
+    /// `JOINX == 0`; per-channel loop bounds come from `n_subs` /
+    /// `n_vqsub` pairs.
+    #[cfg(test)]
+    pub(crate) fn two_channel_for_test(ch0: (usize, usize), ch1: (usize, usize), sel: u8) -> Self {
+        use crate::subframe::ChannelSideInfoParams;
+        let mk = |n_subs: usize, n_vqsub: usize| ChannelSideInfoParams {
+            n_subs,
+            n_vqsub,
+            abits_codebook: AbitsCodebook::from_bhuff(0).unwrap(),
+            tmode_codebook: TmodeCodebook::from_thuff(0),
+            scales_codebook: ScalesCodebook::from_shuff(0).unwrap(),
+        };
+        AudioCodingHeader {
+            n_subframes: 1,
+            n_pchs: 2,
+            joinx: vec![0, 0],
+            channel_params: vec![mk(ch0.0, ch0.1), mk(ch1.0, ch1.1)],
+            sel: vec![[sel; SEL_PLANE_LEN]; 2],
+            adj: vec![[ScaleFactorAdjustment::Adj0; SEL_PLANE_LEN]; 2],
+        }
+    }
 }
 
 /// The §5.3.2 `SEL` plane bit width for `ABITS` index `n` (`0..26`),

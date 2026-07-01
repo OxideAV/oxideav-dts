@@ -342,7 +342,7 @@ pub fn decode_primary_side_info_at(
 ///
 /// Produced by [`decode_primary_side_info_tail_at`]. The cursor it
 /// reports lands on the first bit of the §5.5 Audio Data region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct SideInfoTail {
     /// The 8-bit `nIndex` of the §5.4.1 `RANGE = RANGEtbl.LookUp(nIndex)`
@@ -356,6 +356,17 @@ pub struct SideInfoTail {
     /// "the CRC value test shall not be applied", so the word is
     /// consumed for framing but not verified.
     pub side_info_crc_present: bool,
+    /// The §5.4.1 `JOIN_SCALES[ch][n]` factors, one entry per primary
+    /// channel. `join_scales[ch]` is the joint-intensity scale-factor
+    /// vector for the imported sub-band range
+    /// `[nSUBS[ch], nSUBS[nSourceCh])` of a jointly-coded destination
+    /// channel (`JOINX[ch] > 0`); it is **empty** for channels whose
+    /// `JOINX[ch] == 0` (no joint import). The `k`-th entry corresponds
+    /// to imported sub-band `nSUBS[ch] + k`. These multiply the
+    /// sub-band samples copied from the source channel
+    /// (`JOINX[ch] - 1`) during the §C.2.3 joint-subband
+    /// reconstruction.
+    pub join_scales: Vec<Vec<f64>>,
 }
 
 /// Walk the §5.4.1 Table 5-28 side-information **tail** — the
@@ -371,18 +382,28 @@ pub struct SideInfoTail {
 /// 4. `if (CPF == 1) SICRC = ExtractBits(16)`.
 ///
 /// `joinx` is the §5.3.2 per-channel `JOINX` array (length `nPCHS`);
-/// `dynf` / `cpf` are the §5.3.1 frame-header `DYNF` / `CPF` flags.
+/// `n_subs` is the per-channel `nSUBS[ch]` active-subband count (same
+/// length); `dynf` / `cpf` are the §5.3.1 frame-header `DYNF` / `CPF`
+/// flags.
 ///
-/// # Scope
+/// # Joint-intensity walk
 ///
-/// The joint-intensity sub-band path (`JOINX[ch] > 0`) needs the
-/// joint-scale (`JScaleTbl`) table and the `JOIN_SCALES` codebook
-/// decode, neither of which is transcribed under `docs/audio/dts/`;
-/// when any `JOINX[ch] > 0` this walker returns
-/// [`Error::InvalidSideInfo`] with field `"JOINX"` rather than guess
-/// the variable-length `JOIN_SCALES` bit count and mis-align the §5.5
-/// cursor. The `RANGE` (DYNF) and `SICRC` (CPF) fields are both fully
-/// specified and handled: `RANGE`'s 8-bit index is captured (the §D.4
+/// When a channel carries `JOINX[ch] > 0`, this walker decodes the
+/// `JOIN_SHUFF[ch]` (3-bit code-book selector) then, for each imported
+/// sub-band `n ∈ [nSUBS[ch], nSUBS[nSourceCh])`, one `JOIN_SCALES[ch][n]`
+/// via [`crate::decode_join_scale_at`] (the §D.3 `JScaleTbl` look-up of
+/// the biased `QSCALES` index). The resolved factors are returned in
+/// [`SideInfoTail::join_scales`]; a channel with `JOINX[ch] == 0`
+/// contributes an empty vector.
+///
+/// `nSourceCh = JOINX[ch] - 1` per §5.4.1; the imported range runs from
+/// the destination channel's `nSUBS[ch]` up to (but not including) the
+/// source channel's `nSUBS[nSourceCh]`. When the source's `nSUBS` does
+/// not exceed the destination's, the range is empty and no
+/// `JOIN_SCALES` bits are read for that channel.
+///
+/// The `RANGE` (DYNF) and `SICRC` (CPF) fields are both fully specified
+/// and handled: `RANGE`'s 8-bit index is captured (the §D.4
 /// [`crate::drc_range`] lookup is applied later, post-QMF) and `SICRC`'s
 /// 16 bits are consumed for framing.
 ///
@@ -390,31 +411,73 @@ pub struct SideInfoTail {
 ///
 /// # Errors
 ///
-/// * [`Error::InvalidSideInfo`] with field `"JOINX"` when any
-///   `joinx[ch] > 0` (joint-intensity tail not yet decodable);
+/// * [`Error::InvalidSideInfo`] with field `"JOIN_SHUFF"` when a
+///   channel's selector is the reserved value 7, or `"JOINX"` when a
+///   source channel index is out of range, or `"JOIN_SCALES"` when a
+///   biased index lands outside the §D.3 table;
 /// * [`Error::UnexpectedEof`] when the buffer ends mid-walk.
 pub fn decode_primary_side_info_tail_at(
     bytes: &[u8],
     bit_offset: usize,
     joinx: &[u8],
+    n_subs: &[usize],
     dynf: bool,
     cpf: bool,
 ) -> Result<(SideInfoTail, usize)> {
-    // The JOIN_SHUFF / JOIN_SCALES block (JOINX[ch] > 0) needs the
-    // joint-scale table that is not staged; decline rather than guess
-    // the variable JOIN_SCALES bit count.
-    if let Some(&j) = joinx.iter().find(|&&j| j > 0) {
-        return Err(Error::InvalidSideInfo {
-            field: "JOINX",
-            value: j as u32,
-        });
-    }
-
     let byte_offset = bit_offset / 8;
     let intra_byte = bit_offset % 8;
     let mut br = BitReader::from_byte_offset(bytes, byte_offset);
     if intra_byte > 0 {
         br.read_bits(intra_byte as u32)?;
+    }
+
+    let n_pchs = joinx.len();
+    let mut join_scales: Vec<Vec<f64>> = vec![Vec::new(); n_pchs];
+
+    // 1. for (ch) if (JOINX[ch] > 0) JOIN_SHUFF[ch] = ExtractBits(3).
+    //    The selectors are read for every joint channel first (Table
+    //    5-28 groups all JOIN_SHUFF reads before the JOIN_SCALES loop).
+    let mut join_codebook: Vec<Option<crate::ScalesCodebook>> = vec![None; n_pchs];
+    for (ch, &j) in joinx.iter().enumerate() {
+        if j > 0 {
+            let shuff = br.read_bits(3)? as u8;
+            join_codebook[ch] = Some(crate::ScalesCodebook::from_shuff(shuff).map_err(|_| {
+                Error::InvalidSideInfo {
+                    field: "JOIN_SHUFF",
+                    value: shuff as u32,
+                }
+            })?);
+        }
+    }
+
+    // 2. for (ch) if (JOINX[ch] > 0) decode JOIN_SCALES[ch][n] for each
+    //    imported sub-band n ∈ [nSUBS[ch], nSUBS[nSourceCh]).
+    for (ch, &j) in joinx.iter().enumerate() {
+        let Some(codebook) = join_codebook[ch] else {
+            continue;
+        };
+        let source_ch = (j - 1) as usize;
+        // The source channel and both nSUBS bounds must exist. A joint
+        // reference to a non-existent source channel is a malformed
+        // header.
+        if source_ch >= n_subs.len() || ch >= n_subs.len() {
+            return Err(Error::InvalidSideInfo {
+                field: "JOINX",
+                value: j as u32,
+            });
+        }
+        let n_subs_dst = n_subs[ch];
+        let n_subs_src = n_subs[source_ch];
+        // The import range runs [nSUBS[ch], nSUBS[nSourceCh]); when the
+        // source is not wider than the destination it is empty.
+        if n_subs_src > n_subs_dst {
+            let mut factors = Vec::with_capacity(n_subs_src - n_subs_dst);
+            for _ in n_subs_dst..n_subs_src {
+                let (factor, _biased) = crate::side_info::decode_join_scale(&mut br, codebook)?;
+                factors.push(factor);
+            }
+            join_scales[ch] = factors;
+        }
     }
 
     // 3. if (DYNF != 0) { nIndex = ExtractBits(8); RANGEtbl.LookUp(…) }
@@ -437,6 +500,7 @@ pub fn decode_primary_side_info_tail_at(
         SideInfoTail {
             range_index,
             side_info_crc_present,
+            join_scales,
         },
         bits_consumed,
     ))
@@ -807,17 +871,19 @@ mod tests {
         // JOINX all zero, DYNF=0, CPF=0 -> the tail is empty.
         let stream = pack_fields(&[(0, 8)]); // any padding
         let (tail, bits) =
-            decode_primary_side_info_tail_at(&stream, 0, &[0, 0], false, false).unwrap();
+            decode_primary_side_info_tail_at(&stream, 0, &[0, 0], &[3, 3], false, false).unwrap();
         assert_eq!(bits, 0);
         assert_eq!(tail.range_index, None);
         assert!(!tail.side_info_crc_present);
+        assert!(tail.join_scales.iter().all(Vec::is_empty));
     }
 
     #[test]
     fn tail_captures_range_index_when_dynf() {
         // DYNF=1 -> 8-bit RANGE index; CPF=0.
         let stream = pack_fields(&[(207, 8)]); // index 207 -> +20 dB / 10.0x
-        let (tail, bits) = decode_primary_side_info_tail_at(&stream, 0, &[0], true, false).unwrap();
+        let (tail, bits) =
+            decode_primary_side_info_tail_at(&stream, 0, &[0], &[3], true, false).unwrap();
         assert_eq!(bits, 8);
         assert_eq!(tail.range_index, Some(207));
         assert!(!tail.side_info_crc_present);
@@ -828,7 +894,8 @@ mod tests {
     fn tail_skips_sicrc_when_cpf() {
         // DYNF=0, CPF=1 -> 16-bit SICRC consumed, value not surfaced.
         let stream = pack_fields(&[(0xABCD, 16)]);
-        let (tail, bits) = decode_primary_side_info_tail_at(&stream, 0, &[0], false, true).unwrap();
+        let (tail, bits) =
+            decode_primary_side_info_tail_at(&stream, 0, &[0], &[3], false, true).unwrap();
         assert_eq!(bits, 16);
         assert_eq!(tail.range_index, None);
         assert!(tail.side_info_crc_present);
@@ -839,7 +906,7 @@ mod tests {
         // DYNF=1 and CPF=1 -> 8-bit RANGE then 16-bit SICRC, in order.
         let stream = pack_fields(&[(127, 8), (0x1234, 16)]); // index 127 -> unity
         let (tail, bits) =
-            decode_primary_side_info_tail_at(&stream, 0, &[0, 0], true, true).unwrap();
+            decode_primary_side_info_tail_at(&stream, 0, &[0, 0], &[3, 3], true, true).unwrap();
         assert_eq!(bits, 24);
         assert_eq!(tail.range_index, Some(127));
         assert!(tail.side_info_crc_present);
@@ -847,16 +914,53 @@ mod tests {
     }
 
     #[test]
-    fn tail_declines_joint_intensity() {
-        // Any JOINX[ch] > 0 -> the joint-scale tail is not decodable.
-        let stream = pack_fields(&[(0, 8)]);
+    fn tail_decodes_joint_intensity_scales() {
+        // ch0 is the source (JOINX=0, nSUBS=5); ch1 is jointly coded
+        // (JOINX=1 -> source ch0, nSUBS=3). The imported range is
+        // [nSUBS[1]=3, nSUBS[0]=5) = subbands 3 and 4, so ch1 needs a
+        // JOIN_SHUFF selector and 2 JOIN_SCALES values.
+        //
+        // JOIN_SHUFF[1] = 5 (linear-6-bit), then two 6-bit indices:
+        // index 0 -> biased 64 -> §D.3 unity (1.0), index 63 -> biased
+        // 127 -> §D.3 entry 127.
+        let stream = pack_fields(&[
+            (5, 3),  // JOIN_SHUFF[1] = linear-6-bit
+            (0, 6),  // JOIN_SCALES[1][3] index 0 -> 1.0
+            (63, 6), // JOIN_SCALES[1][4] index 63 -> JOIN_SCALE_FACTOR[127]
+        ]);
+        let (tail, bits) =
+            decode_primary_side_info_tail_at(&stream, 0, &[0, 1], &[5, 3], false, false).unwrap();
+        assert_eq!(bits, 3 + 6 + 6);
+        assert!(tail.join_scales[0].is_empty()); // source channel: no import
+        assert_eq!(tail.join_scales[1].len(), 2);
+        assert_eq!(tail.join_scales[1][0], 1.0);
+        assert_eq!(tail.join_scales[1][1], crate::JOIN_SCALE_FACTOR[127]);
+    }
+
+    #[test]
+    fn tail_rejects_reserved_join_shuff() {
+        // JOIN_SHUFF = 7 is the reserved/invalid selector.
+        let stream = pack_fields(&[(7, 3)]);
         assert_eq!(
-            decode_primary_side_info_tail_at(&stream, 0, &[0, 2], false, false).unwrap_err(),
+            decode_primary_side_info_tail_at(&stream, 0, &[0, 1], &[5, 3], false, false)
+                .unwrap_err(),
             Error::InvalidSideInfo {
-                field: "JOINX",
-                value: 2,
+                field: "JOIN_SHUFF",
+                value: 7,
             }
         );
+    }
+
+    #[test]
+    fn tail_joint_empty_range_reads_no_scales() {
+        // ch1 JOINX=1 but its nSUBS (5) is not exceeded by the source
+        // ch0 nSUBS (5) -> empty import range -> JOIN_SHUFF is still read
+        // but no JOIN_SCALES values follow.
+        let stream = pack_fields(&[(0, 3)]); // JOIN_SHUFF[1] = SA129
+        let (tail, bits) =
+            decode_primary_side_info_tail_at(&stream, 0, &[0, 1], &[5, 5], false, false).unwrap();
+        assert_eq!(bits, 3);
+        assert!(tail.join_scales[1].is_empty());
     }
 
     #[test]
@@ -864,7 +968,8 @@ mod tests {
         // The tail decoder must respect a non-byte-aligned start cursor
         // (the SCALES block rarely ends on a byte boundary).
         let stream = pack_fields(&[(0b101, 3), (207, 8)]); // 3-bit prefix, then RANGE
-        let (tail, bits) = decode_primary_side_info_tail_at(&stream, 3, &[0], true, false).unwrap();
+        let (tail, bits) =
+            decode_primary_side_info_tail_at(&stream, 3, &[0], &[3], true, false).unwrap();
         assert_eq!(bits, 8);
         assert_eq!(tail.range_index, Some(207));
     }

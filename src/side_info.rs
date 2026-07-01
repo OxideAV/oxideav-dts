@@ -732,12 +732,23 @@ pub fn decode_join_scale_at(
         br.read_bits(intra_byte as u32)?;
     }
     let start = bit_offset;
+    let (factor, biased) = decode_join_scale(&mut br, codebook)?;
+    let bits_consumed = br.absolute_bit_position() - start;
+    Ok((factor, biased, bits_consumed))
+}
 
+/// In-place §5.4.1 `JOIN_SCALES` field decode against a live
+/// [`BitReader`]. Returns `(join_scale_factor, biased_index)`. See
+/// [`decode_join_scale_at`] for the field semantics.
+pub(crate) fn decode_join_scale(
+    br: &mut BitReader<'_>,
+    codebook: ScalesCodebook,
+) -> Result<(f64, i32)> {
     // Extract the raw QSCALES symbol. Huffman variants emit a signed
     // difference symbol; linear variants read a raw absolute index.
     let symbol: i32 = if codebook.is_huffman_encoded() {
         let (table, name) = scales_huffman_codebook(codebook);
-        decode_huffman(&mut br, table, name)? as i32
+        decode_huffman(br, table, name)? as i32
     } else {
         let n_bits = if codebook.uses_7bit_rms_table() { 7 } else { 6 };
         br.read_bits(n_bits)? as i32
@@ -750,8 +761,7 @@ pub fn decode_join_scale_at(
         value: biased as u32,
     })?;
 
-    let bits_consumed = br.absolute_bit_position() - start;
-    Ok((factor, biased, bits_consumed))
+    Ok((factor, biased))
 }
 
 pub(crate) fn decode_scales(

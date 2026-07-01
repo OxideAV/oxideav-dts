@@ -132,6 +132,14 @@ pub enum SubframePcmError {
         /// The mismatching supplied slice length.
         got: usize,
     },
+    /// The §C.2.3 joint-intensity sub-band copy could not be applied
+    /// because the supplied `JOIN_SCALES` factors, source-channel index,
+    /// or `nSUBS` bounds were structurally inconsistent with the decoded
+    /// sub-band matrices. Carries the 0-based destination channel.
+    JointSubbandShape {
+        /// 0-based destination channel whose joint import failed.
+        ch: usize,
+    },
 }
 
 impl core::fmt::Display for SubframePcmError {
@@ -152,6 +160,11 @@ impl core::fmt::Display for SubframePcmError {
             SubframePcmError::ChannelCountMismatch { expected, got } => write!(
                 f,
                 "channel-count mismatch: driver expects {expected}, slice carries {got}"
+            ),
+            SubframePcmError::JointSubbandShape { ch } => write!(
+                f,
+                "channel {ch} joint-intensity sub-band copy failed: JOIN_SCALES / \
+                 nSUBS bounds inconsistent with the decoded sub-band matrices"
             ),
         }
     }
@@ -279,6 +292,31 @@ impl SubframePcmDecoder {
         n_ssc: usize,
         aspf: bool,
     ) -> Result<(SubframePcm, usize), SubframePcmError> {
+        self.decode_subframe_with_joint(bytes, bit_offset, header, coding, side, n_ssc, aspf, &[])
+    }
+
+    /// Like [`Self::decode_subframe`] but also applies the §C.2.3
+    /// joint-intensity sub-band copy when `join_scales` is non-empty.
+    ///
+    /// `join_scales[ch]` is the [`crate::SideInfoTail::join_scales`]
+    /// vector for destination channel `ch` (empty for channels whose
+    /// `JOINX[ch] == 0`). After the §5.5 audio-data walk fills every
+    /// channel's sub-band matrix, each jointly-coded channel imports
+    /// sub-bands `[nSUBS[ch], nSUBS[nSourceCh])` from its source channel
+    /// (`JOINX[ch] - 1`), each scaled by the matching `JOIN_SCALES`
+    /// factor, **before** the §C.2.5 QMF synthesis runs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_subframe_with_joint(
+        &mut self,
+        bytes: &[u8],
+        bit_offset: usize,
+        header: &DtsFrameHeader,
+        coding: &AudioCodingHeader,
+        side: &[ChannelSideInfo],
+        n_ssc: usize,
+        aspf: bool,
+        join_scales: &[Vec<f64>],
+    ) -> Result<(SubframePcm, usize), SubframePcmError> {
         let channels = self.qmf.channel_count();
         if side.len() != channels {
             return Err(SubframePcmError::ChannelCountMismatch {
@@ -303,12 +341,16 @@ impl SubframePcmDecoder {
         };
         let filter: FilterBankSelection = header.filter_bank_selection();
 
-        // Joint-intensity subband coding (JOINX > 0) needs the
-        // JOIN_SCALES side-info that is not yet wired; decline rather
-        // than emit incorrect PCM.
-        for (ch, &joinx) in coding.joinx.iter().enumerate().take(channels) {
-            if joinx > 0 {
-                return Err(SubframePcmError::JointSubbandUnsupported { ch, joinx });
+        // Joint-intensity subband coding (JOINX > 0) is applied below
+        // once the §5.5 walk has filled every channel's sub-band matrix,
+        // but only when the caller supplied the JOIN_SCALES factors (via
+        // decode_subframe_with_joint). A JOINX > 0 channel with no
+        // supplied factors is declined rather than silently dropped.
+        if join_scales.is_empty() {
+            for (ch, &joinx) in coding.joinx.iter().enumerate().take(channels) {
+                if joinx > 0 {
+                    return Err(SubframePcmError::JointSubbandUnsupported { ch, joinx });
+                }
             }
         }
 
@@ -351,6 +393,17 @@ impl SubframePcmDecoder {
                 aspf,
             )?;
         let bits_consumed = (cursor - bit_offset) + audio_bits;
+
+        // (1b) §C.2.3 joint-intensity sub-band copy. For each
+        // destination channel with JOINX[ch] > 0 and supplied
+        // JOIN_SCALES factors, overwrite its imported sub-band columns
+        // [nSUBS[ch], nSUBS[src]) with the source channel's sub-band
+        // samples scaled by the matching JOIN_SCALES factor. This runs
+        // on the sub-band matrices before QMF synthesis.
+        let mut matrices = matrices;
+        if !join_scales.is_empty() {
+            apply_joint_subband(&mut matrices, coding, &n_subs, join_scales)?;
+        }
 
         // (2) §C.2.5 per-channel 32-band synthesis -> planar PCM.
         let channel_samples: Vec<&[[f64; NUM_SUBBAND]]> =
@@ -538,19 +591,18 @@ impl From<crate::Error> for CoreFrameDecodeError {
 ///
 /// # Scope
 ///
-/// Every channel must have `JOINX == 0` (no joint-intensity sub-band
-/// coding): a `JOINX > 0` channel carries a variable-length
-/// `JOIN_SHUFF` / `JOIN_SCALES` Table 5-28 tail gated on the unstaged
-/// joint-scale table, so the §5.5 bit offset cannot be located and the
-/// function returns
-/// [`CoreFrameDecodeError::UnsupportedSideInfoTail`] rather than guess.
+/// Joint-intensity sub-band coding (`JOINX > 0`) **is** decoded: each
+/// subframe's [`crate::decode_primary_side_info_tail_at`] resolves the
+/// Table 5-28 `JOIN_SHUFF` / `JOIN_SCALES` tail (the §D.3 joint-scale
+/// table), and the §C.2.3 sub-band copy imports the source channel's
+/// sub-bands, scaled by `JOIN_SCALES`, before QMF synthesis.
 ///
 /// The frame header's `DYNF` (embedded dynamic range) and `CPF`
-/// (side-info CRC) tail fields **are** handled: each subframe's
-/// [`crate::decode_primary_side_info_tail_at`] consumes the 8-bit
-/// `RANGE` index (`DYNF != 0`) and the 16-bit `SICRC` word (`CPF == 1`),
-/// and the §D.4 [`crate::drc_range`] multiplier is applied to that
-/// subframe's reconstructed PCM after QMF synthesis (per §5.4.1).
+/// (side-info CRC) tail fields are likewise handled: each subframe's
+/// tail walk consumes the 8-bit `RANGE` index (`DYNF != 0`) and the
+/// 16-bit `SICRC` word (`CPF == 1`), and the §D.4 [`crate::drc_range`]
+/// multiplier is applied to that subframe's reconstructed PCM after QMF
+/// synthesis (per §5.4.1).
 ///
 /// The §D.10 VQ / ADPCM blockers (from the §5.5 walk) surface as
 /// [`CoreFrameDecodeError::Decode`].
@@ -560,8 +612,6 @@ impl From<crate::Error> for CoreFrameDecodeError {
 ///
 /// # Errors
 ///
-/// * [`CoreFrameDecodeError::UnsupportedSideInfoTail`] for a
-///   joint-intensity (`JOINX > 0`) side-info tail;
 /// * [`CoreFrameDecodeError::Bitstream`] for a §5.3.2 / §5.4.1 walk
 ///   failure;
 /// * [`CoreFrameDecodeError::Decode`] for a §5.5 / §C.2.5 failure
@@ -701,17 +751,6 @@ impl SubframePcmDecoder {
         let cpf = header.crc_present;
         let (coding, ach_bits) = crate::decode_audio_coding_header_at(bytes, header_bits, cpf)?;
 
-        // Joint-intensity (JOINX > 0) is the only side-info tail still
-        // undecodable; DYNF / CPF are handled below.
-        let joint_intensity = coding.joinx.iter().any(|&j| j > 0);
-        if joint_intensity {
-            return Err(CoreFrameDecodeError::UnsupportedSideInfoTail {
-                dynamic_range: header.dynamic_range,
-                side_info_crc: cpf,
-                joint_intensity,
-            });
-        }
-
         let channels = coding.n_pchs;
         if channels != self.channel_count() {
             return Err(CoreFrameDecodeError::Decode(
@@ -727,6 +766,7 @@ impl SubframePcmDecoder {
         // ChannelSideInfoParams.
         let params: Vec<_> = coding.channel_params.clone();
 
+        let n_subs = coding.n_subs();
         let mut bit = header_bits + ach_bits;
         for _ in 0..coding.n_subframes {
             // §5.4.1 side info (Table 5-28) through the end of the
@@ -734,20 +774,22 @@ impl SubframePcmDecoder {
             let (side, side_bits) = crate::decode_primary_side_info_at(bytes, bit, &params)?;
             bit += side_bits;
 
-            // The Table 5-28 RANGE (DYNF) / SICRC (CPF) tail sits between
-            // the SCALES block and the §5.5 region. (JOINX == 0 here, so
-            // no JOIN_SHUFF / JOIN_SCALES bits.)
+            // The Table 5-28 JOIN_SHUFF / JOIN_SCALES / RANGE (DYNF) /
+            // SICRC (CPF) tail sits between the SCALES block and the §5.5
+            // region. The joint-intensity JOIN_SCALES factors (if any)
+            // feed the §C.2.3 sub-band copy below.
             let (tail, tail_bits): (SideInfoTail, usize) = crate::decode_primary_side_info_tail_at(
                 bytes,
                 bit,
                 &coding.joinx,
+                &n_subs,
                 header.dynamic_range,
                 cpf,
             )?;
             bit += tail_bits;
 
             let n_ssc = side.subsubframe_count.n_ssc() as usize;
-            let (mut block, audio_bits) = self.decode_subframe(
+            let (mut block, audio_bits) = self.decode_subframe_with_joint(
                 bytes,
                 bit,
                 header,
@@ -755,6 +797,7 @@ impl SubframePcmDecoder {
                 &side.channels,
                 n_ssc,
                 header.aspf,
+                &tail.join_scales,
             )?;
 
             // §5.4.1: when DYNF != 0, multiply every reconstructed PCM
@@ -794,6 +837,78 @@ fn apply_range(block: &mut SubframePcm, range: f64) {
             };
         }
     }
+}
+
+/// Apply the §C.2.3 joint-intensity sub-band copy to the per-channel
+/// sub-band matrices, in place, before QMF synthesis.
+///
+/// For every destination channel `ch` with `JOINX[ch] > 0` and a
+/// non-empty `join_scales[ch]`, each imported sub-band column `n ∈
+/// [nSUBS[ch], nSUBS[nSourceCh])` of every sample row is overwritten
+/// with the source channel's (`nSourceCh = JOINX[ch] - 1`) sub-band
+/// sample scaled by the matching `JOIN_SCALES[ch][n]` factor.
+///
+/// The `join_scales[ch]` vector supplies one factor per imported
+/// sub-band, ordered from `nSUBS[ch]`; its length must equal
+/// `nSUBS[nSourceCh] - nSUBS[ch]`. Structural inconsistencies (source
+/// channel out of range, mismatched factor count, matrices shorter than
+/// `nSUBS[nSourceCh]`) surface as
+/// [`SubframePcmError::JointSubbandShape`].
+fn apply_joint_subband(
+    matrices: &mut [SubbandSampleMatrix],
+    coding: &AudioCodingHeader,
+    n_subs: &[usize],
+    join_scales: &[Vec<f64>],
+) -> Result<(), SubframePcmError> {
+    let channels = matrices.len();
+    for ch in 0..channels {
+        let factors = join_scales.get(ch).map(Vec::as_slice).unwrap_or(&[]);
+        if factors.is_empty() {
+            continue;
+        }
+        let joinx = coding.joinx.get(ch).copied().unwrap_or(0);
+        let Some(source_ch) = crate::joint_source_channel(joinx).map(usize::from) else {
+            return Err(SubframePcmError::JointSubbandShape { ch });
+        };
+        if source_ch >= channels || ch >= n_subs.len() || source_ch >= n_subs.len() {
+            return Err(SubframePcmError::JointSubbandShape { ch });
+        }
+        let n_subs_dst = n_subs[ch];
+        let n_subs_src = n_subs[source_ch];
+        // The import range must run forward and match the factor count.
+        if n_subs_src < n_subs_dst || factors.len() != n_subs_src - n_subs_dst {
+            return Err(SubframePcmError::JointSubbandShape { ch });
+        }
+        if n_subs_src > NUM_SUBBAND {
+            return Err(SubframePcmError::JointSubbandShape { ch });
+        }
+        // Destination and source are distinct channels of one Vec here
+        // (a self-referential joint has an empty import range and never
+        // reaches this point). Split the slice so the source (immutable)
+        // and destination (mutable) borrows do not overlap.
+        let rows = matrices[ch].len();
+        if matrices[source_ch].len() != rows {
+            return Err(SubframePcmError::JointSubbandShape { ch });
+        }
+        let (lo, hi) = if ch < source_ch {
+            (ch, source_ch)
+        } else {
+            (source_ch, ch)
+        };
+        let (left, right) = matrices.split_at_mut(hi);
+        let (dst_ch, src_ch): (&mut SubbandSampleMatrix, &SubbandSampleMatrix) = if ch == lo {
+            (&mut left[ch], &right[0])
+        } else {
+            (&mut right[0], &left[source_ch])
+        };
+        for (dst_row, src_row) in dst_ch.iter_mut().zip(src_ch.iter()) {
+            for (k, &factor) in factors.iter().enumerate() {
+                let n = n_subs_dst + k;
+                dst_row[n] = factor * src_row[n];
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -939,6 +1054,64 @@ mod tests {
             err,
             SubframePcmError::JointSubbandUnsupported { ch: 0, joinx: 2 }
         ));
+    }
+
+    /// The §C.2.3 joint copy overwrites the destination channel's
+    /// imported sub-band columns with the source channel's samples,
+    /// scaled by the matching JOIN_SCALES factor, and leaves the
+    /// non-imported columns untouched.
+    #[test]
+    fn apply_joint_subband_scales_imported_columns() {
+        // 2 channels, 2 sample rows. ch0 (source) nSUBS=4, ch1 (dst)
+        // nSUBS=2 -> import subbands 2 and 3 from ch0 into ch1.
+        let mut ch0 = vec![[0.0f64; NUM_SUBBAND]; 2];
+        let mut ch1 = vec![[0.0f64; NUM_SUBBAND]; 2];
+        // Source subband samples in columns 2 and 3.
+        ch0[0][2] = 10.0;
+        ch0[0][3] = -4.0;
+        ch0[1][2] = 5.0;
+        ch0[1][3] = 8.0;
+        // Destination pre-existing values in columns 0/1 (kept) and a
+        // stray in column 2 (must be overwritten).
+        ch1[0][0] = 99.0;
+        ch1[0][2] = 7.0;
+        let mut matrices = vec![ch0, ch1];
+
+        let mut coding = AudioCodingHeader::two_channel_for_test((4, 4), (2, 2), 0);
+        coding.set_joinx_for_test(1, 1); // ch1 sources ch0 (JOINX=1)
+
+        // JOIN_SCALES[1] = [2.0, 3.0] for imported subbands 2 and 3.
+        let join_scales = vec![Vec::new(), vec![2.0, 3.0]];
+        let n_subs = [4usize, 2usize];
+
+        apply_joint_subband(&mut matrices, &coding, &n_subs, &join_scales).unwrap();
+
+        // Imported columns are source * factor.
+        assert_eq!(matrices[1][0][2], 20.0); // 10 * 2
+        assert_eq!(matrices[1][0][3], -12.0); // -4 * 3
+        assert_eq!(matrices[1][1][2], 10.0); // 5 * 2
+        assert_eq!(matrices[1][1][3], 24.0); // 8 * 3
+                                             // Non-imported destination columns untouched.
+        assert_eq!(matrices[1][0][0], 99.0);
+        // Source channel untouched.
+        assert_eq!(matrices[0][0][2], 10.0);
+    }
+
+    /// A JOIN_SCALES vector whose length disagrees with the import range
+    /// is rejected as a shape error.
+    #[test]
+    fn apply_joint_subband_rejects_wrong_factor_count() {
+        let mut matrices = vec![
+            vec![[0.0f64; NUM_SUBBAND]; 1],
+            vec![[0.0f64; NUM_SUBBAND]; 1],
+        ];
+        let mut coding = AudioCodingHeader::two_channel_for_test((4, 4), (2, 2), 0);
+        coding.set_joinx_for_test(1, 1);
+        // Import range is [2, 4) = 2 subbands, but only 1 factor given.
+        let join_scales = vec![Vec::new(), vec![2.0]];
+        let n_subs = [4usize, 2usize];
+        let err = apply_joint_subband(&mut matrices, &coding, &n_subs, &join_scales).unwrap_err();
+        assert!(matches!(err, SubframePcmError::JointSubbandShape { ch: 1 }));
     }
 
     /// A channel-count mismatch between the decoder and the side-info
@@ -1294,24 +1467,30 @@ mod tests {
         assert!(pcm[0].iter().all(|&s| s == 0));
     }
 
-    /// A frame with a `JOINX > 0` channel is still declined — the
-    /// joint-intensity `JOIN_SHUFF`/`JOIN_SCALES` tail needs the unstaged
-    /// joint-scale table.
+    /// A frame with a single `JOINX = 1` channel that references itself
+    /// (source == destination, equal `nSUBS`) has an empty joint import
+    /// range: the JOIN_SHUFF selector is read but no JOIN_SCALES follow,
+    /// and the frame decodes normally (no more decline). This exercises
+    /// the JOIN_SHUFF read on the decode path without needing a source
+    /// channel wider than the destination.
     #[test]
-    fn decode_core_frame_declines_joint_intensity() {
+    fn decode_core_frame_joint_self_empty_range_decodes() {
         let mut bytes = encode_clean_header(false, false);
-        // ACH with JOINX[0] = 1 (> 0).
+        // ACH mirrors decode_core_frame_no_bits_round_trips but sets
+        // JOINX[0] = 1 (source channel 0 == self); nSUBS[0] == nSUBS[src]
+        // so the joint import range is empty. The JOIN_SHUFF selector is
+        // still read from the side-info tail; no JOIN_SCALES follow.
         let mut body: Vec<(u32, u8)> = vec![
             (0, 4), // SUBFS
             (0, 3), // PCHS
-            (0, 5), // SUBS
-            (1, 5), // VQSUB
-            (1, 3), // JOINX = 1 (> 0)
+            (0, 5), // SUBS  -> nSUBS = 2
+            (1, 5), // VQSUB -> nVQSUB = 2 (== nSUBS, Core case)
+            (1, 3), // JOINX = 1 (source channel 0 == self)
             (0, 2), // THUFF
             (0, 3), // SHUFF
-            (6, 3), // BHUFF
+            (6, 3), // BHUFF=6 -> Linear5Bit
         ];
-        body.push((0, 1));
+        body.push((0, 1)); // SEL ABITS1
         for _ in 1..5 {
             body.push((0, 2));
         }
@@ -1319,21 +1498,35 @@ mod tests {
             body.push((0, 3));
         }
         for _ in 0..10 {
-            body.push((0, 2));
+            body.push((0, 2)); // ADJ
         }
+
+        // §5.4.1 side info, one subframe (as in the no-bits round trip).
+        body.push((0, 2)); // SSC
+        body.push((0, 3)); // PSC
+        body.push((0, 1)); // PMODE[0][0]
+        body.push((0, 1)); // PMODE[0][1]
+        body.push((0, 5)); // ABITS[0][0] = 0
+        body.push((0, 5)); // ABITS[0][1] = 0
+
+        // §5.4.1 tail: JOINX[0] > 0 -> a 3-bit JOIN_SHUFF[0] precedes the
+        // (absent) RANGE/SICRC. The empty import range emits no
+        // JOIN_SCALES.
+        body.push((0, 3)); // JOIN_SHUFF[0] = SA129
+
+        // §5.5 Audio Data: all ABITS 0 -> NoBits -> just the DSYNC.
+        body.push((0xffff, 16));
+
         let body_bytes = pack_fields(&body);
         bytes.extend_from_slice(&body_bytes);
         bytes.extend_from_slice(&[0u8; 4]);
 
         let header = crate::parse_frame_header(&bytes).unwrap();
-        let err = decode_core_frame(&bytes, &header).unwrap_err();
-        assert!(matches!(
-            err,
-            CoreFrameDecodeError::UnsupportedSideInfoTail {
-                joint_intensity: true,
-                ..
-            }
-        ));
+        // No longer declined: the empty-range joint frame decodes.
+        let pcm = decode_core_frame(&bytes, &header).unwrap();
+        assert_eq!(pcm.len(), 1);
+        // All-zero side info -> all-zero subband samples -> silent PCM.
+        assert!(pcm[0].iter().all(|&s| s == 0));
     }
 
     /// `apply_range` with the §D.4 unity index leaves the PCM untouched.
