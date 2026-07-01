@@ -527,9 +527,9 @@ pub use crate::qmf_assemble::{
 pub use crate::qmf_multichannel::{MultiChannelQmf, MultiChannelQmfError};
 pub use crate::qmf_synth::QmfSynthesis;
 pub use crate::side_info::{
-    decode_abits_at, decode_adj_at, decode_scales_at, decode_subsubframe_count_at, decode_tmode_at,
-    AbitsCodebook, ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, TmodeCodebook,
-    RMS_6BIT, RMS_7BIT,
+    decode_abits_at, decode_adj_at, decode_join_scale_at, decode_scales_at,
+    decode_subsubframe_count_at, decode_tmode_at, AbitsCodebook, ScaleFactorAdjustment,
+    ScalesCodebook, SubsubframeCount, TmodeCodebook, RMS_6BIT, RMS_7BIT,
 };
 pub use crate::step_size::{
     dequant_scale, dequant_subsubframe, scale_subsubframe_samples, transient_scale_index,

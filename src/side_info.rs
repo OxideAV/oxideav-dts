@@ -687,6 +687,73 @@ pub fn decode_scales_at(
     Ok((scale, new_sum, bits_consumed))
 }
 
+/// Decode a single §5.4.1 `JOIN_SCALES` field starting at `bit_offset`,
+/// returning `(join_scale_factor, biased_index, bits_consumed)`.
+///
+/// Per the §5.4.1 Table 5-28 joint-intensity walk (staged PDF p.29):
+///
+/// ```text
+/// nQSelect = JOIN_SHUFF[ch];
+/// for (n = nSUBS[ch]; n < nSUBS[nSourceCh]; n++) {
+///     QSCALES.ppQ[nQSelect]->InverseQ(InputFrame, nJScale);
+///     nJScale = nJScale + 64;                 // fixed +64 bias
+///     JScaleTbl.LookUp(nJScale, JOIN_SCALES[ch][n]);
+/// }
+/// ```
+///
+/// Unlike the regular SCALES walk, the `JOIN_SCALES` loop does **not**
+/// carry a running `nScaleSum` accumulator: each decoded `QSCALES`
+/// symbol is biased by a fixed `+64` and directly indexes the §D.3
+/// [`crate::join_scale`] table ([`crate::JOIN_SCALE_FACTOR`]). The raw
+/// symbol is therefore taken as-is — the Huffman code books emit a
+/// signed value in a small window around zero, and the `+64` bias maps
+/// the zero symbol to the D.3 unity entry (index 64).
+///
+/// `codebook` is [`ScalesCodebook::from_shuff`] of the channel's 3-bit
+/// `JOIN_SHUFF[ch]`. The Huffman variants (`SA129..SE129`) decode one
+/// entropy symbol; the two linear variants read a raw 6- or 7-bit
+/// absolute index (which is likewise biased by 64 before the D.3 lookup).
+///
+/// # Errors
+///
+/// * [`Error::InvalidSideInfo`] with field `"JOIN_SCALES"` when the
+///   biased index falls outside the §D.3 table (`0..=128`) — a
+///   well-formed stream keeps it in range by construction;
+/// * [`Error::UnexpectedEof`] when the buffer ends mid-symbol.
+pub fn decode_join_scale_at(
+    bytes: &[u8],
+    bit_offset: usize,
+    codebook: ScalesCodebook,
+) -> Result<(f64, i32, usize)> {
+    let byte_offset = bit_offset / 8;
+    let intra_byte = bit_offset % 8;
+    let mut br = BitReader::from_byte_offset(bytes, byte_offset);
+    if intra_byte > 0 {
+        br.read_bits(intra_byte as u32)?;
+    }
+    let start = bit_offset;
+
+    // Extract the raw QSCALES symbol. Huffman variants emit a signed
+    // difference symbol; linear variants read a raw absolute index.
+    let symbol: i32 = if codebook.is_huffman_encoded() {
+        let (table, name) = scales_huffman_codebook(codebook);
+        decode_huffman(&mut br, table, name)? as i32
+    } else {
+        let n_bits = if codebook.uses_7bit_rms_table() { 7 } else { 6 };
+        br.read_bits(n_bits)? as i32
+    };
+
+    // Bias by +64 and look the biased index up in the §D.3 table.
+    let biased = symbol + 64;
+    let factor = crate::join_scale::join_scale(biased).ok_or(Error::InvalidSideInfo {
+        field: "JOIN_SCALES",
+        value: biased as u32,
+    })?;
+
+    let bits_consumed = br.absolute_bit_position() - start;
+    Ok((factor, biased, bits_consumed))
+}
+
 pub(crate) fn decode_scales(
     br: &mut BitReader<'_>,
     codebook: ScalesCodebook,
@@ -1825,5 +1892,67 @@ mod tests {
                 assert_eq!(prefix.is_termination_tail(), psc != 0);
             }
         }
+    }
+
+    #[test]
+    fn decode_join_scale_huffman_zero_symbol_is_unity() {
+        // The SA129 Huffman table (A5) codes symbol 0 as a 1-bit `0`.
+        // After the +64 bias that lands on the §D.3 unity entry (1.0).
+        let stream = pack_codes(&[(0, 1)]);
+        let (factor, biased, bits) =
+            decode_join_scale_at(&stream, 0, ScalesCodebook::Sa129).unwrap();
+        assert_eq!(biased, 64);
+        assert_eq!(factor, 1.0);
+        assert_eq!(bits, 1);
+    }
+
+    #[test]
+    fn decode_join_scale_huffman_walks_every_a5_symbol() {
+        // Each SA129 (A5) symbol biases by +64 and must land on a valid
+        // §D.3 entry (all of {-2,-1,0,1,2} + 64 are inside 0..=128).
+        for &(symbol, len, code) in TABLE_A5 {
+            let stream = pack_codes(&[(code, len)]);
+            let (factor, biased, _) =
+                decode_join_scale_at(&stream, 0, ScalesCodebook::Sa129).unwrap();
+            assert_eq!(biased, symbol as i32 + 64);
+            assert_eq!(
+                factor,
+                crate::JOIN_SCALE_FACTOR[(symbol as i32 + 64) as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn decode_join_scale_linear6_reads_raw_index() {
+        // Linear-6-bit: a raw 6-bit absolute index. Index 0 biases to
+        // 64 (unity); index 63 biases to 127 (a high §D.3 factor).
+        let stream = pack_codes(&[(0, 6)]);
+        let (factor, biased, bits) =
+            decode_join_scale_at(&stream, 0, ScalesCodebook::Linear6Bit).unwrap();
+        assert_eq!(biased, 64);
+        assert_eq!(factor, 1.0);
+        assert_eq!(bits, 6);
+
+        let stream = pack_codes(&[(63, 6)]);
+        let (factor, biased, _) =
+            decode_join_scale_at(&stream, 0, ScalesCodebook::Linear6Bit).unwrap();
+        assert_eq!(biased, 127);
+        assert_eq!(factor, crate::JOIN_SCALE_FACTOR[127]);
+    }
+
+    #[test]
+    fn decode_join_scale_linear7_out_of_range_rejected() {
+        // Linear-7-bit index 65 biases to 129, which is outside the
+        // §D.3 table (0..=128); the decode must reject it rather than
+        // index out of bounds.
+        let stream = pack_codes(&[(65, 7)]);
+        let err = decode_join_scale_at(&stream, 0, ScalesCodebook::Linear7Bit).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::InvalidSideInfo {
+                field: "JOIN_SCALES",
+                value: 129
+            }
+        ));
     }
 }
