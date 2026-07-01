@@ -452,6 +452,7 @@ mod fir_coeff;
 mod header;
 mod inverse_adpcm;
 mod iter;
+mod join_scale;
 mod joint_subband;
 mod lfe_fir_coeff;
 mod lfe_interp;
@@ -506,6 +507,9 @@ pub use crate::iter::{
     find_all_syncs, find_next_sync, iter_frames, iter_frames_14bit, iter_frames_resync, iter_syncs,
     FrameIterator, FrameIterator14, FrameIteratorResync, FrameView, FrameView14, ResyncCause,
     ResyncEvent, SyncIterator, SyncMatch,
+};
+pub use crate::join_scale::{
+    join_scale, JOIN_SCALE_FACTOR, JOIN_SCALE_LEN, JOIN_SCALE_UNITY_INDEX,
 };
 pub use crate::joint_subband::{
     joint_source_channel, joint_subband_decode_range_f64, joint_subband_decode_range_i32,
