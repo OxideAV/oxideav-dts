@@ -31,9 +31,17 @@ upsampled through the §C.2.6 `InterpolationFIR()` polyphase convolution
 (`LfeChannel`); the registry `Decoder` emits the decoded LFE channel as
 a trailing equal-length plane of the planar S32 `AudioFrame` (the
 interpolation lands exactly the primary `nSSC·256` per-frame length).
-Only **joint-intensity** frames
-(`JOINX > 0`) and the §D.10 VQ / ADPCM code books still surface
-`CoreError::Unsupported`.
+**Joint-intensity frames** (`JOINX > 0`) now decode: the §5.4.1
+Table 5-28 `JOIN_SHUFF` / `JOIN_SCALES` side-info tail is walked (the
+per-channel 3-bit `QSCALES` selector then one biased quantization index
+per imported sub-band, resolved through the §D.3 joint-scale table
+`JScaleTbl`), and the §C.2.3 sub-band copy imports the source channel's
+sub-band samples — scaled by the matching `JOIN_SCALES` factor — before
+QMF synthesis. Only the §D.10 VQ / ADPCM code books (high-frequency VQ
+sub-bands and ADPCM prediction coefficients) still surface
+`CoreError::Unsupported`; those two tables are **not printed in the
+staged ETSI spec** ("Due to its extensive size, this table is not
+included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
 
 ### What works today
 
@@ -130,25 +138,37 @@ Only **joint-intensity** frames
   (correlation 1.0 vs 0.73 with a per-frame reset — see
   `tests/black_box_ffmpeg_pcm.rs`).
 - **§5.4.1 side-info tail** — `decode_primary_side_info_tail_at` /
-  `SideInfoTail` walk the Table 5-28 tail after the SCALES block: the
-  8-bit `RANGE` dynamic-range index (`DYNF`, looked up via the §D.4
-  `drc_range` 256-entry multiplier table) and the 16-bit `SICRC`
-  (`CPF`). Joint-intensity (`JOINX > 0`) is declined pending the
-  joint-scale table.
+  `SideInfoTail` walk the full Table 5-28 tail after the SCALES block:
+  the per-channel `JOIN_SHUFF[ch]` (3-bit `QSCALES` selector) and the
+  `JOIN_SCALES[ch][n]` loop (one biased quantization index per imported
+  sub-band `n ∈ [nSUBS[ch], nSUBS[nSourceCh])`, resolved through the
+  §D.3 joint-scale table), the 8-bit `RANGE` dynamic-range index
+  (`DYNF`, looked up via the §D.4 `drc_range` 256-entry multiplier
+  table), and the 16-bit `SICRC` (`CPF`). The resolved `JOIN_SCALES`
+  factors are carried in `SideInfoTail::join_scales`.
+- **§D.3 joint-intensity scale table** — `join_scale` /
+  `JOIN_SCALE_FACTOR` transcribe the §D.3 `JScaleTbl` (129 entries,
+  index 64 → unity), the look-up the biased `JOIN_SCALES` index feeds.
+- **§C.2.3 joint-intensity sub-band copy** — `decode_core_frame` /
+  `SubframePcmDecoder::decode_subframe_with_joint` import a jointly-coded
+  channel's high sub-bands from its source channel
+  (`nSourceCh = JOINX[ch] − 1`), each scaled by the matching
+  `JOIN_SCALES` factor, on the decoded sub-band matrices **before** QMF
+  synthesis. `JOINX > 0` frames now decode end to end.
 
 ### Not yet implemented
 
-- The §5.4.1 `JOIN_SHUFF` / `JOIN_SCALES` joint-intensity tail (when
-  `JOINX > 0`). The §C.2.3 joint-subband decode itself is landed, but its
-  `JOIN_SCALES` Huffman side-info decode needs the joint-scale-factor
-  table, which is not transcribed in `docs/audio/dts/`, so
-  `decode_core_frame` still declines `JOINX > 0` frames. (The `RANGE` /
-  `DYNF` and `SICRC` / `CPF` tail fields *are* handled — see "What works
-  today".)
 - The §D.10.1 ADPCM-coefficient VQ and §D.10.2 high-frequency-subband VQ
   code books (a `PMODE != 0` or `nVQSUB < nSUBS` subband surfaces a typed
-  blocker) — those Annex D VQ tables are not transcribed in
-  `docs/audio/dts/`.
+  blocker). These are the last Core-profile blockers, and they are a
+  **hard docs-gap**: the staged ETSI spec explicitly omits both tables
+  ("Due to its extensive size, this table is not included here",
+  §D.10.1 / §D.10.2, PDF p.255), so the 4096-vector ADPCM code book and
+  the 1024-vector high-frequency code book cannot be transcribed from
+  `docs/audio/dts/`. Clean-room rules bar re-deriving them from any
+  decoder source. (The `JOIN_SHUFF` / `JOIN_SCALES` joint-intensity tail
+  and the §C.2.3 sub-band copy — previously listed here — *are* now
+  decoded; see "What works today".)
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the
   current Core-profile effort.
 - The `HEADER_CRC` polynomial is not documented in the staged spec
