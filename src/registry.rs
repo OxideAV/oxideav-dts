@@ -244,10 +244,11 @@ impl Decoder for DtsDecoderHandle {
         // packet injects a warmup transient at every frame boundary).
         // The frame's channel count (§5.3.2 nPCHS) sizes the filter; a
         // mismatch with the running stream restarts it for the new
-        // layout. Frames with a Table 5-28 side-info tail (JOINX) or a
-        // §D.10 VQ blocker surface as Unsupported so callers can
-        // distinguish "needs another packet" from "this frame's feature
-        // isn't decoded yet".
+        // layout. Joint-intensity frames (Table 5-28 JOINX > 0) now
+        // decode through the §D.3 JScaleTbl + §C.2.3 sub-band copy; only
+        // a §D.10 VQ/ADPCM blocker still surfaces as Unsupported so
+        // callers can distinguish "needs another packet" from "this
+        // frame's feature isn't decoded yet".
         let channels = frame_channel_count(&bytes, &header)
             .map_err(|e| CoreError::unsupported(format!("oxideav-dts: {e}")))?;
         let stream = match self.stream.take() {
