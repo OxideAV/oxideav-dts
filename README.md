@@ -1,5 +1,7 @@
 # oxideav-dts
 
+[![CI](https://github.com/OxideAV/oxideav-dts/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-dts/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-dts.svg)](https://crates.io/crates/oxideav-dts) [![docs.rs](https://docs.rs/oxideav-dts/badge.svg)](https://docs.rs/oxideav-dts) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A pure-Rust DTS (DTS Coherent Acoustics) decoder for the
 [oxideav](https://github.com/OxideAV/oxideav) framework, built clean-room
 from a locally-staged copy of ETSI TS 102 114 V1.3.1.
