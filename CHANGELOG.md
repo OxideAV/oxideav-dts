@@ -8,6 +8,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 398 (2026-07-08) — **14-bit container frames decode to PCM
+  through the registry `Decoder`**: `DtsDecoderHandle::send_packet` now
+  unpacks a §5.3.1 14-bit-packed Core frame (both container byte orders)
+  to the raw-16-bit-word domain via `unpack_14bit_to_16bit`, parses the
+  header from the unpacked bytes, and routes it through the identical
+  §5.3/§5.4/§5.5 + §C.2.5 reconstruction as the raw-16-bit forms — where
+  previously a 14-bit packet surfaced `CoreError::Unsupported` at
+  `receive_frame`. The container transform is lossless, so the emitted
+  planar S32 PCM is **bit-exact** to a raw-16-bit decode of the same
+  logical stream; a new registry test packs each bundled fixture frame
+  to 14-bit (both byte orders) and asserts byte-for-byte S32 equality
+  against the raw decode. Only the §D.10.1/§D.10.2 VQ code books (not
+  printed in the staged ETSI spec) remain a documented decode blocker.
+
 - Round 370 (2026-06-25) — **§C.2.6 `InterpolationFIR()` driver body**:
   the DTS Core low-frequency-effects (LFE) polyphase upsampling
   convolution loop, transcribed from the now-staged

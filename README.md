@@ -10,9 +10,14 @@ from a locally-staged copy of ETSI TS 102 114 V1.3.1.
 
 This crate is an **in-progress Core-profile decoder**. The frame
 container, structural parsing, and the full DSP reconstruction chain are
-in place: the registry `Decoder` now **decodes raw 16-bit DTS Core
-frames to PCM end to end** for the common Core case (§5.3 → §5.4 → §5.5 →
-§C.2.5), emitting a planar S32 `AudioFrame`, and **carries the §C.2.5
+in place: the registry `Decoder` now **decodes raw 16-bit *and* 14-bit
+container DTS Core frames to PCM end to end** for the common Core case
+(§5.3 → §5.4 → §5.5 → §C.2.5), emitting a planar S32 `AudioFrame`. A
+14-bit-packed frame (either container byte order) is unpacked to the
+raw-16-bit-word domain in `send_packet` and decodes through the identical
+chain, producing **bit-exact** PCM to the equivalent raw-16-bit frame
+(asserted byte-for-byte in the registry test suite). The decoder also
+**carries the §C.2.5
 per-channel QMF filter tail across frames** (`CoreStreamDecoder`) so a
 multi-frame elementary stream reconstructs without a per-frame
 filter-warmup transient. This full-chain output is **validated against a

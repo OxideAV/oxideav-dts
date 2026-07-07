@@ -16,6 +16,7 @@ use oxideav_core::{
 };
 
 use crate::header::{detect_sync, parse_frame_header, parse_frame_header_14bit};
+use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
 use crate::{DtsFrameHeader, Error as DtsError, SyncWordEncoding};
 
 /// Canonical codec id string for the DTS Coherent Acoustics codec.
@@ -132,9 +133,12 @@ oxideav_core::register!("dts", register);
 /// packet boundary) and caches the raw-16-bit frame bytes, and whose
 /// [`Decoder::receive_frame`] runs the §5.3/§5.4/§5.5 + §C.2.5
 /// [`crate::decode_core_frame`] reconstruction to emit a planar S32
-/// [`AudioFrame`] for the common Core case. Frames with a Table 5-28
-/// side-info tail (`DYNF`/`CPF`/`JOINX`), a §D.10 VQ/ADPCM blocker, or a
-/// 14-bit container payload surface [`CoreError::Unsupported`].
+/// [`AudioFrame`] for the common Core case. **14-bit container frames**
+/// (both byte orders) are unpacked to the raw-16-bit-word domain in
+/// [`Decoder::send_packet`] and decode through the identical chain.
+/// Only a §D.10 VQ/ADPCM blocker still surfaces [`CoreError::Unsupported`]
+/// (the two large Annex D VQ code books are not printed in the staged
+/// ETSI spec).
 pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
     Ok(Box::new(DtsDecoderHandle {
         codec_id: params.codec_id.clone(),
@@ -206,11 +210,27 @@ impl Decoder for DtsDecoderHandle {
                 hdr
             }
             SyncWordEncoding::FourteenBitBigEndian | SyncWordEncoding::FourteenBitLittleEndian => {
-                // 14-bit container frames would need unpacking to the
-                // 16-bit-word domain before reconstruction; that path is
-                // not wired here yet, so cache only the header.
-                self.last_frame_bytes = None;
-                parse_frame_header_14bit(bytes).map_err(CoreError::from)?
+                // 14-bit container frames carry the same logical Core
+                // bitstream as the raw-16-bit forms, just packed 14 payload
+                // bits per 16-bit container word (§5.3.1 / wiki container
+                // rule). Unpack to the raw-16-bit-word domain that
+                // `decode_core_frame` operates on, then decode through the
+                // identical §5.3/§5.4/§5.5 + §C.2.5 chain. The unpacked
+                // buffer is bit-identical to the equivalent raw-16-bit
+                // frame (validated bit-exact on the bundled fixture for
+                // both container byte orders), so the reconstruction is the
+                // same up to the container transform.
+                let order = FourteenBitByteOrder::from_sync(sync).ok_or_else(|| {
+                    CoreError::unsupported(
+                        "oxideav-dts: 14-bit sync did not map to a container byte order",
+                    )
+                })?;
+                let unpacked = unpack_14bit_to_16bit(bytes, order).map_err(CoreError::from)?;
+                // Parse the header from the unpacked (now raw-16-bit) bytes
+                // so the cached header matches the cached payload domain.
+                let hdr = parse_frame_header(&unpacked).map_err(CoreError::from)?;
+                self.last_frame_bytes = Some(unpacked);
+                hdr
             }
         };
         self.last_header = Some(hdr);
@@ -227,13 +247,14 @@ impl Decoder for DtsDecoderHandle {
             };
         };
 
-        // 14-bit container frames are not reconstructed here (the bytes
-        // would need unpacking to the 16-bit-word domain first); surface
-        // the same Unsupported gap as before for those.
+        // `send_packet` caches the raw-16-bit payload for both the raw and
+        // the (unpacked) 14-bit container forms, so a header without cached
+        // bytes means `receive_frame` was called without a prior successful
+        // `send_packet` — surface it rather than reconstructing stale bytes.
         let Some(bytes) = self.last_frame_bytes.take() else {
             return Err(CoreError::unsupported(
-                "oxideav-dts: 14-bit container frame reconstruction is not \
-                 wired; only raw 16-bit Core frames decode to PCM",
+                "oxideav-dts: no cached frame payload; call send_packet before \
+                 receive_frame",
             ));
         };
 
@@ -727,5 +748,79 @@ mod tests {
             "streamed frame 1 must carry frame 0's §C.2.5 filter tail, \
              differing from an isolated decode of frame 1"
         );
+    }
+
+    /// A 14-bit-container Core frame decodes through the registry
+    /// `Decoder` to the **bit-exact** same PCM as its raw-16-bit form.
+    /// Each raw fixture frame is packed to a 14-bit container (both byte
+    /// orders), fed as a packet, and the emitted S32 planes are compared
+    /// byte-for-byte against a raw-16-bit decode of the same stream. This
+    /// exercises the round-398 §5.3.1 14-bit unpack path wired into
+    /// `send_packet` (the container transform is lossless, so the
+    /// reconstruction is identical up to the packing).
+    #[test]
+    fn registry_decodes_14bit_container_matching_raw() {
+        use crate::unpack14::pack_16bit_to_14bit;
+
+        let raw_frames: Vec<&[u8]> = (0..5)
+            .map(|i| &FIXTURE_5_FRAMES[i * 1024..(i + 1) * 1024])
+            .collect();
+        let tb = TimeBase::new(1, 48_000);
+
+        // Raw-16-bit baseline PCM (concatenated S32 planes per channel).
+        let mut raw_handle = DtsDecoderHandle {
+            codec_id: CodecId::new(CODEC_ID_STR),
+            last_header: None,
+            last_frame_bytes: None,
+            last_pts: 0,
+            stream: None,
+            eof: false,
+        };
+        let mut raw_pcm: Vec<Vec<u8>> = vec![Vec::new(), Vec::new()];
+        for (i, f) in raw_frames.iter().enumerate() {
+            raw_handle
+                .send_packet(&Packet::new(i as u32, tb, f.to_vec()))
+                .unwrap();
+            let a = match raw_handle.receive_frame().unwrap() {
+                Frame::Audio(a) => a,
+                other => panic!("expected audio, got {other:?}"),
+            };
+            for (ch, plane) in raw_pcm.iter_mut().enumerate() {
+                plane.extend_from_slice(&a.data[ch]);
+            }
+        }
+
+        for order in [
+            FourteenBitByteOrder::BigEndian,
+            FourteenBitByteOrder::LittleEndian,
+        ] {
+            let mut handle = DtsDecoderHandle {
+                codec_id: CodecId::new(CODEC_ID_STR),
+                last_header: None,
+                last_frame_bytes: None,
+                last_pts: 0,
+                stream: None,
+                eof: false,
+            };
+            let mut pcm: Vec<Vec<u8>> = vec![Vec::new(), Vec::new()];
+            for (i, f) in raw_frames.iter().enumerate() {
+                let (packed, _bits) = pack_16bit_to_14bit(f, order);
+                handle
+                    .send_packet(&Packet::new(i as u32, tb, packed))
+                    .unwrap();
+                let a = match handle.receive_frame().unwrap() {
+                    Frame::Audio(a) => a,
+                    other => panic!("expected audio, got {other:?}"),
+                };
+                for (ch, plane) in pcm.iter_mut().enumerate() {
+                    plane.extend_from_slice(&a.data[ch]);
+                }
+            }
+            assert_eq!(
+                pcm, raw_pcm,
+                "{order:?} 14-bit container decode must be bit-exact vs the \
+                 raw-16-bit decode"
+            );
+        }
     }
 }
