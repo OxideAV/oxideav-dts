@@ -44,8 +44,15 @@ per-channel 3-bit `QSCALES` selector then one biased quantization index
 per imported sub-band, resolved through the §D.3 joint-scale table
 `JScaleTbl`), and the §C.2.3 sub-band copy imports the source channel's
 sub-band samples — scaled by the matching `JOIN_SCALES` factor — before
-QMF synthesis. Only the §D.10 VQ / ADPCM code books (high-frequency VQ
-sub-bands and ADPCM prediction coefficients) still surface
+QMF synthesis. **Sum/difference frames** are also handled: the §C.2.4
+front L/R matrix (`L' = L+R`, `R' = L−R`) is applied on the reconstructed
+sub-band samples when the `FRONT_SUM` (`SUMF`) flag is set — or
+unconditionally for `AMODE == 3` — and the surround L/R matrix when
+`SURROUND_SUM` (`SUMS`) is set, using the Table 5-4 channel ordering to
+locate each pair (`AmodeArrangement::front_lr_channels` /
+`surround_lr_channels`), between §C.2.3 and §C.2.5. Only the §D.10 VQ /
+ADPCM code books (high-frequency VQ sub-bands and ADPCM prediction
+coefficients) still surface
 `CoreError::Unsupported`; those two tables are **not printed in the
 staged ETSI spec** ("Due to its extensive size, this table is not
 included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.

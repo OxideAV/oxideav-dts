@@ -8,6 +8,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 398 (2026-07-08) — **§C.2.4 sum/difference decoding wired into
+  the reconstruction chain**: the front L/R sum/difference matrix
+  (`FrontLeft = L + R`, `FrontRight = L − R`) is now applied on the
+  reconstructed sub-band samples — for every active sub-band and
+  sub-subframe sample — when the frame header's `FRONT_SUM` (`SUMF`) flag
+  is set, or unconditionally for `AMODE == 3` (Sum/Difference) per the
+  spec's "This decoding is also required when AMODE = 3." The surround
+  L/R pair is matrixed the same way when `SURROUND_SUM` (`SUMS`) is set.
+  This runs after §C.2.3 joint-subband and before §C.2.5 QMF synthesis,
+  matching the Annex C processing order (PDF p.184).
+  - New `AmodeArrangement::front_lr_channels` / `surround_lr_channels`
+    resolve the bitstream-order channel indices of the front and
+    surround L/R pairs from the Table 5-4 channel ordering (e.g. Stereo →
+    front (0, 1); C+L+R+SL+SR → front (1, 2), surround (3, 4)); returns
+    `None` for arrangements with no unambiguous L/R pair, which are left
+    unchanged.
+  - Validated end-to-end: forcing `SUMF` on a real fixture frame (whose
+    two channels are identical at the sub-band level) decodes the
+    difference channel to **exact silence** and the sum channel to twice
+    the un-summed decode (within the ±1 integer-output truncation),
+    proving the matrix routes through the full chain. The default fixture
+    decode (AMODE 2, sum flags clear) is unchanged.
+
 - Round 398 (2026-07-08) — **14-bit container frames decode to PCM
   through the registry `Decoder`**: `DtsDecoderHandle::send_packet` now
   unpacks a §5.3.1 14-bit-packed Core frame (both container byte orders)

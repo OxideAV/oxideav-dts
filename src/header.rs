@@ -427,6 +427,84 @@ impl AmodeArrangement {
             AmodeArrangement::UserDefined(_) => None,
         }
     }
+
+    /// Bitstream-order channel indices of the **front left / right** pair
+    /// carrying the §C.2.4 `(L+R, L-R)` sum/difference encoding when the
+    /// `SUMF` flag is set (or unconditionally for
+    /// [`Self::SumDifference`]). Derived from the Table 5-4 channel
+    /// ordering documented on each variant: the first tuple element is
+    /// the channel that decodes to front-left (`L' = L + R`), the second
+    /// decodes to front-right (`R' = L - R`).
+    ///
+    /// Returns `None` for arrangements with no distinct front L/R pair
+    /// ([`Self::Mono`], [`Self::DualMono`]) or whose channel layout is
+    /// not enumerated by the spec ([`Self::UserDefined`]). The
+    /// [`AmodeArrangement::ClRLrRrOv`] / [`AmodeArrangement::CfCrLfRfLrRr`]
+    /// six-channel arrangements are also `None` — their front-pair
+    /// labelling is not an unambiguous `L`/`R` in the Table 5-4 ordering.
+    #[must_use]
+    pub fn front_lr_channels(self) -> Option<(usize, usize)> {
+        match self {
+            // L, R lead the arrangement.
+            AmodeArrangement::Stereo
+            | AmodeArrangement::SumDifference
+            | AmodeArrangement::LtRt
+            | AmodeArrangement::LrS
+            | AmodeArrangement::LrSlSr => Some((0, 1)),
+            // A leading centre channel offsets L, R by one.
+            AmodeArrangement::ClR | AmodeArrangement::ClRS | AmodeArrangement::ClRSlSr => {
+                Some((1, 2))
+            }
+            // CL + CR lead, then L, R.
+            AmodeArrangement::ClCrLRSlSr => Some((2, 3)),
+            // CL + C + CR lead, then L, R.
+            AmodeArrangement::ClCCrLRSlSr | AmodeArrangement::ClCCrLRSlSSr => Some((3, 4)),
+            // CL + CR lead, then L, R (8-channel SL1/SL2/SR1/SR2 form).
+            AmodeArrangement::ClCrLRSl1Sl2Sr1Sr2 => Some((2, 3)),
+            AmodeArrangement::Mono
+            | AmodeArrangement::DualMono
+            | AmodeArrangement::ClRLrRrOv
+            | AmodeArrangement::CfCrLfRfLrRr
+            | AmodeArrangement::UserDefined(_) => None,
+        }
+    }
+
+    /// Bitstream-order channel indices of the **left / right surround**
+    /// pair carrying the §C.2.4 `(L+R, L-R)` sum/difference encoding when
+    /// the `SUMS` flag is set. First element decodes to surround-left,
+    /// second to surround-right.
+    ///
+    /// Returns `None` for arrangements without a distinct surround L/R
+    /// pair (mono/stereo, single-surround arrangements such as
+    /// [`Self::LrS`] / [`Self::ClRS`], and [`Self::UserDefined`]).
+    #[must_use]
+    pub fn surround_lr_channels(self) -> Option<(usize, usize)> {
+        match self {
+            // L + R + SL + SR.
+            AmodeArrangement::LrSlSr => Some((2, 3)),
+            // C + L + R + SL + SR.
+            AmodeArrangement::ClRSlSr => Some((3, 4)),
+            // CL + CR + L + R + SL + SR.
+            AmodeArrangement::ClCrLRSlSr => Some((4, 5)),
+            // CL + C + CR + L + R + SL + SR.
+            AmodeArrangement::ClCCrLRSlSr => Some((5, 6)),
+            AmodeArrangement::Mono
+            | AmodeArrangement::DualMono
+            | AmodeArrangement::Stereo
+            | AmodeArrangement::SumDifference
+            | AmodeArrangement::LtRt
+            | AmodeArrangement::ClR
+            | AmodeArrangement::LrS
+            | AmodeArrangement::ClRS
+            | AmodeArrangement::ClRLrRrOv
+            | AmodeArrangement::CfCrLfRfLrRr
+            // The 8-channel SL1/SL2/SR1/SR2 and C-plus-single-S forms have
+            // no single unambiguous surround L/R pair in Table 5-4.
+            | AmodeArrangement::ClCrLRSl1Sl2Sr1Sr2
+            | AmodeArrangement::ClCCrLRSlSSr
+            | AmodeArrangement::UserDefined(_) => None,
+        }
+    }
 }
 
 /// Resolve a raw 6-bit `AMODE` index to its [`AmodeArrangement`] per
@@ -4169,6 +4247,56 @@ mod tests {
                 AmodeArrangement::UserDefined(code),
                 "user-defined code {code} must round-trip"
             );
+        }
+    }
+
+    #[test]
+    fn front_lr_channels_follow_table_5_4_ordering() {
+        use AmodeArrangement::*;
+        // L, R lead the arrangement → (0, 1).
+        for a in [Stereo, SumDifference, LtRt, LrS, LrSlSr] {
+            assert_eq!(a.front_lr_channels(), Some((0, 1)), "{a:?}");
+        }
+        // A leading centre offsets L, R by one → (1, 2).
+        for a in [ClR, ClRS, ClRSlSr] {
+            assert_eq!(a.front_lr_channels(), Some((1, 2)), "{a:?}");
+        }
+        // CL + CR lead → L, R at (2, 3).
+        assert_eq!(ClCrLRSlSr.front_lr_channels(), Some((2, 3)));
+        assert_eq!(ClCrLRSl1Sl2Sr1Sr2.front_lr_channels(), Some((2, 3)));
+        // CL + C + CR lead → L, R at (3, 4).
+        assert_eq!(ClCCrLRSlSr.front_lr_channels(), Some((3, 4)));
+        assert_eq!(ClCCrLRSlSSr.front_lr_channels(), Some((3, 4)));
+        // No distinct front L/R pair.
+        for a in [Mono, DualMono, ClRLrRrOv, CfCrLfRfLrRr, UserDefined(20)] {
+            assert_eq!(a.front_lr_channels(), None, "{a:?}");
+        }
+    }
+
+    #[test]
+    fn surround_lr_channels_follow_table_5_4_ordering() {
+        use AmodeArrangement::*;
+        assert_eq!(LrSlSr.surround_lr_channels(), Some((2, 3)));
+        assert_eq!(ClRSlSr.surround_lr_channels(), Some((3, 4)));
+        assert_eq!(ClCrLRSlSr.surround_lr_channels(), Some((4, 5)));
+        assert_eq!(ClCCrLRSlSr.surround_lr_channels(), Some((5, 6)));
+        // Arrangements with no distinct surround L/R pair.
+        for a in [
+            Mono,
+            DualMono,
+            Stereo,
+            SumDifference,
+            LtRt,
+            ClR,
+            LrS,
+            ClRS,
+            ClRLrRrOv,
+            CfCrLfRfLrRr,
+            ClCrLRSl1Sl2Sr1Sr2,
+            ClCCrLRSlSSr,
+            UserDefined(33),
+        ] {
+            assert_eq!(a.surround_lr_channels(), None, "{a:?}");
         }
     }
 

@@ -73,7 +73,7 @@ use crate::audio_array::{
 use crate::audio_header::AudioCodingHeader;
 use crate::cos_mod::NUM_SUBBAND;
 use crate::filter_bank::FilterBankSelection;
-use crate::header::DtsFrameHeader;
+use crate::header::{AmodeArrangement, DtsFrameHeader};
 use crate::qmf_multichannel::{MultiChannelQmf, MultiChannelQmfError};
 use crate::step_size::StepSizeTable;
 use crate::subframe::{ChannelSideInfo, SideInfoTail};
@@ -403,6 +403,28 @@ impl SubframePcmDecoder {
         let mut matrices = matrices;
         if !join_scales.is_empty() {
             apply_joint_subband(&mut matrices, coding, &n_subs, join_scales)?;
+        }
+
+        // (1c) §C.2.4 sum/difference decoding. When the front-sum flag
+        // (`SUMF`) is set — or unconditionally for AMODE == 3, per the
+        // spec's "This decoding is also required when AMODE = 3" — the
+        // front L/R channels are stored as (L+R, L-R) and must be matrixed
+        // back on the reconstructed sub-band samples (all active subbands,
+        // all sub-subframe samples) before QMF synthesis. `SUMS` does the
+        // same for the surround L/R pair. This runs after §C.2.3 joint
+        // subband and before §C.2.5, matching the Annex C ordering.
+        let arrangement = header.amode_arrangement();
+        let apply_front =
+            header.front_sum || matches!(arrangement, AmodeArrangement::SumDifference);
+        if apply_front {
+            if let Some((l, r)) = arrangement.front_lr_channels() {
+                apply_sum_difference(&mut matrices, l, r, &n_subs)?;
+            }
+        }
+        if header.surround_sum {
+            if let Some((l, r)) = arrangement.surround_lr_channels() {
+                apply_sum_difference(&mut matrices, l, r, &n_subs)?;
+            }
         }
 
         // (2) §C.2.5 per-channel 32-band synthesis -> planar PCM.
@@ -906,6 +928,66 @@ fn apply_joint_subband(
                 let n = n_subs_dst + k;
                 dst_row[n] = factor * src_row[n];
             }
+        }
+    }
+    Ok(())
+}
+
+/// Apply the §C.2.4 sum/difference matrix to one channel pair's
+/// reconstructed sub-band samples, in place, before QMF synthesis.
+///
+/// For each active sub-band (`n ∈ [0, nSUBS)`) and each sub-subframe
+/// sample row, the pair `(l, r)` — with `l` the front/surround **left**
+/// channel and `r` the **right** — is matrixed as
+/// `(L', R') = (L + R, L - R)`, reading the pre-update value of the left
+/// sample for both outputs (the §C.2.4 pseudocode's read-old/write-new
+/// ordering). The active sub-band bound is the smaller of the two
+/// channels' `nSUBS` (they are equal in a well-formed stream) clamped to
+/// the 32-band matrix width.
+///
+/// Structural inconsistencies (channel index out of range, `l == r`, or
+/// the two channels' matrices carrying a different sample-row count)
+/// surface as [`SubframePcmError::JointSubbandShape`] — the same
+/// caller-side sub-band-matrix shape-violation variant the §C.2.3 copy
+/// uses.
+fn apply_sum_difference(
+    matrices: &mut [SubbandSampleMatrix],
+    l: usize,
+    r: usize,
+    n_subs: &[usize],
+) -> Result<(), SubframePcmError> {
+    let channels = matrices.len();
+    if l >= channels || r >= channels || l == r {
+        return Err(SubframePcmError::JointSubbandShape { ch: l.min(r) });
+    }
+    let n_active = n_subs
+        .get(l)
+        .copied()
+        .unwrap_or(0)
+        .min(n_subs.get(r).copied().unwrap_or(0))
+        .min(NUM_SUBBAND);
+    if n_active == 0 {
+        return Ok(());
+    }
+    if matrices[l].len() != matrices[r].len() {
+        return Err(SubframePcmError::JointSubbandShape { ch: l.min(r) });
+    }
+    // Split the backing Vec so the two distinct channel matrices can be
+    // borrowed mutably at once (mirrors the §C.2.3 copy's split pattern).
+    let (lo, hi) = if l < r { (l, r) } else { (r, l) };
+    let (lower, upper) = matrices.split_at_mut(hi);
+    // `left_m` is the front/surround-left channel `l`, `right_m` is `r`.
+    let (left_m, right_m): (&mut SubbandSampleMatrix, &mut SubbandSampleMatrix) = if l == lo {
+        (&mut lower[l], &mut upper[0])
+    } else {
+        (&mut upper[0], &mut lower[r])
+    };
+    for (left_row, right_row) in left_m.iter_mut().zip(right_m.iter_mut()) {
+        for n in 0..n_active {
+            let lv = left_row[n];
+            let rv = right_row[n];
+            left_row[n] = lv + rv;
+            right_row[n] = lv - rv;
         }
     }
     Ok(())
@@ -1687,5 +1769,92 @@ mod tests {
                 got: 1
             })
         ));
+    }
+
+    /// A pure unit test of the §C.2.4 matrix: feeding a two-channel pair
+    /// whose sub-band samples are `(L+R, L-R)` back through
+    /// `apply_sum_difference` recovers `(2L, 2R)` — the matrix is
+    /// self-inverse up to the factor of two the encoder's scale factors
+    /// absorb. Only the active sub-band columns are touched.
+    #[test]
+    fn apply_sum_difference_recovers_double_original() {
+        // Two "original" channels, 3 sample rows, 2 active sub-bands.
+        let l = [[1.0_f64, 2.0], [3.0, 4.0], [5.0, 6.0]];
+        let r = [[10.0_f64, 20.0], [30.0, 40.0], [50.0, 60.0]];
+        let mut matrices: Vec<SubbandSampleMatrix> = vec![vec![[0.0; NUM_SUBBAND]; 3]; 2];
+        for row in 0..3 {
+            for n in 0..2 {
+                // Encoder side: store (L+R) in ch0, (L-R) in ch1.
+                matrices[0][row][n] = l[row][n] + r[row][n];
+                matrices[1][row][n] = l[row][n] - r[row][n];
+            }
+            // A high (inactive) sub-band that must be left untouched.
+            matrices[0][row][20] = 7.0;
+            matrices[1][row][20] = 9.0;
+        }
+        apply_sum_difference(&mut matrices, 0, 1, &[2, 2]).unwrap();
+        for row in 0..3 {
+            for n in 0..2 {
+                assert_eq!(
+                    matrices[0][row][n],
+                    2.0 * l[row][n],
+                    "ch0 row {row} sub {n}"
+                );
+                assert_eq!(
+                    matrices[1][row][n],
+                    2.0 * r[row][n],
+                    "ch1 row {row} sub {n}"
+                );
+            }
+            // Inactive sub-band 20 (>= nSUBS) untouched.
+            assert_eq!(matrices[0][row][20], 7.0);
+            assert_eq!(matrices[1][row][20], 9.0);
+        }
+    }
+
+    /// End-to-end: forcing the `SUMF` flag on a real fixture frame routes
+    /// the §C.2.4 front sum/difference decode through the full
+    /// reconstruction chain. The bundled fixture's two channels are
+    /// identical at the sub-band level (`L == R`), so the matrix produces
+    /// `(L+R, L-R) = (2L, 0)`: the difference channel decodes to **exact
+    /// silence**, and — since the §C.2.5 QMF is linear over cleared
+    /// per-frame history — the sum channel is twice the un-summed decode
+    /// (within the ±1 truncation of the integer output cast).
+    #[test]
+    fn sumf_forced_zeros_difference_channel_on_real_fixture() {
+        const FIXTURE: &[u8] = include_bytes!("../tests/fixtures/dts_5_frames.bin");
+        let frame = &FIXTURE[0..1024];
+        let header = crate::parse_frame_header(frame).unwrap();
+        // The fixture is AMODE 2 (Stereo) with the sum flags clear.
+        assert_eq!(header.amode_arrangement(), AmodeArrangement::Stereo);
+        assert!(!header.front_sum && !header.surround_sum);
+
+        // Baseline decode (fresh, cleared history).
+        let base = decode_core_frame(frame, &header).unwrap();
+        assert_eq!(base.len(), 2);
+        assert_eq!(base[0], base[1], "fixture channels are identical");
+        assert!(base[0].iter().any(|&s| s != 0), "baseline is non-silent");
+
+        // Force SUMF and decode the same bytes.
+        let mut sumf_header = header;
+        sumf_header.front_sum = true;
+        let sumf = decode_core_frame(frame, &sumf_header).unwrap();
+
+        // Difference channel (ch1 = L - R = 0) is exactly silent.
+        assert!(
+            sumf[1].iter().all(|&s| s == 0),
+            "SUMF difference channel must decode to exact silence when L == R"
+        );
+        // Sum channel (ch0 = L + R = 2L) ~= twice the baseline, within the
+        // integer output cast's ±1 truncation slack.
+        for (i, (&s, &b)) in sumf[0].iter().zip(&base[0]).enumerate() {
+            let diff = (i64::from(s) - 2 * i64::from(b)).abs();
+            assert!(
+                diff <= 1,
+                "sum channel sample {i}: got {s}, expected ~{} (2x baseline)",
+                2 * b
+            );
+        }
+        assert!(sumf[0].iter().any(|&s| s != 0), "sum channel is non-silent");
     }
 }
