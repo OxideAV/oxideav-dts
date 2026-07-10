@@ -26,6 +26,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `Error::DownmixCodeOutOfRange` covers the pseudocode's
   `nTmp > nTblSize` failure arm.
 
+- Round 406 (2026-07-10) — **§5.7.1 Auxiliary Data chunk parser**
+  (`src/aux_data.rs`): `find_aux_data` implements the spec's suggested
+  navigation (backward search for the DWORD-aligned `nSYNCAUX`
+  `0x9A1105A0` from the end of the audio frame), and
+  `parse_aux_data` / `parse_aux_data_at` walk the Table 5-31 chunk:
+  the optional 36-bit `nAUXTimeStamp` decode time stamp (with the
+  nibble realignment and both `0b1011` marker validations), the
+  dynamic (embedded) downmix coefficient table — `DownmixType`
+  (Table 5-32 channel groups), `DeriveNumDwnMixCodeCoeffs()`
+  (`anNumCh[AMODE]` + LFE times the group's resultant channel count),
+  and the 9-bit `panDwnMixCodeCoeffs[]` words resolved through the
+  §D.11 `DmixTable` (`DynamicDownmix::coefficient_matrix`) — then the
+  byte-align and the raw 16-bit `nAUXCRC16` (surfaced, not verified:
+  the CRC-16 polynomial is undocumented in the staged spec, the same
+  docs-gap as `HEADER_CRC`). New typed errors: `AuxSyncMismatch`,
+  `AuxTimeStampMarkerMismatch`, `AuxChannelCountUnresolved`.
+
 - Round 398 (2026-07-08) — **§C.2.4 sum/difference decoding wired into
   the reconstruction chain**: the front L/R sum/difference matrix
   (`FrontLeft = L + R`, `FrontRight = L − R`) is now applied on the

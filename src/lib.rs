@@ -441,6 +441,7 @@ mod audio_array;
 mod audio_data;
 mod audio_header;
 mod audio_huff;
+mod aux_data;
 mod bitreader;
 mod block_code;
 mod cos_mod;
@@ -481,6 +482,10 @@ pub use crate::audio_data::{
 };
 pub use crate::audio_header::{decode_audio_coding_header_at, AudioCodingHeader, SEL_PLANE_LEN};
 pub use crate::audio_huff::{decode_audio_huff_at, AudioHuffCodebook};
+pub use crate::aux_data::{
+    find_aux_data, parse_aux_data, parse_aux_data_at, AuxData, DownmixType, DynamicDownmix,
+    AUX_SYNC_WORD, AUX_TIME_STAMP_MARKER,
+};
 pub use crate::block_code::{block_code_max_code, block_code_offset, decode_block_code};
 pub use crate::cos_mod::{
     cos_mod_stage, precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START,
@@ -743,6 +748,29 @@ pub enum Error {
         /// The slice length the caller actually supplied.
         found: usize,
     },
+    /// The bytes at the offset handed to
+    /// [`crate::parse_aux_data_at`] were not the §5.7.1 DWORD-aligned
+    /// auxiliary-data sync word `0x9A1105A0` (`nSYNCAUX`).
+    AuxSyncMismatch {
+        /// The 32-bit word actually read at the offset.
+        found: u32,
+    },
+    /// One of the two 4-bit markers bracketing the §5.7.1 Table 5-31
+    /// 36-bit `nAUXTimeStamp` halves was not the documented `0b1011`
+    /// (`nMaker==1011`), indicating a false-positive sync match or a
+    /// corrupt auxiliary-data chunk.
+    AuxTimeStampMarkerMismatch {
+        /// The 4-bit value actually read.
+        found: u8,
+    },
+    /// The §5.7.1 `DeriveNumDwnMixCodeCoeffs()` input-channel count
+    /// (`nPriCh = anNumCh[AMODE]`) could not be resolved because the
+    /// frame's `AMODE` is a user-defined code (`16..=63`) whose
+    /// channel count Table 5-4 does not define.
+    AuxChannelCountUnresolved {
+        /// The unresolvable 6-bit `AMODE` code.
+        amode: u8,
+    },
     /// A §5.7.1 Table 5-31 dynamic-downmix coefficient code word
     /// passed to [`crate::decode_dmix_code`] was wider than the
     /// documented 9-bit field, or its one-biased low byte resolved
@@ -862,6 +890,22 @@ impl core::fmt::Display for Error {
                 f,
                 "oxideav-dts: §5.5 subsubframe dequantization expects {expected} \
                  samples per subband analysis subwindow, got {found}"
+            ),
+            Error::AuxSyncMismatch { found } => write!(
+                f,
+                "oxideav-dts: §5.7.1 auxiliary-data parse expected the \
+                 DWORD-aligned sync word 0x9a1105a0, read 0x{found:08x}"
+            ),
+            Error::AuxTimeStampMarkerMismatch { found } => write!(
+                f,
+                "oxideav-dts: §5.7.1 auxiliary time-stamp marker mismatch: \
+                 read 0b{found:04b}, expected 0b1011"
+            ),
+            Error::AuxChannelCountUnresolved { amode } => write!(
+                f,
+                "oxideav-dts: §5.7.1 dynamic-downmix coefficient count cannot \
+                 be derived: AMODE {amode} is a user-defined channel \
+                 arrangement with no Table 5-4 channel count"
             ),
             Error::DownmixCodeOutOfRange { code } => write!(
                 f,

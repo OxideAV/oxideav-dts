@@ -85,6 +85,14 @@ impl From<DtsError> for CoreError {
             DtsError::InvalidStepSize { .. } | DtsError::SampleCountMismatch { .. } => {
                 CoreError::InvalidData(e.to_string())
             }
+            // Round 406 §5.7.1 auxiliary-data chunk errors: a sync
+            // mismatch at a caller-supplied offset, a time-stamp
+            // marker other than 0b1011, or an AMODE whose Table 5-4
+            // channel count is undefined all indicate a corrupt or
+            // false-positive auxiliary chunk -> `InvalidData`.
+            DtsError::AuxSyncMismatch { .. }
+            | DtsError::AuxTimeStampMarkerMismatch { .. }
+            | DtsError::AuxChannelCountUnresolved { .. } => CoreError::InvalidData(e.to_string()),
             // Round 406 §5.7.1 dynamic-downmix coefficient code out of
             // domain: a 9-bit `panDwnMixCodeCoeffs[n]` word whose
             // one-biased low byte walks past the §D.11 `DmixTable`
