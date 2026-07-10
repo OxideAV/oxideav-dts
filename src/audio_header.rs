@@ -41,9 +41,11 @@
 //! # Scope
 //!
 //! The `AHCRC` Header CRC tail (transmitted only when `CPF == 1`) is
-//! skipped: the CRC polynomial is not documented in `docs/`, and the
+//! skipped: the algorithm is the Annex B CRC-CCITT
+//! ([`crate::dts_crc16`], `docs/audio/dts/dts-crc16.md`), but the
 //! spec text states "the CRC value test shall not be applied" for the
-//! sibling `SICRC`. The 16-bit field is consumed (so the cursor lands
+//! core check words (`HCRC` / `AHCRC` / `SICRC` / `OCRC`) — they are
+//! informational placeholders. The 16-bit field is consumed (so the cursor lands
 //! at the first §5.4 subframe bit) but not verified. `CPF` is the
 //! §5.3.1 frame-header "Predictor History Flag Switch" companion — it
 //! is passed in by the caller (the round-202 header carries it as

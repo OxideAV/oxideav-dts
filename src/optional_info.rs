@@ -37,9 +37,10 @@
 //!   of the `AUXCT` cursor. This walker follows the pseudocode
 //!   literally (byte alignment) and surfaces the raw `AUXD` bytes;
 //!   use the §5.7.1 parser for their content.
-//! - `OCRC`: "The CRC value test shall not be applied" (and the
-//!   polynomial is not printed anyway — the `HEADER_CRC` docs-gap),
-//!   so the word is surfaced raw.
+//! - `OCRC`: "The CRC value test shall not be applied" — the Annex B
+//!   algorithm is documented ([`crate::dts_crc16`],
+//!   `docs/audio/dts/dts-crc16.md`) but the core check words are
+//!   normatively untested placeholders, so the word is surfaced raw.
 
 use crate::bitreader::BitReader;
 use crate::header::DtsFrameHeader;

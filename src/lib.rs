@@ -21,10 +21,12 @@
 //! dynamic-range, time-stamp, aux-data, HDCD, ext-audio-descr,
 //! ext-audio-coding, ASPF, 2-bit LFE mode, predictor-history) plus
 //! the optional 16-bit `HEADER_CRC` field that follows when
-//! [`DtsFrameHeader::crc_present`] is set. The CRC polynomial is
-//! not yet documented in `docs/`, so
-//! [`DtsFrameHeader::verify_header_crc`] returns `None` for now;
-//! the raw 16-bit field is still surfaced for pass-through callers.
+//! [`DtsFrameHeader::crc_present`] is set. (The Annex B CRC
+//! algorithm landed in round 408 as [`dts_crc16`]; the core `HCRC`
+//! stays unverified by design — §5.3.1 states "The CRC value test
+//! shall not be applied" — so
+//! [`DtsFrameHeader::verify_header_crc`] returns `None` and the raw
+//! 16-bit field is surfaced for pass-through callers.)
 //! Round 4 (2026-05-22) wires the crate into `oxideav-core`'s
 //! [`oxideav_core::Decoder`] surface (behind a default-on `registry`
 //! cargo feature) plus a standalone [`probe_dts`] helper. The
@@ -154,9 +156,10 @@
 //!
 //! No new docs gap is introduced. The byte-length values are read
 //! verbatim from `docs/audio/dts/wiki/DTS.wiki`'s sync table. The
-//! existing #928 / #1055 / #1084 docs gaps (SFREQ / RATE / AMODE
+//! then-open #928 / #1055 / #1084 docs gaps (SFREQ / RATE / AMODE
 //! tables, HEADER_CRC polynomial, PCMR / DIALNORM tables,
-//! 14-bit container-byte advance rule) remain open.
+//! 14-bit container-byte advance rule) have since been resolved
+//! (the CRC algorithm by `docs/audio/dts/dts-crc16.md`, round 408).
 //!
 //! Round 148 (2026-05-26) completes the encoder surface across all
 //! four documented sync encodings. The two new primitives,

@@ -22,6 +22,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `"123456789" → 0x29B1` check value, and a single-bit-flip
   detection sweep.
 
+- Round 408 (2026-07-10) — **CRC verification wired into the §5.7
+  chunk parsers**: `AuxData::crc_valid` recomputes the Annex B CRC-16
+  over the §5.6 documented coverage span ("from positions
+  bAUXTimeStampFlag to the byte prior to the start of the CRC
+  inclusive" — the whole-byte window from sync + 4 to the byte before
+  `nAUXCRC16`), and `Rev2AuxChunk::crc_valid` over the
+  `nRev2AUXDataByteSize − 2` bytes starting at the size field. Both
+  parsers stay lenient (the verdict is surfaced, the parse is not
+  rejected) since the spec also uses these CRCs to disambiguate
+  false DWORD-aligned sync aliases. The core `HCRC` / `AHCRC` /
+  `SICRC` / `OCRC` fields remain extracted-but-unverified **by spec
+  mandate** ("The CRC value test shall not be applied") —
+  `DtsFrameHeader::verify_header_crc`, the audio-coding-header
+  `AHCRC` skip, and the §5.6 `OCRC` docs now cite the normative
+  reason instead of a polynomial docs-gap.
+
 - Round 406 (2026-07-10) — **§D.11 downmix scale-factor tables +
   §5.7.1 coefficient-code resolver** (`src/dmix_coeff.rs`): the full
   Annex D §D.11 "Look-up Table for Downmix Scale Factors" is

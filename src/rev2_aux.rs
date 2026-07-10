@@ -50,9 +50,11 @@
 //! CRC sits at byte offset `nRev2AUXDataByteSize - 2` from the size
 //! field — the parser reads it there (the spec's own "jump forward"
 //! locator), which also skips the reserved field of "unspecified
-//! duration". The staged spec does not document the CRC-16
-//! polynomial (same docs-gap as `HEADER_CRC`), so the value is
-//! surfaced raw and not verified.
+//! duration". The check word uses the Annex B algorithm (CRC-CCITT,
+//! polynomial `0x1021`, init `0xFFFF` — [`crate::dts_crc16`],
+//! `docs/audio/dts/dts-crc16.md`) over the `nRev2AUXDataByteSize - 2`
+//! bytes starting at the size field; the parser recomputes it and
+//! reports the outcome in [`Rev2AuxChunk::crc_valid`].
 //!
 //! One DRC value is transmitted per subsubframe of the frame
 //! (Table 5-34: 512-sample frame → 2, 1024 → 4, 2048 → 8, i.e.
@@ -138,10 +140,17 @@ pub struct Rev2AuxChunk {
     /// takes priority over the legacy `DIALNORM` header field.
     pub dialnorm: Option<u8>,
     /// The raw 16-bit `nRev2AUXCRC16` word, read at byte offset
-    /// `data_byte_size - 2` from the size field. The staged spec does
-    /// not document the CRC-16 polynomial, so the value is surfaced
-    /// but not verified.
+    /// `data_byte_size - 2` from the size field (Annex B CRC-CCITT,
+    /// see [`crate::dts_crc16`]).
     pub crc16: u16,
+    /// Whether [`Self::crc16`] matches the Annex B CRC-16 recomputed
+    /// over the chunk's protected region — the
+    /// `nRev2AUXDataByteSize - 2` bytes starting at the size field
+    /// (i.e. everything after the sync word up to the byte before the
+    /// CRC). A `false` here means the chunk is corrupt or the
+    /// DWORD-aligned sync match was a false alias; the parse result
+    /// is surfaced either way so callers can decide.
+    pub crc_valid: bool,
 }
 
 impl Rev2AuxChunk {
@@ -309,6 +318,10 @@ pub fn parse_rev2_aux_at(
     // are skipped by reading the CRC at its size-located offset.
     let mut crc_reader = BitReader::from_byte_offset(frame, crc_byte_offset);
     let crc16 = crc_reader.read_bits(16)? as u16;
+    // The size counts the protected span + CRC: the Annex B CRC-16
+    // covers the `data_byte_size - 2` bytes starting at the size
+    // field (right after the 4 sync bytes) up to the CRC exclusive.
+    let crc_valid = crate::dts_crc16(&frame[byte_offset + 4..crc_byte_offset]) == crc16;
 
     Ok(Rev2AuxChunk {
         offset: byte_offset,
@@ -317,6 +330,7 @@ pub fn parse_rev2_aux_at(
         drc,
         dialnorm,
         crc16,
+        crc_valid,
     })
 }
 
@@ -366,6 +380,16 @@ mod tests {
         w.into_bytes()
     }
 
+    /// Overwrite a test chunk's size-located 16-bit `nRev2AUXCRC16`
+    /// with the correct Annex B value over the covered span (the
+    /// `size - 2` bytes starting at the size field, byte 4 of the
+    /// chunk).
+    fn patch_crc(chunk: &mut [u8], size: u8) {
+        let crc_start = 4 + usize::from(size) - 2;
+        let crc = crate::dts_crc16(&chunk[4..crc_start]);
+        chunk[crc_start..crc_start + 2].copy_from_slice(&crc.to_be_bytes());
+    }
+
     #[test]
     fn parses_minimal_chunk() {
         // size 3: size/ES-flag byte + 16-bit CRC, no broadcast flag.
@@ -379,6 +403,40 @@ mod tests {
         assert_eq!(chunk.drc, None);
         assert_eq!(chunk.dialnorm, None);
         assert_eq!(chunk.crc16, 0xABCD);
+        // 0xABCD is not the Annex B CRC of the covered byte.
+        assert!(!chunk.crc_valid);
+    }
+
+    #[test]
+    fn crc_valid_when_check_word_matches() {
+        // A broadcast-metadata chunk with the genuine Annex B check
+        // word over the size-located span verifies; corrupting any
+        // covered byte flips the verdict.
+        let header = synth_header(2, 0);
+        let mut bytes = chunk(
+            8,
+            |w| {
+                w.push_bits(0, 1); // no ES metadata
+                w.push_bits(1, 1); // broadcast
+                w.push_bits(1, 1); // DRC
+                w.push_bits(0, 1); // no dialnorm
+                w.push_bits(u64::from(REV2_DRC_VERSION_SINGLE_BAND), 4);
+                w.align(8);
+                w.push_bits(0, 8); // DRC code, subsubframe 0 (unity)
+                w.push_bits(80, 8); // DRC code, subsubframe 1
+            },
+            0,
+        );
+        patch_crc(&mut bytes, 8);
+        let frame = frame_with_chunk(&bytes);
+        let parsed = parse_rev2_aux(&frame, &header).unwrap().unwrap();
+        assert!(parsed.crc_valid);
+        assert_eq!(parsed.crc16, crate::dts_crc16(&bytes[4..4 + 8 - 2]));
+
+        let mut corrupt = frame.clone();
+        corrupt[32 + 6] ^= 0x01; // inside the covered span
+        let parsed = parse_rev2_aux_at(&corrupt, 32, &header).unwrap();
+        assert!(!parsed.crc_valid);
     }
 
     #[test]

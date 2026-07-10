@@ -55,11 +55,19 @@
 //!
 //! The `nAUXCRC16` value "is calculated for the auxiliary data from
 //! positions bAUXTimeStampFlag to the byte prior to the start of the
-//! CRC inclusive", but the staged spec does not document the CRC-16
-//! polynomial (same docs-gap as `HEADER_CRC`), so the field is
-//! surfaced raw and not verified.
+//! CRC inclusive" using the Annex B algorithm (CRC-CCITT, polynomial
+//! `0x1021`, init `0xFFFF` — see [`crate::dts_crc16`] and
+//! `docs/audio/dts/dts-crc16.md`). `bAUXTimeStampFlag` begins on a
+//! byte boundary (right after the 32-bit sync word) and the
+//! `ByteAlign` pad closes the region on one, so the coverage span is
+//! the whole-byte window from `offset + 4` to the byte before the
+//! CRC field. The parser recomputes it and reports the outcome in
+//! [`AuxData::crc_valid`]; unlike the core `HCRC`-family fields, the
+//! aux CRC is genuinely meant to be tested (it also disambiguates
+//! false `nSYNCAUX` alias matches).
 
 use crate::bitreader::BitReader;
+use crate::crc16::dts_crc16;
 use crate::header::DtsFrameHeader;
 use crate::{decode_dmix_code, Error, Result};
 
@@ -276,10 +284,16 @@ pub struct AuxData {
     /// The dynamic downmix coefficient set (present when
     /// `bAUXDynamCoeffFlag` is set).
     pub dynamic_downmix: Option<DynamicDownmix>,
-    /// The raw 16-bit `nAUXCRC16` word. The staged spec does not
-    /// document the CRC-16 polynomial, so the value is surfaced but
-    /// not verified (same docs-gap as `HEADER_CRC`).
+    /// The raw 16-bit `nAUXCRC16` word (Annex B CRC-CCITT, see
+    /// [`crate::dts_crc16`]).
     pub crc16: u16,
+    /// Whether [`Self::crc16`] matches the Annex B CRC-16 recomputed
+    /// over the chunk's protected region — "the auxiliary data from
+    /// positions bAUXTimeStampFlag to the byte prior to the start of
+    /// the CRC inclusive" (§5.6). A `false` here means the chunk is
+    /// corrupt or the DWORD-aligned sync match was a false alias;
+    /// the parse result is surfaced either way so callers can decide.
+    pub crc_valid: bool,
 }
 
 /// Search a core frame for the DWORD-aligned §5.7.1 auxiliary-data
@@ -396,13 +410,21 @@ pub fn parse_aux_data_at(
     if misalign != 0 {
         br.skip_bits(8 - misalign)?;
     }
+    // The CRC field starts here (byte-aligned); the protected region
+    // is "from positions bAUXTimeStampFlag to the byte prior to the
+    // start of the CRC inclusive" — bAUXTimeStampFlag begins right
+    // after the 4 sync bytes, so the covered span is the whole-byte
+    // window [offset + 4, crc_start).
+    let crc_start = br.absolute_bit_position() / 8;
     let crc16 = br.read_bits(16)? as u16;
+    let crc_valid = dts_crc16(&frame[byte_offset + 4..crc_start]) == crc16;
 
     Ok(AuxData {
         offset: byte_offset,
         time_stamp,
         dynamic_downmix,
         crc16,
+        crc_valid,
     })
 }
 
@@ -449,6 +471,16 @@ mod tests {
         w.into_bytes()
     }
 
+    /// Overwrite the trailing 16-bit `nAUXCRC16` of a test chunk with
+    /// the correct Annex B value over the covered span (byte 4 through
+    /// the byte before the CRC — the test builders always emit the CRC
+    /// as the final two bytes).
+    fn patch_crc(chunk: &mut [u8]) {
+        let crc_start = chunk.len() - 2;
+        let crc = dts_crc16(&chunk[4..crc_start]);
+        chunk[crc_start..].copy_from_slice(&crc.to_be_bytes());
+    }
+
     #[test]
     fn parses_empty_chunk() {
         let frame = frame_with_chunk(&empty_chunk());
@@ -458,6 +490,48 @@ mod tests {
         assert_eq!(aux.time_stamp, None);
         assert_eq!(aux.dynamic_downmix, None);
         assert_eq!(aux.crc16, 0xBEEF);
+        // 0xBEEF is not the Annex B CRC of the covered span.
+        assert!(!aux.crc_valid);
+    }
+
+    #[test]
+    fn crc_valid_when_check_word_matches() {
+        // The empty chunk's protected region is the single flag byte
+        // between the sync word and the CRC.
+        let mut chunk = empty_chunk();
+        patch_crc(&mut chunk);
+        let frame = frame_with_chunk(&chunk);
+        let aux = parse_aux_data(&frame, &stereo_header()).unwrap().unwrap();
+        assert_eq!(aux.crc16, dts_crc16(&chunk[4..chunk.len() - 2]));
+        assert!(aux.crc_valid);
+    }
+
+    #[test]
+    fn crc_valid_over_downmix_payload() {
+        // A non-trivial protected region: flags + Table 5-32 type +
+        // four 9-bit codes + ByteAlign, verified end to end.
+        let codes: [u16; 4] = [0x100 | 241, 0x000, 216 + 1, 0x100 | 1];
+        let mut w = BitWriter::new();
+        w.push_bits(u64::from(AUX_SYNC_WORD), 32);
+        w.push_bits(0, 1); // no time stamp
+        w.push_bits(1, 1); // dynamic coeffs present
+        w.push_bits(u64::from(DownmixType::LoRo.code()), 3);
+        for &c in &codes {
+            w.push_bits(u64::from(c), 9);
+        }
+        w.align(8);
+        w.push_bits(0, 16); // placeholder CRC
+        let mut chunk = w.into_bytes();
+        patch_crc(&mut chunk);
+        let frame = frame_with_chunk(&chunk);
+        let aux = parse_aux_data(&frame, &stereo_header()).unwrap().unwrap();
+        assert!(aux.crc_valid);
+
+        // Any corruption inside the covered span must flip the verdict.
+        let mut corrupt = frame.clone();
+        corrupt[32 + 5] ^= 0x40; // inside the coefficient region
+        let aux = parse_aux_data_at(&corrupt, 32, &stereo_header()).unwrap();
+        assert!(!aux.crc_valid);
     }
 
     #[test]

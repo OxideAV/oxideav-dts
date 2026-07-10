@@ -209,8 +209,8 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   `DynamicDownmix::coefficient_matrix` through §D.11;
   `DynamicDownmix::apply_planar` folds planar PCM through the table
   with the §C.2.5 `int()` truncation convention). The `nAUXCRC16` is
-  surfaced raw (polynomial undocumented — same docs-gap as
-  `HEADER_CRC`).
+  **verified** with the Annex B CRC-16 over its documented coverage
+  span (`AuxData::crc_valid`).
 - **§5.7.2 Rev2 Auxiliary Data Chunk** — `find_rev2_aux` /
   `parse_rev2_aux` / `FrameView::rev2_aux`: `nRev2AUXDataByteSize`
   (validated `3..=128`), the embedded-ES downmix scale index
@@ -222,10 +222,20 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   rule) and the 5-bit `DIALNORM_rev2aux` (`DNG = −value` dB,
   Table 5-36) — and the `nRev2AUXCRC16` read at its size-located
   offset (also skipping the reserved field of "unspecified
-  duration"). `Rev2Drc::multipliers` resolves the DRC codes through
-  the §D.4 `RANGEtbl` (the legacy-core coefficient space the spec
-  says these values replace; the spec's own `dts_dynrng_to_db()`
-  body is unprinted, so the raw codes stay exposed).
+  duration") and **verified** with the Annex B CRC-16 over the
+  `nRev2AUXDataByteSize − 2` covered bytes
+  (`Rev2AuxChunk::crc_valid`). `Rev2Drc::multipliers` resolves the
+  DRC codes through the §D.4 `RANGEtbl` (the legacy-core coefficient
+  space the spec says these values replace; the raw codes stay
+  exposed).
+- **Annex B CRC-16** — `dts_crc16` / `dts_crc16_update` /
+  `DTS_CRC16_TABLE`: the single normative DTS CRC (CRC-CCITT,
+  polynomial `0x1021`, init `0xFFFF`, MSB-first, no reflection, no
+  final XOR — the CRC-16/CCITT-FALSE parameter set), per the staged
+  `docs/audio/dts/dts-crc16.md`. Drives the aux / Rev2-aux
+  verification above; the core `HCRC` / `AHCRC` / `SICRC` / `OCRC`
+  stay unverified **by spec mandate** ("The CRC value test shall not
+  be applied" — they are informational placeholders).
 
 ### Not yet implemented
 
@@ -242,13 +252,14 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   decoded; see "What works today".)
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the
   current Core-profile effort.
-- The `HEADER_CRC` polynomial is not documented in the staged spec
-  material, so `DtsFrameHeader::verify_header_crc` returns `None`; the
-  raw 16-bit field is still surfaced for pass-through callers. The
-  same gap covers the §5.6 `OCRC`, §5.7.1 `nAUXCRC16`, and §5.7.2
-  `nRev2AUXCRC16` check words (all surfaced raw, none verified — the
-  spec references "fast table-based CRC16 calculation" without
-  printing the polynomial or table).
+- `DtsFrameHeader::verify_header_crc` returns `None` **by design**,
+  not because of a docs gap: the Annex B CRC algorithm is documented
+  and implemented (`dts_crc16`), but §5.3.1 states "The CRC value
+  test shall not be applied" for the core `HCRC` (likewise `AHCRC` /
+  `SICRC` / `OCRC`), and the spec does not normatively pin the
+  `HCRC` coverage span. The raw 16-bit field stays surfaced for
+  pass-through callers; the genuinely testable check words
+  (`nAUXCRC16`, `nRev2AUXCRC16`) *are* verified.
 - The §5.7.2 `dts_dynrng_to_db()` conversion body is not printed in
   the staged spec; `Rev2Drc::multipliers` documents its §D.4-based
   interpretation and the raw 8-bit DRC codes remain exposed.

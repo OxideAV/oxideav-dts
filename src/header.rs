@@ -747,13 +747,16 @@ pub struct DtsFrameHeader {
     pub lfe: LfeMode,
     /// Predictor-history-enabled flag (`PRED_HISTORY`, 1 bit).
     pub predictor_history: bool,
-    /// 16-bit header-CRC value (`HEADER_CRC`). Present iff
-    /// [`Self::crc_present`] is `true`; `None` otherwise. The CRC
-    /// polynomial is **not** documented in the wiki snapshot under
-    /// `docs/audio/dts/`, so [`Self::verify_header_crc`] currently
-    /// returns `None` — the field is exposed for round-3 callers
-    /// that want to forward the raw value, but verification waits
-    /// for the polynomial to land in `docs/`.
+    /// 16-bit header-CRC value (`HEADER_CRC`, the spec's `HCRC`).
+    /// Present iff [`Self::crc_present`] is `true`; `None` otherwise.
+    /// The algorithm is the Annex B CRC-CCITT ([`crate::dts_crc16`],
+    /// `docs/audio/dts/dts-crc16.md`), but for the core `HCRC` /
+    /// `AHCRC` / `SICRC` / `OCRC` fields the spec explicitly states
+    /// "The CRC value test **shall not be applied**" — they are
+    /// informational placeholders, unlike the genuinely verified
+    /// aux / Rev2-aux / extension-substream check words. The field is
+    /// therefore surfaced raw for pass-through callers and
+    /// [`Self::verify_header_crc`] keeps returning `None`.
     pub header_crc: Option<u16>,
     /// Multirate-interpolation-filter selector (`MULTIRATE_INTER`,
     /// 1 bit). This bit **is** the spec's `FILTS` ("Multirate
@@ -1023,22 +1026,27 @@ impl DtsFrameHeader {
     /// Verify the 16-bit [`Self::header_crc`] against the bits
     /// covered by the DTS Core header-CRC contract.
     ///
-    /// Returns:
-    /// - `None` if [`Self::crc_present`] is `false` (no CRC field
-    ///   was emitted), or if the CRC polynomial is not yet
-    ///   documented in `docs/audio/dts/`. As of round 3 the wiki
-    ///   snapshot (`docs/audio/dts/wiki/DTS.wiki`) only names the
-    ///   field (`16 bits | Header CRC | if CRC present above is
-    ///   set`) without spelling out the polynomial, the seed
-    ///   value, the byte order, or the bit range the CRC covers.
-    /// - `Some(true)` / `Some(false)` if a future round lands the
-    ///   polynomial specification.
+    /// Always returns `None`, for two spec-mandated reasons
+    /// (`docs/audio/dts/dts-crc16.md` "Where CRC-16 is applied"):
+    ///
+    /// - the Annex B algorithm itself is now documented (and
+    ///   available as [`crate::dts_crc16`]), but §5.3.1 explicitly
+    ///   states "The CRC value test **shall not be applied**" for the
+    ///   core `HCRC` field (likewise `AHCRC` / `SICRC` / `OCRC`) —
+    ///   the core check words are informational placeholders, not
+    ///   integrity gates;
+    /// - the exact protected span for `HCRC` is not normatively
+    ///   pinned by the spec text ("core frame-header data"), so no
+    ///   `Some(bool)` verdict could be computed defensibly anyway.
     ///
     /// The caller can use [`Self::header_crc`] directly for
-    /// pass-through scenarios that do not need verification (e.g.
-    /// re-muxing).
+    /// pass-through scenarios (e.g. re-muxing), and
+    /// [`crate::dts_crc16`] to checksum any span it chooses. The
+    /// genuinely verified DTS check words are the aux
+    /// ([`crate::AuxData::crc_valid`]) and Rev2-aux
+    /// ([`crate::Rev2AuxChunk::crc_valid`]) CRCs.
     pub fn verify_header_crc(&self) -> Option<bool> {
-        // Polynomial undocumented; see the comment above.
+        // Normatively "shall not be applied"; see the doc comment.
         let _ = self.header_crc?;
         None
     }
@@ -2619,15 +2627,17 @@ mod tests {
     }
 
     /// When `crc_present == 1` the parser captures the 16-bit field
-    /// verbatim; verification still returns `None` because the
-    /// polynomial is undocumented.
+    /// verbatim; verification still returns `None` because §5.3.1
+    /// mandates "The CRC value test shall not be applied" for the
+    /// core HCRC (the Annex B algorithm itself is available as
+    /// `dts_crc16` for callers that checksum their own spans).
     #[test]
     fn header_crc_present_returns_raw_field_and_unverified() {
         let bytes = build_be_header(1, 31, 1, 16, 1023, 9, 13, 25, 0, Some(0x1234), 0);
         let hdr = parse_frame_header(&bytes).unwrap();
         assert!(hdr.crc_present);
         assert_eq!(hdr.header_crc, Some(0x1234));
-        // Polynomial undocumented -> still None.
+        // Normative "shall not be applied" -> None by design.
         assert_eq!(hdr.verify_header_crc(), None);
     }
 
