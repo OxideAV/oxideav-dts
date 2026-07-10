@@ -20,11 +20,16 @@ chain, producing **bit-exact** PCM to the equivalent raw-16-bit frame
 **carries the §C.2.5
 per-channel QMF filter tail across frames** (`CoreStreamDecoder`) so a
 multi-frame elementary stream reconstructs without a per-frame
-filter-warmup transient. This full-chain output is **validated against a
-black-box `ffmpeg -c:a dca` reference decode** of the bundled 5-frame
-fixture: our PCM is shape-identical to the reference (Pearson
-correlation 1.0, 100 % sign agreement on both channels), confirming the
-reconstruction chain is correct up to the implementation-defined output
+filter-warmup transient. This full-chain output is **validated against
+black-box `ffmpeg -c:a dca` reference decodes** of two bundled
+fixtures: the 5-frame stereo stream (Pearson correlation 1.0, 100 %
+sign agreement on both channels) and — new in round 408 — a 10-frame
+**5.1 stream** (`AMODE 9` = C L R SL SR + `LFE Mode2`), where **all
+five primary channels and the LFE channel** are shape-identical to
+the reference (correlation 1.000000 per plane;
+`tests/black_box_ffmpeg_lfe.rs`), confirming the
+reconstruction chain — including the §5.5 LFE phase and §C.2.6 64×
+interpolation — is correct up to the implementation-defined output
 `rScale` gain (the spec leaves §C.2.5 `rScale` non-normative). The
 §5.4.1 Table 5-28 side-info tail is handled for **dynamic range**
 (`DYNF`: the 8-bit `RANGE` code is read as signed Q2 —

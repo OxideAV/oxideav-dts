@@ -68,6 +68,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   omits both books; recovery is an observer-derived black-box trace)
   instead of "not yet transcribed".
 
+- Round 408 (2026-07-10) — **5.1 + LFE black-box validation**
+  (`tests/black_box_ffmpeg_lfe.rs` + `tests/fixtures/dts_51_lfe.*`):
+  a bundled 10-frame `AMODE 9` (C L R SL SR) + `LFE Mode2` (64×
+  decimation) DTS Core stream, generated and reference-decoded by the
+  `ffmpeg` binary as an opaque black box, decodes through
+  `CoreStreamDecoder` **shape-identical to the reference on all six
+  planes** — Pearson correlation 1.000000 on each of the five primary
+  channels *and* the LFE channel, with the §C.2.6 interpolation
+  landing exactly the primary per-frame PCM length. This is the
+  regression net over the round-408-corrected LFE walker trace
+  (`docs/audio/dts/dts-lfe-interpolation-and-audio-walker.md`) and
+  the first multichannel (>2ch) end-to-end validation.
+
 - Round 406 (2026-07-10) — **§D.11 downmix scale-factor tables +
   §5.7.1 coefficient-code resolver** (`src/dmix_coeff.rs`): the full
   Annex D §D.11 "Look-up Table for Downmix Scale Factors" is
