@@ -818,6 +818,18 @@ pub enum Error {
         /// The offending 9-bit (or wider) code word.
         code: u16,
     },
+    /// The planar PCM handed to
+    /// [`crate::DynamicDownmix::apply_planar`] did not match the
+    /// coefficient table's shape: the plane count must equal the
+    /// §5.7.1 `nPriCh` input channel count, and every plane must have
+    /// the same sample count.
+    DownmixInputShapeMismatch {
+        /// The expected plane count (or, for the unequal-length case,
+        /// the first plane's sample count).
+        expected: usize,
+        /// The offending count actually supplied.
+        found: usize,
+    },
     /// The §5.5 Table 5-29 `DSYNC` subsubframe synchronization check
     /// word ([`crate::decode_dsync_at`]) read a 16-bit value other than
     /// `0xffff` (PDF p.32: `if ( DSYNC != 0xffff )`). The spec text only
@@ -972,6 +984,12 @@ impl core::fmt::Display for Error {
                 "oxideav-dts: §5.7.1 dynamic-downmix coefficient code 0x{code:03x} \
                  is out of domain (must be a 9-bit word whose one-biased low byte \
                  indexes the 241-entry §D.11 DmixTable)"
+            ),
+            Error::DownmixInputShapeMismatch { expected, found } => write!(
+                f,
+                "oxideav-dts: §5.7.1 downmix fold shape mismatch: expected \
+                 {expected}, got {found} (plane count must equal the nPriCh \
+                 input channel count and all planes must be equal-length)"
             ),
             Error::DsyncMismatch {
                 found,

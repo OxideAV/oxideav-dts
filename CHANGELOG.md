@@ -66,6 +66,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `Rev2AuxSyncMismatch`, `Rev2AuxSizeOutOfRange`,
   `Rev2AuxEsScaleIndexOutOfRange`, `Rev2AuxDrcCountUnresolved`.
 
+- Round 406 (2026-07-10) — **§5.7 chunk integration + downmix
+  fold**: `FrameView::aux_data()` / `FrameView::rev2_aux()` locate
+  and parse the frame's §5.7.1 / §5.7.2 chunks straight off the
+  iterator, and `DynamicDownmix::apply_planar` folds planar PCM
+  through the embedded coefficient table
+  (`output[m][t] = Σ coeff(m,n)·input[n][t]`, truncated toward zero
+  per the §C.2.5 `int()` convention, saturated at the i32 bounds;
+  new typed `Error::DownmixInputShapeMismatch` for plane-shape
+  violations). New integration suite `tests/aux_chunks.rs` walks the
+  real 5-frame fixture (the DWORD-aligned backward scans produce no
+  false positives over genuine compressed payload) and a composed
+  full-size frame carrying both chunks (time stamp + LoRo identity
+  downmix + ES scale + 2-subsubframe DRC + dialnorm) end to end
+  through the public accessors.
+
 - Round 398 (2026-07-08) — **§C.2.4 sum/difference decoding wired into
   the reconstruction chain**: the front L/R sum/difference matrix
   (`FrontLeft = L + R`, `FrontRight = L − R`) is now applied on the

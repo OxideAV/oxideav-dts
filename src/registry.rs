@@ -85,6 +85,10 @@ impl From<DtsError> for CoreError {
             DtsError::InvalidStepSize { .. } | DtsError::SampleCountMismatch { .. } => {
                 CoreError::InvalidData(e.to_string())
             }
+            // Round 406 §5.7.1 downmix-fold shape mismatch: a
+            // caller-side plane-shape violation analogous to the
+            // §C.2.x shape-mismatch variants -> `InvalidData`.
+            DtsError::DownmixInputShapeMismatch { .. } => CoreError::InvalidData(e.to_string()),
             // Round 406 §5.7.2 Rev2 auxiliary chunk errors: sync
             // mismatch, invalid declared byte size, out-of-range
             // embedded-ES scale index, or an underivable DRC value

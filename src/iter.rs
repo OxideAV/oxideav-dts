@@ -223,6 +223,24 @@ impl<'a> FrameView<'a> {
     pub fn payload(&self) -> &'a [u8] {
         &self.data[self.header.header_byte_length()..]
     }
+
+    /// Locate and parse the frame's §5.7.1 Auxiliary Data chunk (the
+    /// optional end-of-frame time stamp + dynamic downmix
+    /// coefficients), returning `Ok(None)` when the frame carries no
+    /// DWORD-aligned `nSYNCAUX` word. Composition of
+    /// [`crate::parse_aux_data`] over the frame's own bytes + header.
+    pub fn aux_data(&self) -> crate::Result<Option<crate::AuxData>> {
+        crate::parse_aux_data(self.data, &self.header)
+    }
+
+    /// Locate and parse the frame's §5.7.2 Rev2 Auxiliary Data Chunk
+    /// (embedded-ES downmix scale + broadcast DRC / dialnorm),
+    /// returning `Ok(None)` when the frame carries no DWORD-aligned
+    /// `nSYNCRev2AUX` word. Composition of [`crate::parse_rev2_aux`]
+    /// over the frame's own bytes + header.
+    pub fn rev2_aux(&self) -> crate::Result<Option<crate::Rev2AuxChunk>> {
+        crate::parse_rev2_aux(self.data, &self.header)
+    }
 }
 
 /// Iterator that walks a raw-16-bit DTS Core byte buffer frame by

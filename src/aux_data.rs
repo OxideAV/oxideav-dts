@@ -211,6 +211,54 @@ impl DynamicDownmix {
             })
             .collect()
     }
+
+    /// Fold planar PCM through the coefficient table:
+    /// `output[m][t] = Σ_n coefficient(m, n) · input[n][t]`.
+    ///
+    /// `input` must carry exactly [`Self::input_channel_count`]
+    /// equal-length planes (the §5.7.1 layout: the Table 5-4 primary
+    /// channels in bitstream order, then the LFE plane when the frame
+    /// carries one — matching the plane order the registry decoder
+    /// emits). Each accumulated sample is truncated toward zero, the
+    /// same `int()` cast convention as the §C.2.5 PCM output step,
+    /// and saturated to the `i32` range.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::DownmixInputShapeMismatch`] when the plane count is
+    ///   not `input_channel_count` or the planes have unequal
+    ///   lengths.
+    /// - [`Error::DownmixCodeOutOfRange`] when a stored code word
+    ///   does not resolve through the §D.11 table.
+    pub fn apply_planar(&self, input: &[Vec<i32>]) -> Result<Vec<Vec<i32>>> {
+        if input.len() != self.input_channel_count {
+            return Err(Error::DownmixInputShapeMismatch {
+                expected: self.input_channel_count,
+                found: input.len(),
+            });
+        }
+        let samples = input.first().map_or(0, Vec::len);
+        if let Some(plane) = input.iter().find(|p| p.len() != samples) {
+            return Err(Error::DownmixInputShapeMismatch {
+                expected: samples,
+                found: plane.len(),
+            });
+        }
+        let matrix = self.coefficient_matrix()?;
+        let mut output = vec![vec![0i32; samples]; self.output_channel_count()];
+        for (out_plane, row) in output.iter_mut().zip(&matrix) {
+            for (t, out_sample) in out_plane.iter_mut().enumerate() {
+                let mut acc = 0.0f64;
+                for (coeff, in_plane) in row.iter().zip(input) {
+                    acc += coeff * f64::from(in_plane[t]);
+                }
+                // Truncate toward zero (the §C.2.5 int() convention),
+                // saturating at the i32 bounds.
+                *out_sample = acc.trunc().clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32;
+            }
+        }
+        Ok(output)
+    }
 }
 
 /// A parsed §5.7.1 Auxiliary Data chunk (Table 5-31).
@@ -591,6 +639,50 @@ mod tests {
         assert_eq!(dmix.code(0, 2), None);
         assert_eq!(dmix.code(1, 0), None);
         assert!(dmix.coefficient(1, 0).is_err());
+    }
+
+    #[test]
+    fn apply_planar_folds_and_truncates() {
+        // Stereo -> mono with coefficients (+1.0, -1/sqrt(2)).
+        let dmix = DynamicDownmix {
+            downmix_type: DownmixType::OneZero,
+            input_channel_count: 2,
+            codes: vec![0x100 | 241, 216 + 1],
+        };
+        let input = vec![vec![1000, -1000, 0], vec![1000, 1000, 32768]];
+        let out = dmix.apply_planar(&input).unwrap();
+        assert_eq!(out.len(), 1);
+        let c: f64 = 23170.0 / 32768.0;
+        // 1000 - c*1000 = 292.9 -> 292 (truncate toward zero).
+        assert_eq!(out[0][0], (1000.0 - c * 1000.0).trunc() as i32);
+        // -1000 - c*1000 = -1707.09 -> -1707 (not -1708).
+        assert_eq!(out[0][1], (-1000.0 - c * 1000.0).trunc() as i32);
+        assert_eq!(out[0][2], (-c * 32768.0).trunc() as i32);
+    }
+
+    #[test]
+    fn apply_planar_rejects_shape_mismatch() {
+        let dmix = DynamicDownmix {
+            downmix_type: DownmixType::OneZero,
+            input_channel_count: 2,
+            codes: vec![0x100 | 241, 0x100 | 241],
+        };
+        // Wrong plane count.
+        assert_eq!(
+            dmix.apply_planar(&[vec![0i32; 4]]),
+            Err(Error::DownmixInputShapeMismatch {
+                expected: 2,
+                found: 1
+            })
+        );
+        // Unequal plane lengths.
+        assert_eq!(
+            dmix.apply_planar(&[vec![0i32; 4], vec![0i32; 3]]),
+            Err(Error::DownmixInputShapeMismatch {
+                expected: 4,
+                found: 3
+            })
+        );
     }
 
     #[test]
