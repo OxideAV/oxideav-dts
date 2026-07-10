@@ -8,6 +8,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 406 (2026-07-10) — **§D.11 downmix scale-factor tables +
+  §5.7.1 coefficient-code resolver** (`src/dmix_coeff.rs`): the full
+  Annex D §D.11 "Look-up Table for Downmix Scale Factors" is
+  transcribed from the staged ETSI PDF (p.256-259) — `DMIX_TABLE`
+  (241 × u16, the Q15 `DmixTable` column, `-60 dB` … unity) and
+  `INV_DMIX_TABLE` (201 × u32, the Q16 `InvDmixTbl` column for
+  `DmixTblIndex >= 40`) — plus `dmix_scale` / `inv_dmix_scale`
+  index-to-real look-ups and `decode_dmix_code`, the §5.7.1
+  Table 5-31 9-bit dynamic-downmix coefficient resolution (MSB =
+  phase, one-biased low byte into `DmixTable`, `0` → exact `0.0`).
+  Every entry of both columns is unit-verified against the spec's own
+  closed-form derivation (`round(10^(dB/20)·2^15)` on the
+  piecewise-uniform dB ramp / `round(2^16/10^(dB/20))`), including
+  the spec's deliberate index-216 half-power point (`1/sqrt(2)`
+  rather than `10^(-3/20)`). New typed
+  `Error::DownmixCodeOutOfRange` covers the pseudocode's
+  `nTmp > nTblSize` failure arm.
+
 - Round 398 (2026-07-08) — **§C.2.4 sum/difference decoding wired into
   the reconstruction chain**: the front L/R sum/difference matrix
   (`FrontLeft = L + R`, `FrontRight = L − R`) is now applied on the

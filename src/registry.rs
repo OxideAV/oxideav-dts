@@ -85,6 +85,13 @@ impl From<DtsError> for CoreError {
             DtsError::InvalidStepSize { .. } | DtsError::SampleCountMismatch { .. } => {
                 CoreError::InvalidData(e.to_string())
             }
+            // Round 406 §5.7.1 dynamic-downmix coefficient code out of
+            // domain: a 9-bit `panDwnMixCodeCoeffs[n]` word whose
+            // one-biased low byte walks past the §D.11 `DmixTable`
+            // indicates a corrupt auxiliary-data chunk, so
+            // `InvalidData` alongside the other bit-stream-corruption
+            // variants.
+            DtsError::DownmixCodeOutOfRange { .. } => CoreError::InvalidData(e.to_string()),
             // Round 306 §5.5 DSYNC trailer mismatch: a subsubframe
             // synchronization check word other than `0xffff` is the
             // Core profile's in-band integrity signal for a corrupt

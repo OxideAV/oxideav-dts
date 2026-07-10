@@ -445,6 +445,7 @@ mod bitreader;
 mod block_code;
 mod cos_mod;
 mod d6_block_book;
+mod dmix_coeff;
 mod drc_range;
 mod dsync;
 mod filter_bank;
@@ -488,6 +489,10 @@ pub use crate::cos_mod::{
 pub use crate::d6_block_book::{
     d6_book_for_levels, decode_block_code_table, D6BlockBook, D6_BLOCK_ELEMENTS, D6_BOOK_13,
     D6_BOOK_17, D6_BOOK_25, D6_BOOK_3, D6_BOOK_5, D6_BOOK_7, D6_BOOK_9,
+};
+pub use crate::dmix_coeff::{
+    decode_dmix_code, dmix_scale, inv_dmix_scale, DMIX_TABLE, DMIX_TABLE_LEN,
+    DMIX_TABLE_UNITY_INDEX, INV_DMIX_INDEX_OFFSET, INV_DMIX_TABLE, INV_DMIX_TABLE_LEN,
 };
 pub use crate::drc_range::{drc_range, DRC_RANGE_LEN, DRC_RANGE_MULTIPLIER, DRC_RANGE_UNITY_INDEX};
 pub use crate::dsync::{decode_dsync_at, dsync_present, DSYNC_WIRE_BITS, DSYNC_WORD};
@@ -738,6 +743,15 @@ pub enum Error {
         /// The slice length the caller actually supplied.
         found: usize,
     },
+    /// A §5.7.1 Table 5-31 dynamic-downmix coefficient code word
+    /// passed to [`crate::decode_dmix_code`] was wider than the
+    /// documented 9-bit field, or its one-biased low byte resolved
+    /// past the end of the 241-entry §D.11 `DmixTable` (the
+    /// pseudocode's `if (nTmp > nTblSize) return false;` arm).
+    DownmixCodeOutOfRange {
+        /// The offending 9-bit (or wider) code word.
+        code: u16,
+    },
     /// The §5.5 Table 5-29 `DSYNC` subsubframe synchronization check
     /// word ([`crate::decode_dsync_at`]) read a 16-bit value other than
     /// `0xffff` (PDF p.32: `if ( DSYNC != 0xffff )`). The spec text only
@@ -848,6 +862,12 @@ impl core::fmt::Display for Error {
                 f,
                 "oxideav-dts: §5.5 subsubframe dequantization expects {expected} \
                  samples per subband analysis subwindow, got {found}"
+            ),
+            Error::DownmixCodeOutOfRange { code } => write!(
+                f,
+                "oxideav-dts: §5.7.1 dynamic-downmix coefficient code 0x{code:03x} \
+                 is out of domain (must be a 9-bit word whose one-biased low byte \
+                 indexes the 241-entry §D.11 DmixTable)"
             ),
             Error::DsyncMismatch {
                 found,
