@@ -49,19 +49,29 @@
 //!
 //! # Scope and blockers
 //!
-//! Two §5.5 sub-paths require Annex D VQ code books that are **not yet
-//! transcribed** into `docs/audio/dts/` and so are surfaced as typed
+//! Two §5.5 sub-paths require the Annex D §D.10 VQ code books, whose
+//! numeric contents are a **recorded gap**: the ETSI spec deliberately
+//! omits both ("Due to its extensive size, this table is not included
+//! here", §D.10.1 / §D.10.2, PDF p.255 — see
+//! `docs/audio/dts/dts-d10-vq-tables-GAP.md` for the analysis and the
+//! observer-derived recovery path). They are surfaced as typed
 //! "blocked" errors rather than guessed:
 //!
 //! * The **high-frequency VQ subbands** loop (`n ∈ [nVQSUB, nSUBS)`,
 //!   `nVQIndex = ExtractBits(10); HFreqVQ.LookUp(...)`) needs the §D.10.2
-//!   "High Frequency Subbands" 32-sample VQ code book. A subband whose
-//!   `nVQSUB < nSUBS` cannot be reconstructed without it.
+//!   "High Frequency Subbands" 32-sample VQ code book (1024 vectors;
+//!   entries decode as two 8-bit signed integers **each ÷ 24** —
+//!   [`crate::unpack_hfreq_vq_entry`]). A subband whose
+//!   `nVQSUB < nSUBS` cannot be reconstructed without it, though its
+//!   10-bit indices can be captured structurally
+//!   ([`crate::scan_hf_vq_indices_at`]).
 //! * The **inverse-ADPCM coefficient lookup** (`PMODE != 0`, the §5.4.1
 //!   `ADPCMCoeffVQ.LookUp(nVQIndex, PVQ[ch][n])`) needs the §D.10.1
-//!   ADPCM-coefficient VQ code book to turn the captured 12-bit
-//!   `pvq_index` into the four predictor taps; the §C.2.2 predictor
-//!   itself is landed but cannot run without the coefficients.
+//!   ADPCM-coefficient VQ code book (4096 × 4 stored integers, actual
+//!   coefficient = entry ÷ 2¹³ — [`crate::adpcm_vq_coeff`]) to turn
+//!   the captured 12-bit `pvq_index` into the four predictor taps;
+//!   the §C.2.2 predictor itself is landed but cannot run without the
+//!   coefficients.
 //!
 //! Both surface [`AudioArrayError::VqCodebookUnavailable`]. A frame
 //! whose primary channels are all linearly / Huffman / block coded with
@@ -84,8 +94,12 @@ use crate::{Error, Result};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AudioArrayError {
-    /// A subband required an Annex D VQ code book that is not yet
-    /// transcribed into `docs/audio/dts/`: either the §D.10.2 high-
+    /// A subband required an Annex D §D.10 VQ code book whose numeric
+    /// contents are a **recorded gap** — the ETSI spec deliberately
+    /// omits both books ("Due to its extensive size, this table is
+    /// not included here", PDF p.255); see
+    /// `docs/audio/dts/dts-d10-vq-tables-GAP.md` for the analysis and
+    /// the observer-derived recovery path. Either the §D.10.2 high-
     /// frequency VQ book (a `nVQSUB < nSUBS` subband) or the §D.10.1
     /// ADPCM-coefficient VQ book (a `PMODE != 0` subband). Carries the
     /// channel/subband that hit the blocker and which book is missing.
@@ -120,7 +134,8 @@ impl core::fmt::Display for AudioArrayError {
                 write!(
                     f,
                     "oxideav-dts: channel {ch} subband {n} needs the {book} code \
-                     book, which is not yet transcribed into docs/audio/dts/"
+                     book, whose numeric contents the ETSI spec deliberately \
+                     omits (recorded gap: docs/audio/dts/dts-d10-vq-tables-GAP.md)"
                 )
             }
             AudioArrayError::LfePhase(e) => write!(f, "oxideav-dts: §5.5 LFE phase: {e}"),

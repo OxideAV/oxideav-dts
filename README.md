@@ -247,12 +247,24 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
 - The §D.10.1 ADPCM-coefficient VQ and §D.10.2 high-frequency-subband VQ
   code books (a `PMODE != 0` or `nVQSUB < nSUBS` subband surfaces a typed
   blocker). These are the last Core-profile blockers, and they are a
-  **hard docs-gap**: the staged ETSI spec explicitly omits both tables
-  ("Due to its extensive size, this table is not included here",
-  §D.10.1 / §D.10.2, PDF p.255), so the 4096-vector ADPCM code book and
-  the 1024-vector high-frequency code book cannot be transcribed from
-  `docs/audio/dts/`. Clean-room rules bar re-deriving them from any
-  decoder source. (The `JOIN_SHUFF` / `JOIN_SCALES` joint-intensity tail
+  **recorded docs-gap** (`docs/audio/dts/dts-d10-vq-tables-GAP.md`):
+  the staged ETSI spec deliberately omits both tables ("Due to its
+  extensive size, this table is not included here", §D.10.1 / §D.10.2,
+  PDF p.255) across every edition of the standard, so the 4096 × 4
+  ADPCM book and the 1024 × 32 high-frequency book cannot be
+  transcribed from `docs/audio/dts/`, and clean-room rules bar
+  re-deriving them from any decoder source. The gap doc records the
+  legitimate recovery path — an observer-derived black-box trace
+  sweeping each VQ index in isolation (the values are data, not
+  implementation). Everything the spec *does* define is already
+  landed as the drop-in shell (`d10_vq`): the 10-/12-bit index
+  widths, book dimensions, the §D.10.2
+  two-signed-bytes-each-÷ 24 entry decoding (`unpack_hfreq_vq_entry`;
+  the divisor is the literal 24, **not** `2^4` — settled by the
+  round-408 trace correction), the §D.10.1 ÷ 2¹³ scaling
+  (`adpcm_vq_coeff`, spec anchor `9928 → 1.2119140625`), and the
+  structural §5.5 phase-1 index scanner (`scan_hf_vq_indices_at`).
+  (The `JOIN_SHUFF` / `JOIN_SCALES` joint-intensity tail
   and the §C.2.3 sub-band copy — previously listed here — *are* now
   decoded; see "What works today".)
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the

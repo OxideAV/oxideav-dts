@@ -50,6 +50,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `Rev2Drc::gains_db` joins `Rev2Drc::multipliers` on the Rev2AUX
   side.
 
+- Round 408 (2026-07-10) — **§D.10 VQ code-book shell**
+  (`src/d10_vq.rs`): everything the spec *does* define about the two
+  gap-blocked VQ books, so a future observer-derived book drops
+  straight in — the wire/dimension constants (10-bit index / 1024 ×
+  32 for §D.10.2 `HFreqVQ`; 12-bit index / 4096 × 4 for §D.10.1
+  `ADPCMCoeffVQ`), the entry decoders `unpack_hfreq_vq_entry` (16-bit
+  entry → two 8-bit signed elements, **each ÷ the literal 24** — the
+  §D.10.2 scaling the round-408 corrected walker trace settled
+  against a mis-read as `2^4`) and `adpcm_vq_coeff` (entry ÷ 2¹³,
+  pinned to the spec's only published anchor `9928 →
+  1.2119140625`), and `scan_hf_vq_indices_at`, the structural §5.5
+  phase-1 walk capturing each HF-VQ subband's 10-bit index without
+  attempting the blocked lookup. The `VqCodebookUnavailable` docs and
+  message now cite the recorded gap
+  (`docs/audio/dts/dts-d10-vq-tables-GAP.md` — the spec deliberately
+  omits both books; recovery is an observer-derived black-box trace)
+  instead of "not yet transcribed".
+
 - Round 406 (2026-07-10) — **§D.11 downmix scale-factor tables +
   §5.7.1 coefficient-code resolver** (`src/dmix_coeff.rs`): the full
   Annex D §D.11 "Look-up Table for Downmix Scale Factors" is

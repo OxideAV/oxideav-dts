@@ -433,6 +433,15 @@
 //!   polynomial `0x1021`, init `0xFFFF`, MSB-first, no reflection, no
 //!   final XOR), in one-shot, incremental, and compile-time-table
 //!   forms. Per `docs/audio/dts/dts-crc16.md`. Added in round 408.
+//! - [`scan_hf_vq_indices_at`] / [`unpack_hfreq_vq_entry`] /
+//!   [`adpcm_vq_coeff`] + the `HFREQ_VQ_*` / `ADPCM_VQ_*` constants —
+//!   everything the spec *does* define about the §D.10 VQ code books
+//!   (index widths, book sizes, vector lengths, and the §D.10.2
+//!   two-signed-bytes-**÷ 24** / §D.10.1 ÷ 2¹³ entry scalings), plus
+//!   the structural §5.5 phase-1 index scanner. The books' numeric
+//!   contents are a recorded gap
+//!   (`docs/audio/dts/dts-d10-vq-tables-GAP.md`) pending an
+//!   observer-derived trace. Added in round 408.
 //! - [`dts_dynrng_to_db`] / [`dts_dynrng_to_linear`] — the §5.4.1 /
 //!   §5.7.2 DRC code resolution: the 8-bit `RANGE` /
 //!   `subsubFrameDRC_Rev2AUX[]` byte is **signed Q2 two's-complement**
@@ -493,6 +502,7 @@ mod bitreader;
 mod block_code;
 mod cos_mod;
 mod crc16;
+mod d10_vq;
 mod d6_block_book;
 mod dmix_coeff;
 mod drc_range;
@@ -545,6 +555,12 @@ pub use crate::cos_mod::{
 };
 pub use crate::crc16::{
     dts_crc16, dts_crc16_update, DTS_CRC16_INIT, DTS_CRC16_POLY, DTS_CRC16_TABLE,
+};
+pub use crate::d10_vq::{
+    adpcm_vq_coeff, scan_hf_vq_indices_at, unpack_hfreq_vq_entry, ADPCM_VQ_BOOK_SIZE,
+    ADPCM_VQ_COEFF_DIVISOR, ADPCM_VQ_INDEX_BITS, ADPCM_VQ_VECTOR_LEN, HFREQ_VQ_BOOK_SIZE,
+    HFREQ_VQ_ELEMENT_DIVISOR, HFREQ_VQ_ENTRIES_PER_VECTOR, HFREQ_VQ_INDEX_BITS,
+    HFREQ_VQ_VECTOR_LEN,
 };
 pub use crate::d6_block_book::{
     d6_book_for_levels, decode_block_code_table, D6BlockBook, D6_BLOCK_ELEMENTS, D6_BOOK_13,
