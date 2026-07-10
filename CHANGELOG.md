@@ -96,6 +96,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   against the legacy gain, the no-`DYNF` case, and the
   CRC-invalid-chunk-is-ignored case.
 
+- Round 408 (2026-07-10) — **corruption-robustness sweep**
+  (`tests/corruption_robustness.rs`): deterministic single-byte-XOR
+  (strided, two masks) and multi-byte + truncation passes over both
+  real fixtures, driving the resync framing, full PCM decode, LFE
+  plane, and the §5.7 chunk parsers on every damaged variant — typed
+  errors are acceptable outcomes, panics are the failure. Runs
+  in-CI (~10 s).
+
 - Round 406 (2026-07-10) — **§D.11 downmix scale-factor tables +
   §5.7.1 coefficient-code resolver** (`src/dmix_coeff.rs`): the full
   Annex D §D.11 "Look-up Table for Downmix Scale Factors" is
