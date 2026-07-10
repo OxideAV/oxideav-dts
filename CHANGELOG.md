@@ -66,6 +66,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `Rev2AuxSyncMismatch`, `Rev2AuxSizeOutOfRange`,
   `Rev2AuxEsScaleIndexOutOfRange`, `Rev2AuxDrcCountUnresolved`.
 
+- Round 406 (2026-07-10) — **§5.6 Unpack Optional Information
+  (Table 5-30)** (`src/optional_info.rs`): `decode_optional_info_at`
+  walks the flag-gated region after the last audio-data array —
+  `TIMES` (32-bit time code stamp, `TIMEF`), `AUXCT`/`AUXD`
+  (auxiliary byte count + raw bytes, `AUXF`, with the pseudocode's
+  byte-align; the `ZeroPadAux` DWORD-alignment discrepancy is
+  documented and the §5.7.1 sync-search parser remains the
+  recommended route into the AUXD content), and `OCRC`
+  (`CPF && DYNF`, surfaced raw per the spec's "The CRC value test
+  shall not be applied"). New `*_with_info` decode entry points —
+  `decode_core_frame_with_info`,
+  `SubframePcmDecoder::decode_core_frame_with_info_into`,
+  `CoreStreamDecoder::decode_frame_with_info` — run the walk from
+  the real end-of-audio bit cursor (the shared frame walk now
+  returns its cursor internally), returning PCM + `OptionalInfo` in
+  one pass; validated bit-identical to the plain decode across the
+  bundled 5-frame fixture.
+
 - Round 406 (2026-07-10) — **§5.7 chunk integration + downmix
   fold**: `FrameView::aux_data()` / `FrameView::rev2_aux()` locate
   and parse the frame's §5.7.1 / §5.7.2 chunks straight off the

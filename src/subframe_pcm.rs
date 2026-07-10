@@ -656,6 +656,33 @@ pub fn decode_core_frame(
     decoder.decode_core_frame_into(bytes, header)
 }
 
+/// [`decode_core_frame`] plus the frame's §5.6 Table 5-30
+/// optional-information region: after the last audio-data array the
+/// walk continues through the flag-gated `TIMES` (time code stamp,
+/// `TIMEF`), `AUXCT`/`AUXD` (auxiliary bytes, `AUXF`), and `OCRC`
+/// (`CPF && DYNF`) fields via [`crate::decode_optional_info_at`],
+/// returning them alongside the planar PCM.
+///
+/// Same single-frame semantics (cleared filter history) as
+/// [`decode_core_frame`]; use
+/// [`CoreStreamDecoder::decode_frame_with_info`] for the multi-frame
+/// path.
+///
+/// # Errors
+///
+/// See [`decode_core_frame`]; a truncated optional-information region
+/// additionally surfaces as [`CoreFrameDecodeError::Bitstream`].
+pub fn decode_core_frame_with_info(
+    bytes: &[u8],
+    header: &DtsFrameHeader,
+) -> Result<(SubframePcm, crate::OptionalInfo), CoreFrameDecodeError> {
+    let header_bits = header.header_bit_length() as usize;
+    let cpf = header.crc_present;
+    let (coding, _ach_bits) = crate::decode_audio_coding_header_at(bytes, header_bits, cpf)?;
+    let mut decoder = SubframePcmDecoder::new(coding.n_pchs);
+    decoder.decode_core_frame_with_info_into(bytes, header)
+}
+
 /// Persistent §5.3/§5.4/§5.5 + §C.2.5 Core-stream decoder.
 ///
 /// The §C.2.5 `aPrmCh[ch]` synthesis filter is a **continuous**
@@ -746,6 +773,24 @@ impl CoreStreamDecoder {
     ) -> Result<SubframePcm, CoreFrameDecodeError> {
         self.decoder.decode_core_frame_into(bytes, header)
     }
+
+    /// [`Self::decode_frame`] plus the frame's §5.6 Table 5-30
+    /// optional-information region (`TIMES` / `AUXD` / `OCRC`),
+    /// walked from the end-of-audio bit cursor. See
+    /// [`SubframePcmDecoder::decode_core_frame_with_info_into`].
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::decode_frame`]; a truncated optional-information
+    /// region additionally surfaces as
+    /// [`CoreFrameDecodeError::Bitstream`].
+    pub fn decode_frame_with_info(
+        &mut self,
+        bytes: &[u8],
+        header: &DtsFrameHeader,
+    ) -> Result<(SubframePcm, crate::OptionalInfo), CoreFrameDecodeError> {
+        self.decoder.decode_core_frame_with_info_into(bytes, header)
+    }
 }
 
 impl SubframePcmDecoder {
@@ -765,6 +810,40 @@ impl SubframePcmDecoder {
         bytes: &[u8],
         header: &DtsFrameHeader,
     ) -> Result<SubframePcm, CoreFrameDecodeError> {
+        self.decode_core_frame_cursor(bytes, header)
+            .map(|(pcm, _)| pcm)
+    }
+
+    /// [`Self::decode_core_frame_into`] plus the §5.6 Table 5-30
+    /// optional-information region that follows the last audio-data
+    /// array: the walk continues from the end-of-audio bit cursor
+    /// through the flag-gated `TIMES` / `AUXCT` / `AUXD` / `OCRC`
+    /// fields ([`crate::decode_optional_info_at`]).
+    ///
+    /// # Errors
+    ///
+    /// See [`decode_core_frame`]; a truncated optional-information
+    /// region additionally surfaces as
+    /// [`CoreFrameDecodeError::Bitstream`].
+    pub fn decode_core_frame_with_info_into(
+        &mut self,
+        bytes: &[u8],
+        header: &DtsFrameHeader,
+    ) -> Result<(SubframePcm, crate::OptionalInfo), CoreFrameDecodeError> {
+        let (pcm, end_bit) = self.decode_core_frame_cursor(bytes, header)?;
+        let (info, _info_bits) = crate::decode_optional_info_at(bytes, end_bit, header)
+            .map_err(CoreFrameDecodeError::Bitstream)?;
+        Ok((pcm, info))
+    }
+
+    /// Shared §5.3.2 → §5.4.1 → §5.5 + §C.2.5 frame walk, returning
+    /// the planar PCM plus the bit cursor at the end of the last
+    /// audio-data array (where the §5.6 Table 5-30 region begins).
+    fn decode_core_frame_cursor(
+        &mut self,
+        bytes: &[u8],
+        header: &DtsFrameHeader,
+    ) -> Result<(SubframePcm, usize), CoreFrameDecodeError> {
         // §5.3.2 Primary Audio Coding Header begins right after the
         // §5.3.1 frame header. The §5.3.1 CRC-present flag
         // (CPF == `crc_present`) controls the optional 16-bit SICRC
@@ -835,7 +914,7 @@ impl SubframePcmDecoder {
             bit += audio_bits;
         }
 
-        Ok(pcm)
+        Ok((pcm, bit))
     }
 }
 

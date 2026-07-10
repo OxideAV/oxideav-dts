@@ -11,8 +11,9 @@
 //! accessors.
 
 use oxideav_dts::{
-    iter_frames, parse_aux_data, parse_frame_header, parse_rev2_aux, DownmixType, AUX_SYNC_WORD,
-    AUX_TIME_STAMP_MARKER, REV2_AUX_SYNC_WORD, REV2_DRC_VERSION_SINGLE_BAND,
+    decode_core_frame, decode_core_frame_with_info, iter_frames, parse_aux_data,
+    parse_frame_header, parse_rev2_aux, DownmixType, AUX_SYNC_WORD, AUX_TIME_STAMP_MARKER,
+    REV2_AUX_SYNC_WORD, REV2_DRC_VERSION_SINGLE_BAND,
 };
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/dts_5_frames.bin");
@@ -71,6 +72,24 @@ fn fixture_frames_carry_no_optional_chunks() {
         frames += 1;
     }
     assert_eq!(frames, 5);
+}
+
+/// The §5.6 Table 5-30 walk runs off the real end-of-audio cursor:
+/// on the fixture (TIMEF/AUXF clear, CPF·DYNF clear) the
+/// `*_with_info` decode must produce bit-identical PCM to the plain
+/// decode plus an empty optional-information region.
+#[test]
+fn fixture_decode_with_info_matches_plain_decode() {
+    for frame in iter_frames(FIXTURE) {
+        let frame = frame.expect("fixture frame parses");
+        let plain = decode_core_frame(frame.data, &frame.header).expect("plain decode");
+        let (pcm, info) =
+            decode_core_frame_with_info(frame.data, &frame.header).expect("decode with info");
+        assert_eq!(pcm, plain);
+        assert_eq!(info.time_code_stamp, None);
+        assert_eq!(info.aux_bytes, Vec::<u8>::new());
+        assert_eq!(info.ocrc, None);
+    }
 }
 
 /// Compose a full-size frame — a real fixture header re-encoded with

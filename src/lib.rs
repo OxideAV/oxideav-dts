@@ -486,6 +486,7 @@ mod joint_subband;
 mod lfe_fir_coeff;
 mod lfe_interp;
 mod lfe_synth;
+mod optional_info;
 mod qmf_assemble;
 mod qmf_multichannel;
 mod qmf_synth;
@@ -560,6 +561,7 @@ pub use crate::lfe_interp::LfeInterpolationSelection;
 pub use crate::lfe_synth::{
     LfeChannel, LfeChannelError, LfeInterpError, LfeInterpolator, LFE_HISTORY_LEN, LFE_SCALE_STEP,
 };
+pub use crate::optional_info::{decode_optional_info_at, OptionalInfo, MAX_AUX_BYTE_COUNT};
 pub use crate::qmf_assemble::{
     assemble_xin, fir_step, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
     PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,
@@ -585,8 +587,8 @@ pub use crate::subframe::{
     ChannelSideInfoParams, PrimarySideInfo, SideInfoTail, MAX_PRIMARY_CHANNELS,
 };
 pub use crate::subframe_pcm::{
-    decode_core_frame, CoreFrameDecodeError, CoreStreamDecoder, Subframe, SubframePcm,
-    SubframePcmDecoder, SubframePcmError, PCM_PER_SUBBAND_ROW,
+    decode_core_frame, decode_core_frame_with_info, CoreFrameDecodeError, CoreStreamDecoder,
+    Subframe, SubframePcm, SubframePcmDecoder, SubframePcmError, PCM_PER_SUBBAND_ROW,
 };
 pub use crate::sum_diff::{
     front_sum_difference_required, sum_difference_decode_f64, sum_difference_decode_i32,

@@ -178,6 +178,18 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   `JOIN_SCALES` factor, on the decoded sub-band matrices **before** QMF
   synthesis. `JOINX > 0` frames now decode end to end.
 
+- **§5.6 Unpack Optional Information (Table 5-30)** —
+  `decode_optional_info_at` walks the flag-gated region after the
+  last audio-data array (`TIMES` time code stamp when `TIMEF`,
+  `AUXCT`/`AUXD` auxiliary bytes when `AUXF`, `OCRC` when
+  `CPF && DYNF` — surfaced raw per the spec's "shall not be
+  applied"), and the `*_with_info` decode entry points
+  (`decode_core_frame_with_info`,
+  `SubframePcmDecoder::decode_core_frame_with_info_into`,
+  `CoreStreamDecoder::decode_frame_with_info`) run it from the real
+  end-of-audio bit cursor so callers get PCM + optional info in one
+  pass (validated bit-identical to the plain decode on the bundled
+  fixture).
 - **§D.11 downmix scale-factor tables** — `DMIX_TABLE` (241 × u16,
   the Q15 `DmixTable` column, `-60 dB` … unity) and `INV_DMIX_TABLE`
   (201 × u32, the Q16 `InvDmixTbl` column for `DmixTblIndex >= 40`),
