@@ -12,13 +12,14 @@
 //!
 //! The core property: a `DYNF != 0` frame whose audio-data and
 //! side-info bytes are identical to a baseline `DYNF == 0` frame decodes
-//! to the baseline PCM scaled, sample for sample, by the §D.4
-//! [`oxideav_dts::drc_range`] multiplier (round-to-nearest, `i32`
+//! to the baseline PCM scaled, sample for sample, by the signed-Q2
+//! [`oxideav_dts::dts_dynrng_to_linear`] gain (`dB = (int8)code ×
+//! 0.25`, `docs/audio/dts/dts-drc-dynrng.md`; round-to-nearest, `i32`
 //! saturated). This proves both the tail framing (the cursor lands on
-//! the §5.5 region after the 8-bit `RANGE` index) and the post-QMF
+//! the §5.5 region after the 8-bit `RANGE` code) and the post-QMF
 //! multiply.
 
-use oxideav_dts::{decode_core_frame, drc_range, parse_frame_header};
+use oxideav_dts::{decode_core_frame, dts_dynrng_to_db, dts_dynrng_to_linear, parse_frame_header};
 
 /// Pack a list of `(value, width)` fields MSB-first into bytes.
 fn pack_fields(fields: &[(u32, u8)]) -> Vec<u8> {
@@ -160,17 +161,18 @@ fn baseline_nfe_frame_decodes_to_nonzero_pcm() {
 }
 
 #[test]
-fn dynf_frame_scales_baseline_pcm_by_d4_range() {
+fn dynf_frame_scales_baseline_pcm_by_signed_q2_gain() {
     let samples = [7i32, -7, 5, -5, 3, -3, 6, -6];
 
     let base_bytes = build_frame(false, 0, &samples);
     let base_hdr = parse_frame_header(&base_bytes).unwrap();
     let base_pcm = decode_core_frame(&base_bytes, &base_hdr).expect("baseline decodes");
 
-    // RANGE index 207 -> §D.4 multiplier 10.0 (+20 dB).
-    let range_index = 207u8;
-    let range = drc_range(range_index);
-    assert_eq!(range, 10.0);
+    // RANGE code 80 -> signed Q2 +20 dB -> linear gain 10.0.
+    let range_index = 80u8;
+    assert_eq!(dts_dynrng_to_db(range_index), 20.0);
+    let range = dts_dynrng_to_linear(range_index);
+    assert!((range - 10.0).abs() < 1e-12);
 
     let dynf_bytes = build_frame(true, range_index, &samples);
     let dynf_hdr = parse_frame_header(&dynf_bytes).unwrap();
@@ -180,7 +182,7 @@ fn dynf_frame_scales_baseline_pcm_by_d4_range() {
     assert_eq!(dynf_pcm.len(), base_pcm.len());
     assert_eq!(dynf_pcm[0].len(), base_pcm[0].len());
 
-    // Every sample is the baseline scaled by the §D.4 RANGE multiplier.
+    // Every sample is the baseline scaled by the signed-Q2 linear gain.
     for (i, (&b, &d)) in base_pcm[0].iter().zip(dynf_pcm[0].iter()).enumerate() {
         assert_eq!(
             d,
@@ -202,10 +204,10 @@ fn dynf_unity_range_equals_baseline() {
     let base_hdr = parse_frame_header(&base_bytes).unwrap();
     let base_pcm = decode_core_frame(&base_bytes, &base_hdr).unwrap();
 
-    // RANGE index 127 -> §D.4 unity multiplier 1.0 (0 dB): the DYNF
+    // RANGE code 0 -> signed-Q2 unity gain 1.0 (0 dB): the DYNF
     // frame must decode bit-identically to the baseline (the only stream
     // difference being the consumed header bit + the 8-bit RANGE field).
-    let unity_bytes = build_frame(true, 127, &samples);
+    let unity_bytes = build_frame(true, 0, &samples);
     let unity_hdr = parse_frame_header(&unity_bytes).unwrap();
     let unity_pcm = decode_core_frame(&unity_bytes, &unity_hdr).unwrap();
 

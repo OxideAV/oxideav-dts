@@ -146,8 +146,8 @@ fn composed_frame_round_trips_both_chunks() {
     w.push_bits(1, 1); // bDialnormMetadata
     w.push_bits(u64::from(REV2_DRC_VERSION_SINGLE_BAND), 4);
     w.align_byte(); // nByteAlign0
-    w.push_bits(127, 8); // subsubframe 0 DRC (unity)
-    w.push_bits(87, 8); // subsubframe 1 DRC (§D.4 0.3162)
+    w.push_bits(0, 8); // subsubframe 0 DRC (signed-Q2 0 -> unity)
+    w.push_bits(0xD8, 8); // subsubframe 1 DRC (signed -40 -> -10 dB)
     w.push_bits(9, 5); // DIALNORM_rev2aux -> -9 dB
     let mut rev2_chunk = w.into_bytes();
     // Pad so the CRC lands exactly size-2 bytes past the size field
@@ -193,10 +193,11 @@ fn composed_frame_round_trips_both_chunks() {
     assert!((es - 3277.0 / 32768.0).abs() < 1e-12); // -20 dB
     let drc = rev2.drc.as_ref().expect("DRC present");
     assert_eq!(drc.version, 1);
-    assert_eq!(drc.codes, vec![127, 87]);
+    assert_eq!(drc.codes, vec![0, 0xD8]);
+    assert_eq!(drc.gains_db(), vec![0.0, -10.0]);
     let mult = drc.multipliers();
     assert_eq!(mult[0], 1.0);
-    assert!((mult[1] - 0.3162).abs() < 1e-12);
+    assert!((mult[1] - 10f64.powf(-0.5)).abs() < 1e-12);
     assert_eq!(rev2.dialnorm, Some(9));
     assert_eq!(rev2.dialog_normalization_gain_db(), Some(-9));
     assert_eq!(rev2.crc16, 0x2468);

@@ -621,10 +621,10 @@ impl From<crate::Error> for CoreFrameDecodeError {
 ///
 /// The frame header's `DYNF` (embedded dynamic range) and `CPF`
 /// (side-info CRC) tail fields are likewise handled: each subframe's
-/// tail walk consumes the 8-bit `RANGE` index (`DYNF != 0`) and the
-/// 16-bit `SICRC` word (`CPF == 1`), and the §D.4 [`crate::drc_range`]
-/// multiplier is applied to that subframe's reconstructed PCM after QMF
-/// synthesis (per §5.4.1).
+/// tail walk consumes the 8-bit signed-Q2 `RANGE` code (`DYNF != 0`)
+/// and the 16-bit `SICRC` word (`CPF == 1`), and the
+/// [`crate::dts_dynrng_to_linear`] gain is applied to that subframe's
+/// reconstructed PCM after QMF synthesis (per §5.4.1).
 ///
 /// The §D.10 VQ / ADPCM blockers (from the §5.5 walk) surface as
 /// [`CoreFrameDecodeError::Decode`].
@@ -902,10 +902,13 @@ impl SubframePcmDecoder {
             )?;
 
             // §5.4.1: when DYNF != 0, multiply every reconstructed PCM
-            // sample of this subframe by the §D.4 RANGE multiplier,
-            // applied after QMF synthesis.
-            if let Some(idx) = tail.range_index {
-                apply_range(&mut block, crate::drc_range(idx));
+            // sample of this subframe by the linear DRC gain, applied
+            // after QMF synthesis. The 8-bit RANGE code is signed Q2
+            // (dB = (int8)code · 0.25; see dts_dynrng_to_db and
+            // docs/audio/dts/dts-drc-dynrng.md) — NOT a raw index into
+            // the offset-binary §D.4 presentation table.
+            if let Some(code) = tail.range_index {
+                apply_range(&mut block, crate::dts_dynrng_to_linear(code));
             }
 
             for (ch, samples) in block.into_iter().enumerate() {
@@ -918,10 +921,10 @@ impl SubframePcmDecoder {
     }
 }
 
-/// Apply the §5.4.1 `RANGE` dynamic-range multiplier (the §D.4
-/// [`crate::drc_range`] linear gain) to every reconstructed PCM sample
-/// of one subframe, in place, after QMF synthesis. Results are rounded
-/// to the nearest integer and saturated to the `i32` range.
+/// Apply the §5.4.1 `RANGE` dynamic-range multiplier (the signed-Q2
+/// [`crate::dts_dynrng_to_linear`] gain) to every reconstructed PCM
+/// sample of one subframe, in place, after QMF synthesis. Results are
+/// rounded to the nearest integer and saturated to the `i32` range.
 fn apply_range(block: &mut SubframePcm, range: f64) {
     if range == 1.0 {
         return;
@@ -1601,19 +1604,19 @@ mod tests {
         assert!(pcm[0].iter().all(|&s| s == 0));
     }
 
-    /// A frame whose header sets `DYNF` carries an 8-bit `RANGE` index in
+    /// A frame whose header sets `DYNF` carries an 8-bit `RANGE` code in
     /// each subframe's side-info tail; `decode_core_frame` consumes it
-    /// and (for a non-unity index) the §D.4 multiplier scales the PCM.
-    /// With an all-zero (NoBits) subframe the PCM is zero regardless of
-    /// `RANGE`, which proves only the framing/cursor is correct — the
-    /// `apply_range` value is covered by `range_unity_is_noop` /
-    /// `range_scales_pcm`.
+    /// and (for a non-unity code) the signed-Q2 linear gain scales the
+    /// PCM. With an all-zero (NoBits) subframe the PCM is zero
+    /// regardless of `RANGE`, which proves only the framing/cursor is
+    /// correct — the `apply_range` value is covered by
+    /// `range_unity_is_noop` / `range_scales_pcm`.
     #[test]
     fn decode_core_frame_consumes_range_tail() {
         let mut bytes = encode_clean_header(true, false); // DYNF=1, CPF=0
         let mut body = nobits_ach_body(false);
         body.extend(nobits_side_info());
-        body.push((127, 8)); // RANGE index 127 -> unity (no SICRC, CPF=0)
+        body.push((0, 8)); // RANGE code 0 -> unity (no SICRC, CPF=0)
         body.push((0xffff, 16)); // §5.5 DSYNC
         let body_bytes = pack_fields(&body);
         bytes.extend_from_slice(&body_bytes);
@@ -1690,35 +1693,36 @@ mod tests {
         assert!(pcm[0].iter().all(|&s| s == 0));
     }
 
-    /// `apply_range` with the §D.4 unity index leaves the PCM untouched.
+    /// `apply_range` with the unity code (signed-Q2 `0` = 0 dB) leaves
+    /// the PCM untouched.
     #[test]
     fn range_unity_is_noop() {
         let mut block: SubframePcm = vec![vec![100, -200, 0, i32::MAX, i32::MIN]];
-        apply_range(&mut block, crate::drc_range(127)); // 1.0
+        apply_range(&mut block, crate::dts_dynrng_to_linear(0)); // 1.0
         assert_eq!(block[0], vec![100, -200, 0, i32::MAX, i32::MIN]);
     }
 
-    /// `apply_range` scales every sample by the §D.4 multiplier with
-    /// round-to-nearest and `i32` saturation.
+    /// `apply_range` scales every sample by the signed-Q2 linear gain
+    /// with round-to-nearest and `i32` saturation.
     #[test]
     fn range_scales_pcm() {
-        // Index 47 -> 0.1; index 207 -> 10.0.
+        // Signed-Q2 code -80 -> -20 dB -> 0.1; code +80 -> +20 dB -> 10.0.
+        let minus_20_db = 0u8.wrapping_sub(80);
         let mut down: SubframePcm = vec![vec![1000, -1000, 5]];
-        apply_range(&mut down, crate::drc_range(47)); // 0.1
+        apply_range(&mut down, crate::dts_dynrng_to_linear(minus_20_db)); // 0.1
         assert_eq!(down[0], vec![100, -100, 1]); // 5*0.1=0.5 -> round 1
 
         let mut up: SubframePcm = vec![vec![10, -10, i32::MAX]];
-        apply_range(&mut up, crate::drc_range(207)); // 10.0
+        apply_range(&mut up, crate::dts_dynrng_to_linear(80)); // 10.0
         assert_eq!(up[0], vec![100, -100, i32::MAX]); // saturates
     }
 
     /// Build a complete one-channel all-`ABITS==0` (NoBits) raw-BE Core
     /// frame — the same proven layout `decode_core_frame_no_bits_round_trips`
-    /// uses — with a non-unity §D.4 `RANGE` index optionally injected so
-    /// the post-QMF PCM is forced non-zero (exercising the `apply_range`
-    /// path even though the §5.5 audio data is silent). When `dynf` is
-    /// `false` no `RANGE` field is present and the frame decodes to
-    /// all-zero PCM.
+    /// uses — with a signed-Q2 `RANGE` code optionally injected so
+    /// the `apply_range` path is exercised even though the §5.5 audio
+    /// data is silent. When `dynf` is `false` no `RANGE` field is
+    /// present and the frame decodes to all-zero PCM.
     fn build_nobits_frame(dynf: bool, range_index: u8) -> Vec<u8> {
         let mut header = crate::parse_frame_header(&[
             0x7f, 0xfe, 0x80, 0x01, 0xfc, 0x3c, 0x3f, 0xf0, 0xb5, 0xe0, 0x01, 0x38, 0x00, 0x03,

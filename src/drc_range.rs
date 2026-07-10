@@ -1,20 +1,50 @@
-//! §D.4 Dynamic Range Control (`RANGE`) look-up table for the DTS Core
-//! §5.4.1 side-information `DYNF != 0` tail.
+//! DTS Dynamic Range Control: the signed-Q2 `dts_dynrng_to_db()`
+//! code→dB mapping (§5.4.1 / §5.7.2) plus the §D.4 "Dynamic Range
+//! Control" presentation table.
 //!
-//! Transcribed verbatim from ETSI TS 102 114 V1.3.1 (2011-08) Annex D
-//! §D.4 "Dynamic Range Control" (staged at
-//! `docs/audio/dts/etsi-ts-102114-dts-coherent-acoustics.pdf`, PDF
-//! p.195-197). The spec table is laid out as two
-//! index/value groups per printed row; this module preserves the
-//! `Multiplier` column only (the linear gain factor), indexed by the
-//! 8-bit `nIndex` field `0..=255`. The companion `Q18 binary` column
-//! is the same value in fixed point and the `Log Multiplier (dB)`
-//! column is informative (an exact 0.25 dB ramp from −31.75 dB to
-//! +32.00 dB) — neither is needed for a floating-point decode.
+//! ## The wire format: an 8-bit signed Q2 code (round 408)
 //!
-//! Per the §5.4.1 Table 5-28 pseudocode the looked-up `RANGE`
-//! multiplies every reconstructed PCM sample, applied **after** the
-//! §C.2.5 QMF synthesis:
+//! Per §5.4.1 (`RANGE` field description, recovered as a closed-form
+//! function in the freshly staged `docs/audio/dts/dts-drc-dynrng.md`):
+//!
+//! > "Each coefficient is **8-bit signed fractional Q2 binary** and
+//! > represents a logarithmic gain value as shown in clause D.4
+//! > giving a range of **±31,75 dB in steps of 0,25 dB**. Dynamic
+//! > range compression is affected by multiplying the decoded audio
+//! > samples by the linear coefficient."
+//!
+//! So the byte the bitstream carries (`ExtractBits(8)` in the §5.4.1
+//! `DYNF != 0` tail, and each `subsubFrameDRC_Rev2AUX[]` byte of the
+//! §5.7.2 Rev2AUX chunk) is a **two's-complement signed Q2** value:
+//!
+//! ```text
+//! dB     = (int8_t)code × 0.25          // dts_dynrng_to_db()
+//! linear = 10^(dB / 20)                 // multiplies each sample
+//! ```
+//!
+//! Code `0` is therefore **unity** (0 dB), and the applied gain is
+//! `10^(dB/20)`, post-QMF ([`dts_dynrng_to_db`] /
+//! [`dts_dynrng_to_linear`]).
+//!
+//! ## The §D.4 table is an offset-binary *presentation* — do not
+//! index it with the raw code
+//!
+//! Annex D §D.4 (PDF p.195-197) prints the same mapping as a 256-row
+//! `Index | Q18 binary | Multiplier | Log Multiplier (dB)` table,
+//! where `dB(Index) = (Index − 127) × 0.25` — i.e. the printed
+//! `Index` column is **offset-binary** (`Index = signed_code + 127`;
+//! Index `127` = code `0` = 0 dB). [`DRC_RANGE_MULTIPLIER`] preserves
+//! the printed `Multiplier` column keyed by that printed Index.
+//! Indexing it directly with a raw wire code (`table[code]`) is off
+//! by 127 steps — code `0` would wrongly yield −31.75 dB — which is
+//! exactly the correctness trap `docs/audio/dts/dts-drc-dynrng.md`
+//! documents ("Why the §D.4 table was reverted"). Decoders must use
+//! the signed-Q2 function; the table stays available as the §D.4
+//! reference data and is cross-checked against the function in the
+//! tests below.
+//!
+//! §5.4.1 Table 5-28 application pseudocode (the `RANGE` multiply
+//! runs **after** the §C.2.5 QMF synthesis):
 //!
 //! ```text
 //! if ( DYNF != 0 ) {
@@ -26,23 +56,57 @@
 //! }
 //! ```
 //!
-//! Index `127` maps to the unity multiplier `1.0000` (0.0000 dB),
-//! confirming the index alignment.
-//!
 //! This module is feature-independent (no `oxideav-core` dep), so it
 //! is available under both the default and `--no-default-features`
 //! build modes.
 
-/// Number of entries in the §D.4 `RANGE` table — the full range of the
-/// 8-bit `nIndex` field (`ExtractBits(8)`).
+/// The §5.4.1 / §5.7.2 `dts_dynrng_to_db()` function: interpret the
+/// 8-bit DRC code from the bitstream as **two's-complement signed Q2**
+/// and return its dB gain (`0.25` dB per LSB).
+///
+/// Per `docs/audio/dts/dts-drc-dynrng.md`: input spans the full byte
+/// (`0x00..=0xFF` → signed `−128..=+127`), output spans
+/// `[−32.00 dB, +31.75 dB]` in 0.25 dB steps (the spec's nominal
+/// usable range is ±31.75 dB; the extreme `0x80` = −32.0 dB sits just
+/// outside it). Code `0` is unity (0 dB).
+#[must_use]
+pub fn dts_dynrng_to_db(code: u8) -> f64 {
+    // Sign-extend: two's complement, then Q2 -> 0.25 dB / LSB.
+    f64::from(code as i8) * 0.25
+}
+
+/// The linear gain a §5.4.1 `RANGE` / §5.7.2 Rev2AUX DRC code applies
+/// to every reconstructed PCM sample: `10^(dts_dynrng_to_db(code)/20)`
+/// (§5.4.1: "Dynamic range compression is affected by multiplying the
+/// decoded audio samples by the linear coefficient").
+///
+/// Code `0` returns exactly `1.0`.
+#[must_use]
+pub fn dts_dynrng_to_linear(code: u8) -> f64 {
+    if code == 0 {
+        return 1.0;
+    }
+    10f64.powf(dts_dynrng_to_db(code) / 20.0)
+}
+
+/// Number of rows in the printed §D.4 table (`Index` column `0..=255`).
 pub const DRC_RANGE_LEN: usize = 256;
 
-/// The §D.4 unity-gain index (`RANGE == 1.0000`, `0.0000` dB).
+/// The §D.4 unity-gain **printed Index** (`RANGE == 1.0000`,
+/// `0.0000` dB). Note this is the offset-binary presentation index,
+/// not a wire code — the wire code for unity is `0`
+/// ([`dts_dynrng_to_linear`]).
 pub const DRC_RANGE_UNITY_INDEX: usize = 127;
 
-/// §D.4 Dynamic Range Control multiplier table (`RANGEtbl`), indexed by
-/// the 8-bit `nIndex`. Entry `i` is the linear gain applied to every
-/// reconstructed PCM sample when `DYNF != 0` (see [`drc_range`]).
+/// §D.4 Dynamic Range Control multiplier table, keyed by the table's
+/// **printed offset-binary `Index` column** (`Index = signed_code +
+/// 127`; row 127 = 0 dB). Row `i` is `10^((i − 127)·0.25 / 20)` to the
+/// spec's 4-decimal rounding.
+///
+/// **Do not index this with the raw 8-bit wire code** — the §5.4.1 /
+/// §5.7.2 DRC byte is two's-complement signed Q2 and must go through
+/// [`dts_dynrng_to_db`] / [`dts_dynrng_to_linear`] (see the module
+/// docs and `docs/audio/dts/dts-drc-dynrng.md`).
 ///
 /// Transcribed from ETSI TS 102 114 V1.3.1 §D.4, "Multiplier" column,
 /// indices `0..=255`.
@@ -72,12 +136,15 @@ pub static DRC_RANGE_MULTIPLIER: [f64; DRC_RANGE_LEN] = [
     39.8107,
 ];
 
-/// Look up the §D.4 Dynamic Range Control `RANGE` multiplier for an
-/// 8-bit `nIndex` (`ExtractBits(8)`), returning the linear gain factor
-/// applied to every reconstructed PCM sample when `DYNF != 0`.
+/// Look up a row of the printed §D.4 table by its **offset-binary
+/// `Index` column** (`Index = signed_code + 127`).
 ///
-/// `index` is taken modulo nothing — it is the raw 8-bit field, so all
-/// `u8` values are in range by construction.
+/// This is a reference-data accessor for the table as printed, *not*
+/// the wire-code resolution: feeding the raw §5.4.1 / §5.7.2 DRC byte
+/// here is off by 127 steps (code `0` would wrongly yield −31.75 dB).
+/// Decode wire codes with [`dts_dynrng_to_linear`] /
+/// [`dts_dynrng_to_db`] instead (`docs/audio/dts/dts-drc-dynrng.md`,
+/// "Why the §D.4 table was reverted").
 #[must_use]
 pub fn drc_range(index: u8) -> f64 {
     DRC_RANGE_MULTIPLIER[index as usize]
@@ -123,6 +190,67 @@ mod tests {
                 "entry {i} not greater than predecessor"
             );
         }
+    }
+
+    // -----------------------------------------------------------
+    // dts_dynrng_to_db / dts_dynrng_to_linear (signed Q2, round 408)
+    // -----------------------------------------------------------
+
+    /// The signed-Q2 anchors from `docs/audio/dts/dts-drc-dynrng.md`:
+    /// code 0 = 0 dB (unity), 0.25 dB per LSB in both directions, and
+    /// the two's-complement extremes.
+    #[test]
+    fn dynrng_signed_q2_anchors() {
+        assert_eq!(dts_dynrng_to_db(0), 0.0);
+        assert_eq!(dts_dynrng_to_linear(0), 1.0);
+        assert_eq!(dts_dynrng_to_db(1), 0.25);
+        assert_eq!(dts_dynrng_to_db(0xFF), -0.25); // signed -1
+        assert_eq!(dts_dynrng_to_db(0x7F), 31.75); // +127
+        assert_eq!(dts_dynrng_to_db(0x80), -32.0); // -128 (outside nominal)
+        assert_eq!(dts_dynrng_to_db(0x81), -31.75); // -127
+                                                    // +20 dB = 80 quarter-dB steps -> linear 10.0.
+        assert_eq!(dts_dynrng_to_db(80), 20.0);
+        assert!((dts_dynrng_to_linear(80) - 10.0).abs() < 1e-12);
+        // -20 dB -> linear 0.1.
+        let minus_20 = 0u8.wrapping_sub(80);
+        assert_eq!(dts_dynrng_to_db(minus_20), -20.0);
+        assert!((dts_dynrng_to_linear(minus_20) - 0.1).abs() < 1e-12);
+    }
+
+    /// The closed-form function and the printed §D.4 table describe
+    /// the same mapping, related by `Index = signed_code + 127`: for
+    /// every signed code in the table's domain (−127..=+127, i.e.
+    /// printed Index 0..=254) the function's linear gain matches the
+    /// table row to the spec's 4-decimal rounding.
+    #[test]
+    fn dynrng_function_matches_d4_table_via_offset_binary_index() {
+        for signed in -127i32..=127 {
+            let code = signed as i8 as u8;
+            let index = (signed + 127) as usize;
+            let from_fn = dts_dynrng_to_linear(code);
+            let from_table = DRC_RANGE_MULTIPLIER[index];
+            // The printed Multiplier column is rounded to 4 decimals,
+            // so the absolute disagreement is bounded by half an ULP
+            // of that rounding.
+            assert!(
+                (from_fn - from_table).abs() < 6e-5,
+                "code {signed}: fn {from_fn} vs table[{index}] {from_table}"
+            );
+        }
+        // The extremes that do NOT correspond: table row 255 is
+        // +32 dB (no reachable signed code maps there via the offset),
+        // and code -128 (-32 dB) has no table row.
+        assert_eq!(drc_range(255), 39.8107);
+        assert!((dts_dynrng_to_linear(0x80) - 10f64.powf(-32.0 / 20.0)).abs() < 1e-12);
+    }
+
+    /// Demonstrate the documented off-by-127 trap: raw-code indexing
+    /// of the §D.4 table disagrees with the signed-Q2 function at
+    /// code 0 (the most common wire value).
+    #[test]
+    fn raw_code_table_indexing_is_the_documented_trap() {
+        assert_eq!(drc_range(0), 0.0259); // table row 0 = -31.75 dB
+        assert_eq!(dts_dynrng_to_linear(0), 1.0); // wire code 0 = 0 dB
     }
 
     #[test]

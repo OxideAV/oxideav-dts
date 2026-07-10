@@ -38,6 +38,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   `AHCRC` skip, and the §5.6 `OCRC` docs now cite the normative
   reason instead of a polynomial docs-gap.
 
+- Round 408 (2026-07-10) — **`dts_dynrng_to_db` / `dts_dynrng_to_linear`
+  signed-Q2 DRC resolution** (`src/drc_range.rs`): the §5.4.1 `RANGE`
+  and §5.7.2 `subsubFrameDRC_Rev2AUX[]` bytes are **8-bit signed Q2
+  two's-complement** codes (`dB = (int8)code × 0.25`, linear gain
+  `10^(dB/20)`), per the freshly staged
+  `docs/audio/dts/dts-drc-dynrng.md` (which recovers the spec's
+  `dts_dynrng_to_db()` body as a closed form). Cross-checked against
+  the §D.4 table via the offset-binary relation
+  `Index = signed_code + 127` over the full ±127 domain.
+  `Rev2Drc::gains_db` joins `Rev2Drc::multipliers` on the Rev2AUX
+  side.
+
 - Round 406 (2026-07-10) — **§D.11 downmix scale-factor tables +
   §5.7.1 coefficient-code resolver** (`src/dmix_coeff.rs`): the full
   Annex D §D.11 "Look-up Table for Downmix Scale Factors" is
@@ -255,6 +267,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
     `DYNF != 0`, and consumes `SICRC` when `CPF == 1`.
 
 ### Fixed
+
+- Round 408 (2026-07-10) — **`DYNF` dynamic-range gain was off by 127
+  quarter-dB steps**: the `decode_core_frame` / `CoreStreamDecoder`
+  post-QMF `RANGE` application (and `Rev2Drc::multipliers`) previously
+  indexed the §D.4 table with the raw wire byte, i.e. treated the
+  offset-binary *presentation* Index as the code — wire code `0`
+  (the common "no change" value) decoded to −31.75 dB instead of
+  0 dB. The freshly staged `docs/audio/dts/dts-drc-dynrng.md`
+  documents this exact trap ("Why the §D.4 table was reverted"); both
+  call sites now resolve codes through the signed-Q2
+  `dts_dynrng_to_linear`. The `drc_range` table accessor remains,
+  re-documented as the §D.4 printed-Index reference lookup.
 
 - Round 350 — the `decode_core_frame` empty-tail gate and the
   `decode_audio_coding_header_at` `AHCRC` read were both keyed off

@@ -67,17 +67,18 @@
 //! field behind them) as unavailable.
 //!
 //! The spec converts each DRC byte "into a dB gain by function
-//! dts_dynrng_to_db()" whose body is **not printed** in the staged
-//! spec. Since §5.7.2.2 states these values "should be used instead
-//! of any dynamic range control coefficients found in the legacy
-//! core stream (indicated by flag DYNF)" — whose 8-bit code space is
-//! the §D.4 `RANGEtbl` — [`Rev2Drc::multipliers`] resolves the codes
-//! through the same §D.4 table; the raw codes stay available for
-//! callers that map them differently.
+//! dts_dynrng_to_db()", recovered as a closed form in
+//! `docs/audio/dts/dts-drc-dynrng.md`: the byte is 8-bit signed Q2
+//! two's-complement, `dB = (int8)code × 0.25`
+//! ([`crate::dts_dynrng_to_db`]). §5.7.2.2 states these values
+//! "should be used instead of any dynamic range control coefficients
+//! found in the legacy core stream (indicated by flag DYNF)";
+//! [`Rev2Drc::gains_db`] / [`Rev2Drc::multipliers`] resolve the codes
+//! through that function, and the raw codes stay available.
 
 use crate::bitreader::BitReader;
 use crate::header::DtsFrameHeader;
-use crate::{dmix_scale, drc_range, Error, Result};
+use crate::{dmix_scale, dts_dynrng_to_db, dts_dynrng_to_linear, Error, Result};
 
 /// The §5.7.2 Rev2 auxiliary-data sync word (`nSYNCRev2AUX`),
 /// DWORD-aligned from the beginning of the core frame.
@@ -103,17 +104,30 @@ pub struct Rev2Drc {
 }
 
 impl Rev2Drc {
-    /// The per-subsubframe linear DRC multipliers, resolving each
-    /// 8-bit code through the §D.4 `RANGEtbl` — the code space of the
-    /// legacy-core DRC coefficients these values replace (§5.7.2.2:
-    /// "the DRC values in the Rev2AUX data chunk should be used
-    /// instead of any dynamic range control coefficients found in the
-    /// legacy core stream"). The spec's own `dts_dynrng_to_db()`
-    /// body is not printed in the staged PDF; callers needing a
-    /// different mapping can read [`Self::codes`] directly.
+    /// The per-subsubframe DRC gains in dB, resolving each 8-bit code
+    /// through the §5.7.2 `dts_dynrng_to_db()` function
+    /// ([`crate::dts_dynrng_to_db`]: the code is 8-bit signed Q2
+    /// two's-complement, `dB = (int8)code × 0.25`, per
+    /// `docs/audio/dts/dts-drc-dynrng.md`).
+    #[must_use]
+    pub fn gains_db(&self) -> Vec<f64> {
+        self.codes.iter().map(|&c| dts_dynrng_to_db(c)).collect()
+    }
+
+    /// The per-subsubframe linear DRC multipliers
+    /// (`10^(gains_db/20)`, [`crate::dts_dynrng_to_linear`]) — the
+    /// gain applied to the decoded samples of each subsubframe.
+    /// §5.7.2.2: "the DRC values in the Rev2AUX data chunk should be
+    /// used instead of any dynamic range control coefficients found
+    /// in the legacy core stream" (the `DYNF`/`RANGE` path, which
+    /// shares the same signed-Q2 code space). Callers needing the raw
+    /// bytes can read [`Self::codes`] directly.
     #[must_use]
     pub fn multipliers(&self) -> Vec<f64> {
-        self.codes.iter().map(|&c| drc_range(c)).collect()
+        self.codes
+            .iter()
+            .map(|&c| dts_dynrng_to_linear(c))
+            .collect()
     }
 }
 
@@ -480,7 +494,8 @@ mod tests {
         // 16-block frame -> 512 samples -> 2 subsubframes -> 2 DRC
         // bytes (Table 5-34 row 1).
         let header = synth_header(2, 0);
-        let drc_codes = [127u8, 128u8]; // unity, +0.25 dB (§D.4)
+        // Signed-Q2 wire codes: 0 -> 0 dB (unity), 1 -> +0.25 dB.
+        let drc_codes = [0u8, 1u8];
         let bytes = chunk(
             8,
             |w| {
@@ -502,9 +517,10 @@ mod tests {
         let drc = chunk.drc.as_ref().expect("DRC present");
         assert_eq!(drc.version, 1);
         assert_eq!(drc.codes, drc_codes);
+        assert_eq!(drc.gains_db(), vec![0.0, 0.25]);
         let mult = drc.multipliers();
-        assert_eq!(mult[0], 1.0); // §D.4 index 127 = unity
-        assert!((mult[1] - 1.0292).abs() < 1e-12); // §D.4 index 128
+        assert_eq!(mult[0], 1.0); // signed-Q2 code 0 = unity
+        assert!((mult[1] - 10f64.powf(0.25 / 20.0)).abs() < 1e-12); // +0.25 dB
         assert_eq!(chunk.dialnorm, Some(21));
         assert_eq!(chunk.dialog_normalization_gain_db(), Some(-21));
         assert_eq!(chunk.crc16, 0xFEED);

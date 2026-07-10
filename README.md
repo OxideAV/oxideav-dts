@@ -27,8 +27,9 @@ correlation 1.0, 100 % sign agreement on both channels), confirming the
 reconstruction chain is correct up to the implementation-defined output
 `rScale` gain (the spec leaves §C.2.5 `rScale` non-normative). The
 §5.4.1 Table 5-28 side-info tail is handled for **dynamic range**
-(`DYNF`: the 8-bit `RANGE` index is read and the §D.4 multiplier applied
-to the reconstructed PCM after QMF synthesis) and the **side-info CRC**
+(`DYNF`: the 8-bit `RANGE` code is read as signed Q2 —
+`dB = (int8)code × 0.25`, `dts_dynrng_to_db` — and the linear gain
+applied to the reconstructed PCM after QMF synthesis) and the **side-info CRC**
 (`CPF`: the 16-bit `SICRC` is consumed for framing, not verified).
 **LFE-bearing frames** (`LFF != 0`) now decode correctly: the §5.5 LFE
 phase (`2·LFF·nSSC` 8-bit samples + `LFEscaleIndex`) is consumed before
@@ -138,7 +139,7 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   §5.4.1 side-info walk (Table 5-28) **including the `RANGE`/`SICRC`
   tail**, and the §5.5 + §C.2.5 reconstruction into one raw-bytes-to-PCM
   call. It decodes every frame whose channels all have `JOINX == 0`,
-  including `DYNF != 0` frames (the §D.4 dynamic-range multiplier is
+  including `DYNF != 0` frames (the signed-Q2 dynamic-range gain is
   applied to each subframe's PCM after synthesis) and `CPF == 1` frames
   (the `SICRC` word is consumed). `SubframePcmDecoder` (with
   `decode_subframe` / `decode_frame`) is the lower-level composition of
@@ -164,9 +165,12 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   the per-channel `JOIN_SHUFF[ch]` (3-bit `QSCALES` selector) and the
   `JOIN_SCALES[ch][n]` loop (one biased quantization index per imported
   sub-band `n ∈ [nSUBS[ch], nSUBS[nSourceCh])`, resolved through the
-  §D.3 joint-scale table), the 8-bit `RANGE` dynamic-range index
-  (`DYNF`, looked up via the §D.4 `drc_range` 256-entry multiplier
-  table), and the 16-bit `SICRC` (`CPF`). The resolved `JOIN_SCALES`
+  §D.3 joint-scale table), the 8-bit `RANGE` dynamic-range code
+  (`DYNF`, resolved as **8-bit signed Q2** via `dts_dynrng_to_db` /
+  `dts_dynrng_to_linear` — `dB = (int8)code × 0.25`, per the staged
+  `docs/audio/dts/dts-drc-dynrng.md`; the §D.4 table stays available
+  as reference data keyed by its offset-binary printed Index), and
+  the 16-bit `SICRC` (`CPF`). The resolved `JOIN_SCALES`
   factors are carried in `SideInfoTail::join_scales`.
 - **§D.3 joint-intensity scale table** — `join_scale` /
   `JOIN_SCALE_FACTOR` transcribe the §D.3 `JScaleTbl` (129 entries,
@@ -224,10 +228,11 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   offset (also skipping the reserved field of "unspecified
   duration") and **verified** with the Annex B CRC-16 over the
   `nRev2AUXDataByteSize − 2` covered bytes
-  (`Rev2AuxChunk::crc_valid`). `Rev2Drc::multipliers` resolves the
-  DRC codes through the §D.4 `RANGEtbl` (the legacy-core coefficient
-  space the spec says these values replace; the raw codes stay
-  exposed).
+  (`Rev2AuxChunk::crc_valid`). `Rev2Drc::gains_db` /
+  `Rev2Drc::multipliers` resolve the DRC codes through the §5.7.2
+  `dts_dynrng_to_db()` signed-Q2 function (the legacy-core
+  coefficient space the spec says these values replace; the raw
+  codes stay exposed).
 - **Annex B CRC-16** — `dts_crc16` / `dts_crc16_update` /
   `DTS_CRC16_TABLE`: the single normative DTS CRC (CRC-CCITT,
   polynomial `0x1021`, init `0xFFFF`, MSB-first, no reflection, no
@@ -260,9 +265,6 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   `HCRC` coverage span. The raw 16-bit field stays surfaced for
   pass-through callers; the genuinely testable check words
   (`nAUXCRC16`, `nRev2AUXCRC16`) *are* verified.
-- The §5.7.2 `dts_dynrng_to_db()` conversion body is not printed in
-  the staged spec; `Rev2Drc::multipliers` documents its §D.4-based
-  interpretation and the raw 8-bit DRC codes remain exposed.
 
 ## Usage
 

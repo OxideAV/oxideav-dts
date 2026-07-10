@@ -42,9 +42,11 @@
 //!   (`Error::InvalidSideInfo { field: "JOINX", .. }`) rather than
 //!   guess the variable `JOIN_SCALES` bit count.
 //!
-//! The `RANGE` index the tail decoder captures feeds the §D.4
-//! [`crate::drc_range`] multiplier table; the §5.4.1 pseudocode
-//! applies that gain to every reconstructed PCM sample *after* QMF
+//! The `RANGE` code the tail decoder captures is 8-bit signed Q2
+//! (`dB = (int8)code × 0.25`, [`crate::dts_dynrng_to_db`] /
+//! [`crate::dts_dynrng_to_linear`], per
+//! `docs/audio/dts/dts-drc-dynrng.md`); the §5.4.1 pseudocode applies
+//! that linear gain to every reconstructed PCM sample *after* QMF
 //! synthesis. The `bits_consumed` cursor of the SCALES-block walk
 //! points exactly where the JOIN_SHUFF / RANGE / SICRC reads begin.
 
@@ -345,11 +347,15 @@ pub fn decode_primary_side_info_at(
 #[derive(Debug, Clone, PartialEq, Default)]
 #[non_exhaustive]
 pub struct SideInfoTail {
-    /// The 8-bit `nIndex` of the §5.4.1 `RANGE = RANGEtbl.LookUp(nIndex)`
-    /// dynamic-range field — `Some` iff the frame header's `DYNF != 0`,
-    /// `None` otherwise. Feed it to [`crate::drc_range`] to obtain the
-    /// linear multiplier the §5.4.1 pseudocode applies to every
-    /// reconstructed PCM sample **after** QMF synthesis.
+    /// The 8-bit code of the §5.4.1 `RANGE` dynamic-range field —
+    /// `Some` iff the frame header's `DYNF != 0`, `None` otherwise.
+    /// The code is **8-bit signed Q2 two's-complement**
+    /// (`dB = (int8)code × 0.25`); feed it to
+    /// [`crate::dts_dynrng_to_linear`] to obtain the linear multiplier
+    /// the §5.4.1 pseudocode applies to every reconstructed PCM sample
+    /// **after** QMF synthesis. (Do not use it to raw-index the
+    /// offset-binary §D.4 presentation table — see
+    /// [`crate::dts_dynrng_to_db`].)
     pub range_index: Option<u8>,
     /// Whether a 16-bit `SICRC` side-info CRC word was present and
     /// skipped (`true` iff the frame header's `CPF == 1`). Per §5.4.1
@@ -403,9 +409,9 @@ pub struct SideInfoTail {
 /// `JOIN_SCALES` bits are read for that channel.
 ///
 /// The `RANGE` (DYNF) and `SICRC` (CPF) fields are both fully specified
-/// and handled: `RANGE`'s 8-bit index is captured (the §D.4
-/// [`crate::drc_range`] lookup is applied later, post-QMF) and `SICRC`'s
-/// 16 bits are consumed for framing.
+/// and handled: `RANGE`'s 8-bit signed-Q2 code is captured (the
+/// [`crate::dts_dynrng_to_linear`] gain is applied later, post-QMF)
+/// and `SICRC`'s 16 bits are consumed for framing.
 ///
 /// Returns `(SideInfoTail, bits_consumed)`.
 ///
@@ -880,14 +886,16 @@ mod tests {
 
     #[test]
     fn tail_captures_range_index_when_dynf() {
-        // DYNF=1 -> 8-bit RANGE index; CPF=0.
-        let stream = pack_fields(&[(207, 8)]); // index 207 -> +20 dB / 10.0x
+        // DYNF=1 -> 8-bit RANGE code; CPF=0. Signed-Q2 code 80 =
+        // +20 dB = 10.0x linear.
+        let stream = pack_fields(&[(80, 8)]);
         let (tail, bits) =
             decode_primary_side_info_tail_at(&stream, 0, &[0], &[3], true, false).unwrap();
         assert_eq!(bits, 8);
-        assert_eq!(tail.range_index, Some(207));
+        assert_eq!(tail.range_index, Some(80));
         assert!(!tail.side_info_crc_present);
-        assert_eq!(crate::drc_range(tail.range_index.unwrap()), 10.0);
+        let gain = crate::dts_dynrng_to_linear(tail.range_index.unwrap());
+        assert!((gain - 10.0).abs() < 1e-12);
     }
 
     #[test]
@@ -903,14 +911,15 @@ mod tests {
 
     #[test]
     fn tail_range_then_sicrc_when_both() {
-        // DYNF=1 and CPF=1 -> 8-bit RANGE then 16-bit SICRC, in order.
-        let stream = pack_fields(&[(127, 8), (0x1234, 16)]); // index 127 -> unity
+        // DYNF=1 and CPF=1 -> 8-bit RANGE then 16-bit SICRC, in
+        // order. Signed-Q2 code 0 -> unity (0 dB).
+        let stream = pack_fields(&[(0, 8), (0x1234, 16)]);
         let (tail, bits) =
             decode_primary_side_info_tail_at(&stream, 0, &[0, 0], &[3, 3], true, true).unwrap();
         assert_eq!(bits, 24);
-        assert_eq!(tail.range_index, Some(127));
+        assert_eq!(tail.range_index, Some(0));
         assert!(tail.side_info_crc_present);
-        assert_eq!(crate::drc_range(127), 1.0);
+        assert_eq!(crate::dts_dynrng_to_linear(0), 1.0);
     }
 
     #[test]
@@ -967,10 +976,10 @@ mod tests {
     fn tail_honours_nonzero_bit_offset() {
         // The tail decoder must respect a non-byte-aligned start cursor
         // (the SCALES block rarely ends on a byte boundary).
-        let stream = pack_fields(&[(0b101, 3), (207, 8)]); // 3-bit prefix, then RANGE
+        let stream = pack_fields(&[(0b101, 3), (80, 8)]); // 3-bit prefix, then RANGE
         let (tail, bits) =
             decode_primary_side_info_tail_at(&stream, 3, &[0], &[3], true, false).unwrap();
         assert_eq!(bits, 8);
-        assert_eq!(tail.range_index, Some(207));
+        assert_eq!(tail.range_index, Some(80));
     }
 }

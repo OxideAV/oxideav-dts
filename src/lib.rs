@@ -433,6 +433,17 @@
 //!   polynomial `0x1021`, init `0xFFFF`, MSB-first, no reflection, no
 //!   final XOR), in one-shot, incremental, and compile-time-table
 //!   forms. Per `docs/audio/dts/dts-crc16.md`. Added in round 408.
+//! - [`dts_dynrng_to_db`] / [`dts_dynrng_to_linear`] — the §5.4.1 /
+//!   §5.7.2 DRC code resolution: the 8-bit `RANGE` /
+//!   `subsubFrameDRC_Rev2AUX[]` byte is **signed Q2 two's-complement**
+//!   (`dB = (int8)code × 0.25`, linear gain `10^(dB/20)`), per
+//!   `docs/audio/dts/dts-drc-dynrng.md`. The §D.4 table
+//!   ([`DRC_RANGE_MULTIPLIER`] / [`drc_range`]) remains available as
+//!   reference data keyed by its offset-binary printed Index
+//!   (`Index = signed_code + 127`) — do not raw-index it with wire
+//!   codes. Added in round 408 (which also switched the
+//!   `decode_core_frame` `DYNF` application and
+//!   `Rev2Drc::multipliers` to the signed-Q2 function).
 //! - [`find_aux_data`] / [`parse_aux_data`] / [`parse_aux_data_at`] /
 //!   [`AuxData`] / [`DownmixType`] / [`DynamicDownmix`] — the §5.7.1
 //!   Auxiliary Data chunk (Table 5-31): DWORD-aligned backward sync
@@ -543,7 +554,10 @@ pub use crate::dmix_coeff::{
     decode_dmix_code, dmix_scale, inv_dmix_scale, DMIX_TABLE, DMIX_TABLE_LEN,
     DMIX_TABLE_UNITY_INDEX, INV_DMIX_INDEX_OFFSET, INV_DMIX_TABLE, INV_DMIX_TABLE_LEN,
 };
-pub use crate::drc_range::{drc_range, DRC_RANGE_LEN, DRC_RANGE_MULTIPLIER, DRC_RANGE_UNITY_INDEX};
+pub use crate::drc_range::{
+    drc_range, dts_dynrng_to_db, dts_dynrng_to_linear, DRC_RANGE_LEN, DRC_RANGE_MULTIPLIER,
+    DRC_RANGE_UNITY_INDEX,
+};
 pub use crate::dsync::{decode_dsync_at, dsync_present, DSYNC_WIRE_BITS, DSYNC_WORD};
 pub use crate::filter_bank::FilterBankSelection;
 pub use crate::fir_coeff::{FIR_COEFF_LEN, RA_COEFF_LOSSLESS, RA_COEFF_LOSSY};
