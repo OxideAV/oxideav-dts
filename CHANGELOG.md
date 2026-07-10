@@ -8,6 +8,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 408 (2026-07-10) — **Annex B CRC-16 algorithm**
+  (`src/crc16.rs`): the single normative CRC every DTS check word
+  uses (Annex B "CRC Algorithm", per the freshly staged
+  `docs/audio/dts/dts-crc16.md`): CRC-CCITT with generator polynomial
+  `x¹⁶ + x¹² + x⁵ + 1` (`0x1021`), initial value `0xFFFF`, MSB-first,
+  no reflection, no final XOR — the parameter set catalogued as
+  CRC-16/CCITT-FALSE. Ships as `dts_crc16` (one-shot),
+  `dts_crc16_update` (incremental, for split regions), and the
+  compile-time `DTS_CRC16_TABLE` byte-wise form the spec's
+  `ByteAlign…` fields exist to enable. Cross-verified against an
+  independent bit-at-a-time reference, the catalogued
+  `"123456789" → 0x29B1` check value, and a single-bit-flip
+  detection sweep.
+
 - Round 406 (2026-07-10) — **§D.11 downmix scale-factor tables +
   §5.7.1 coefficient-code resolver** (`src/dmix_coeff.rs`): the full
   Annex D §D.11 "Look-up Table for Downmix Scale Factors" is

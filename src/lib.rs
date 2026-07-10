@@ -424,6 +424,12 @@
 //!   Transcribed from ETSI TS 102 114 V1.3.1 §D.11 (PDF p.256-259)
 //!   and unit-verified against the spec's own closed-form dB-ramp
 //!   derivation. Added in round 406.
+//! - [`dts_crc16`] / [`dts_crc16_update`] / [`DTS_CRC16_POLY`] /
+//!   [`DTS_CRC16_INIT`] / [`DTS_CRC16_TABLE`] — the Annex B
+//!   (normative) CRC-16 every DTS check word uses (CRC-CCITT:
+//!   polynomial `0x1021`, init `0xFFFF`, MSB-first, no reflection, no
+//!   final XOR), in one-shot, incremental, and compile-time-table
+//!   forms. Per `docs/audio/dts/dts-crc16.md`. Added in round 408.
 //! - [`find_aux_data`] / [`parse_aux_data`] / [`parse_aux_data_at`] /
 //!   [`AuxData`] / [`DownmixType`] / [`DynamicDownmix`] — the §5.7.1
 //!   Auxiliary Data chunk (Table 5-31): DWORD-aligned backward sync
@@ -472,6 +478,7 @@ mod aux_data;
 mod bitreader;
 mod block_code;
 mod cos_mod;
+mod crc16;
 mod d6_block_book;
 mod dmix_coeff;
 mod drc_range;
@@ -521,6 +528,9 @@ pub use crate::block_code::{block_code_max_code, block_code_offset, decode_block
 pub use crate::cos_mod::{
     cos_mod_stage, precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START,
     COS_MOD_BLOCK3_START, COS_MOD_BLOCK4_START, COS_MOD_LEN, NUM_SUBBAND,
+};
+pub use crate::crc16::{
+    dts_crc16, dts_crc16_update, DTS_CRC16_INIT, DTS_CRC16_POLY, DTS_CRC16_TABLE,
 };
 pub use crate::d6_block_book::{
     d6_book_for_levels, decode_block_code_table, D6BlockBook, D6_BLOCK_ELEMENTS, D6_BOOK_13,
