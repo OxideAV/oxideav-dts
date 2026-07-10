@@ -50,7 +50,15 @@ sub-band samples when the `FRONT_SUM` (`SUMF`) flag is set — or
 unconditionally for `AMODE == 3` — and the surround L/R matrix when
 `SURROUND_SUM` (`SUMS`) is set, using the Table 5-4 channel ordering to
 locate each pair (`AmodeArrangement::front_lr_channels` /
-`surround_lr_channels`), between §C.2.3 and §C.2.5. Only the §D.10 VQ /
+`surround_lr_channels`), between §C.2.3 and §C.2.5. The **§5.7
+optional-information chunks** are decoded too: `parse_aux_data` /
+`FrameView::aux_data` walk the §5.7.1 Auxiliary Data chunk (decode
+time stamp + the dynamic **embedded downmix coefficients**, resolved
+through the §D.11 `DmixTable` and applicable to planar PCM via
+`DynamicDownmix::apply_planar`), and `parse_rev2_aux` /
+`FrameView::rev2_aux` walk the §5.7.2 Rev2 chunk (embedded-ES downmix
+scale, per-subsubframe broadcast DRC values, `DIALNORM_rev2aux`).
+Only the §D.10 VQ /
 ADPCM code books (high-frequency VQ sub-bands and ADPCM prediction
 coefficients) still surface
 `CoreError::Unsupported`; those two tables are **not printed in the
@@ -170,6 +178,43 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   `JOIN_SCALES` factor, on the decoded sub-band matrices **before** QMF
   synthesis. `JOINX > 0` frames now decode end to end.
 
+- **§D.11 downmix scale-factor tables** — `DMIX_TABLE` (241 × u16,
+  the Q15 `DmixTable` column, `-60 dB` … unity) and `INV_DMIX_TABLE`
+  (201 × u32, the Q16 `InvDmixTbl` column for `DmixTblIndex >= 40`),
+  with `dmix_scale` / `inv_dmix_scale` look-ups and
+  `decode_dmix_code` (the §5.7.1 Table 5-31 9-bit coefficient-code
+  resolution: phase MSB, one-biased low byte, `0` → exact `0.0`).
+  Every entry of both columns is unit-verified against the spec's own
+  closed-form dB-ramp derivation (including the deliberate index-216
+  half-power point `1/sqrt(2)`).
+- **§5.7.1 Auxiliary Data chunk** — `find_aux_data` (the spec's
+  suggested backward search for the DWORD-aligned `nSYNCAUX`
+  `0x9A1105A0`), `parse_aux_data` / `parse_aux_data_at` /
+  `FrameView::aux_data`: the 36-bit decode time stamp (nibble
+  realignment + both `0b1011` marker validations) and the dynamic
+  downmix coefficient table (`DownmixType`, Table 5-32;
+  `DeriveNumDwnMixCodeCoeffs()` from `anNumCh[AMODE]` + LFE;
+  `DynamicDownmix::coefficient_matrix` through §D.11;
+  `DynamicDownmix::apply_planar` folds planar PCM through the table
+  with the §C.2.5 `int()` truncation convention). The `nAUXCRC16` is
+  surfaced raw (polynomial undocumented — same docs-gap as
+  `HEADER_CRC`).
+- **§5.7.2 Rev2 Auxiliary Data Chunk** — `find_rev2_aux` /
+  `parse_rev2_aux` / `FrameView::rev2_aux`: `nRev2AUXDataByteSize`
+  (validated `3..=128`), the embedded-ES downmix scale index
+  (validated `40..=240`, resolved via §D.11
+  `Rev2AuxChunk::es_downmix_scale`), the size-gated broadcast
+  metadata — per-subsubframe 8-bit DRC values for
+  `DRCversion_Rev2AUX == 1` (one per `32·(NBLKS+1)/256` subsubframe,
+  Table 5-34; unsupported versions are skipped per the spec's ignore
+  rule) and the 5-bit `DIALNORM_rev2aux` (`DNG = −value` dB,
+  Table 5-36) — and the `nRev2AUXCRC16` read at its size-located
+  offset (also skipping the reserved field of "unspecified
+  duration"). `Rev2Drc::multipliers` resolves the DRC codes through
+  the §D.4 `RANGEtbl` (the legacy-core coefficient space the spec
+  says these values replace; the spec's own `dts_dynrng_to_db()`
+  body is unprinted, so the raw codes stay exposed).
+
 ### Not yet implemented
 
 - The §D.10.1 ADPCM-coefficient VQ and §D.10.2 high-frequency-subband VQ
@@ -187,7 +232,14 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   current Core-profile effort.
 - The `HEADER_CRC` polynomial is not documented in the staged spec
   material, so `DtsFrameHeader::verify_header_crc` returns `None`; the
-  raw 16-bit field is still surfaced for pass-through callers.
+  raw 16-bit field is still surfaced for pass-through callers. The
+  same gap covers the §5.6 `OCRC`, §5.7.1 `nAUXCRC16`, and §5.7.2
+  `nRev2AUXCRC16` check words (all surfaced raw, none verified — the
+  spec references "fast table-based CRC16 calculation" without
+  printing the polynomial or table).
+- The §5.7.2 `dts_dynrng_to_db()` conversion body is not printed in
+  the staged spec; `Rev2Drc::multipliers` documents its §D.4-based
+  interpretation and the raw 8-bit DRC codes remain exposed.
 
 ## Usage
 

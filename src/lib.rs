@@ -415,6 +415,33 @@
 //!   fixture: carrying the inter-frame filter tail makes channel-0 PCM
 //!   shape-identical to the reference (Pearson correlation 1.0 over the
 //!   whole stream) versus 0.73 with the filter reset per frame.
+//! - [`DMIX_TABLE`] / [`INV_DMIX_TABLE`] / [`dmix_scale`] /
+//!   [`inv_dmix_scale`] / [`decode_dmix_code`] — the §D.11 downmix
+//!   scale-factor tables (Q15 `DmixTable`, 241 entries; Q16
+//!   `InvDmixTbl`, 201 entries for `DmixTblIndex >= 40`) plus the
+//!   §5.7.1 Table 5-31 9-bit dynamic-downmix coefficient-code
+//!   resolution (phase MSB, one-biased low byte, `0` → exact `0.0`).
+//!   Transcribed from ETSI TS 102 114 V1.3.1 §D.11 (PDF p.256-259)
+//!   and unit-verified against the spec's own closed-form dB-ramp
+//!   derivation. Added in round 406.
+//! - [`find_aux_data`] / [`parse_aux_data`] / [`parse_aux_data_at`] /
+//!   [`AuxData`] / [`DownmixType`] / [`DynamicDownmix`] — the §5.7.1
+//!   Auxiliary Data chunk (Table 5-31): DWORD-aligned backward sync
+//!   search (`0x9A1105A0`), the 36-bit decode time stamp with its
+//!   `0b1011` markers, and the dynamic (embedded) downmix
+//!   coefficient table resolved through §D.11
+//!   ([`DynamicDownmix::coefficient_matrix`]) and applicable to
+//!   planar PCM ([`DynamicDownmix::apply_planar`]). Also reachable
+//!   from the frame iterator via `FrameView::aux_data`. Added in
+//!   round 406.
+//! - [`find_rev2_aux`] / [`parse_rev2_aux`] / [`parse_rev2_aux_at`] /
+//!   [`Rev2AuxChunk`] / [`Rev2Drc`] — the §5.7.2 Rev2 Auxiliary Data
+//!   Chunk (Table 5-33): DWORD-aligned backward sync search
+//!   (`0x7004C070`), the embedded-ES downmix scale (§D.11), the
+//!   size-gated broadcast metadata (per-subsubframe DRC values for
+//!   version 1 + `DIALNORM_rev2aux`), and the size-located
+//!   `nRev2AUXCRC16`. Also reachable via `FrameView::rev2_aux`.
+//!   Added in round 406.
 //! - [`Error`] — crate-local error type.
 //!
 //! Behind the default-on `registry` cargo feature (round 4):
