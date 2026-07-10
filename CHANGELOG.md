@@ -81,6 +81,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   (`docs/audio/dts/dts-lfe-interpolation-and-audio-walker.md`) and
   the first multichannel (>2ch) end-to-end validation.
 
+- Round 408 (2026-07-10) — **§5.7.2.2 Rev2AUX DRC override on the
+  decode path**: `decode_core_frame` / `CoreStreamDecoder` now honour
+  "the DRC values in the Rev2AUX data chunk should be used instead of
+  any dynamic range control coefficients found in the legacy core
+  stream (indicated by flag DYNF)". When the frame carries a
+  **CRC-verified** Rev2AUX chunk (the Annex B `crc_valid` gate — a
+  false DWORD-aligned sync alias inside the audio payload cannot
+  hijack the gain path) with a version-1 DRC payload, the legacy
+  per-subframe `RANGE` gain is suppressed (the field is still
+  consumed for framing) and each per-subsubframe Rev2 gain scales its
+  own Table 5-34 256-sample window of the reconstructed PCM.
+  Integration tests (`tests/rev2_drc_override.rs`) pin the override
+  against the legacy gain, the no-`DYNF` case, and the
+  CRC-invalid-chunk-is-ignored case.
+
 - Round 406 (2026-07-10) — **§D.11 downmix scale-factor tables +
   §5.7.1 coefficient-code resolver** (`src/dmix_coeff.rs`): the full
   Annex D §D.11 "Look-up Table for Downmix Scale Factors" is

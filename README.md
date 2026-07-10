@@ -237,7 +237,12 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   `Rev2Drc::multipliers` resolve the DRC codes through the §5.7.2
   `dts_dynrng_to_db()` signed-Q2 function (the legacy-core
   coefficient space the spec says these values replace; the raw
-  codes stay exposed).
+  codes stay exposed). On the decode path, a CRC-verified version-1
+  Rev2AUX DRC payload **overrides** the legacy `DYNF` gain per
+  §5.7.2.2: `decode_core_frame` / `CoreStreamDecoder` suppress the
+  per-subframe `RANGE` multiply and scale each Table 5-34 256-sample
+  subsubframe window by its own Rev2 gain instead
+  (`tests/rev2_drc_override.rs`).
 - **Annex B CRC-16** — `dts_crc16` / `dts_crc16_update` /
   `DTS_CRC16_TABLE`: the single normative DTS CRC (CRC-CCITT,
   polynomial `0x1021`, init `0xFFFF`, MSB-first, no reflection, no

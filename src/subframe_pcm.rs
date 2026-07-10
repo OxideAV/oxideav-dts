@@ -867,6 +867,24 @@ impl SubframePcmDecoder {
         // ChannelSideInfoParams.
         let params: Vec<_> = coding.channel_params.clone();
 
+        // §5.7.2.2: when a Rev2AUX chunk carries broadcast DRC values,
+        // they "should be used instead of any dynamic range control
+        // coefficients found in the legacy core stream (indicated by
+        // flag DYNF)". Look the chunk up front so the per-subframe
+        // legacy RANGE gain can be suppressed; gate on the verified
+        // Annex B CRC so a false DWORD-aligned sync alias inside the
+        // audio payload cannot hijack the gain path.
+        let frame_end = bytes.len().min(usize::from(header.frame_size_bytes));
+        let rev2_drc: Option<Vec<f64>> = crate::parse_rev2_aux(&bytes[..frame_end], header)
+            .ok()
+            .flatten()
+            .filter(|chunk| chunk.crc_valid)
+            .and_then(|chunk| chunk.drc)
+            .filter(|drc| {
+                drc.version == crate::REV2_DRC_VERSION_SINGLE_BAND && !drc.codes.is_empty()
+            })
+            .map(|drc| drc.multipliers());
+
         let n_subs = coding.n_subs();
         let mut bit = header_bits + ach_bits;
         for _ in 0..coding.n_subframes {
@@ -906,9 +924,13 @@ impl SubframePcmDecoder {
             // after QMF synthesis. The 8-bit RANGE code is signed Q2
             // (dB = (int8)code · 0.25; see dts_dynrng_to_db and
             // docs/audio/dts/dts-drc-dynrng.md) — NOT a raw index into
-            // the offset-binary §D.4 presentation table.
+            // the offset-binary §D.4 presentation table. Suppressed
+            // (the field is still consumed for framing) when a
+            // CRC-verified Rev2AUX DRC payload overrides it (§5.7.2.2).
             if let Some(code) = tail.range_index {
-                apply_range(&mut block, crate::dts_dynrng_to_linear(code));
+                if rev2_drc.is_none() {
+                    apply_range(&mut block, crate::dts_dynrng_to_linear(code));
+                }
             }
 
             for (ch, samples) in block.into_iter().enumerate() {
@@ -917,7 +939,53 @@ impl SubframePcmDecoder {
             bit += audio_bits;
         }
 
+        // §5.7.2 Table 5-34: one Rev2AUX DRC value per 256-sample
+        // subsubframe of the frame, each applied to its own window of
+        // the reconstructed PCM (replacing the per-subframe legacy
+        // gain suppressed above).
+        if let Some(multipliers) = &rev2_drc {
+            apply_rev2_drc(&mut pcm, multipliers);
+        }
+
         Ok((pcm, bit))
+    }
+}
+
+/// Apply the §5.7.2 Rev2AUX per-subsubframe DRC multipliers to the
+/// frame's reconstructed planar PCM, in place: plane `ch` is split
+/// into `multipliers.len()` equal consecutive windows (Table 5-34: one
+/// 8-bit DRC value per 256-sample subsubframe) and window `k` is
+/// scaled by `multipliers[k]` with the same round-to-nearest /
+/// `i32`-saturating convention as the legacy `RANGE` gain.
+///
+/// A plane whose length is not an exact multiple of the value count
+/// (only possible on a malformed stream whose `NBLKS` disagrees with
+/// the decoded subframe structure) is left untouched rather than
+/// scaled with a guessed window split.
+fn apply_rev2_drc(pcm: &mut SubframePcm, multipliers: &[f64]) {
+    for channel in pcm.iter_mut() {
+        if multipliers.is_empty() || channel.len() % multipliers.len() != 0 {
+            continue;
+        }
+        let window = channel.len() / multipliers.len();
+        if window == 0 {
+            continue;
+        }
+        for (chunk, &m) in channel.chunks_mut(window).zip(multipliers) {
+            if m == 1.0 {
+                continue;
+            }
+            for sample in chunk.iter_mut() {
+                let scaled = (*sample as f64 * m).round();
+                *sample = if scaled >= i32::MAX as f64 {
+                    i32::MAX
+                } else if scaled <= i32::MIN as f64 {
+                    i32::MIN
+                } else {
+                    scaled as i32
+                };
+            }
+        }
     }
 }
 
