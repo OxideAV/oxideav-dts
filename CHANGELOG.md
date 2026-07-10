@@ -43,6 +43,29 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   docs-gap as `HEADER_CRC`). New typed errors: `AuxSyncMismatch`,
   `AuxTimeStampMarkerMismatch`, `AuxChannelCountUnresolved`.
 
+- Round 406 (2026-07-10) — **§5.7.2 Rev2 Auxiliary Data Chunk parser**
+  (`src/rev2_aux.rs`): `find_rev2_aux` locates the DWORD-aligned
+  `nSYNCRev2AUX` `0x7004C070` (backward search from the frame end —
+  the chunk may be present "even when AUXF=FALSE"), and
+  `parse_rev2_aux` walks Table 5-33: `nRev2AUXDataByteSize`
+  (validated `3..=128`), the embedded-ES downmix scale
+  (`nEmbESDownMixScaleIndex`, validated `40..=240` and resolved
+  through the §D.11 `DmixTable` via
+  `Rev2AuxChunk::es_downmix_scale`), the size-gated broadcast
+  metadata (per-subsubframe 8-bit DRC values for
+  `DRCversion_Rev2AUX == 1` — one per `32·(NBLKS+1)/256`
+  subsubframe per Table 5-34 — and the 5-bit `DIALNORM_rev2aux`,
+  `DNG = -value` dB per Table 5-36), and the `nRev2AUXCRC16` read at
+  its size-located offset (which also skips the reserved field of
+  "unspecified duration"; polynomial undocumented — surfaced, not
+  verified). Unsupported DRC versions are skipped per the spec's
+  "should be ignored" rule. `Rev2Drc::multipliers` resolves the DRC
+  codes through the §D.4 `RANGEtbl` (the legacy-core coefficient
+  space these values replace; the spec's `dts_dynrng_to_db()` body
+  is unprinted — raw codes stay exposed). New typed errors:
+  `Rev2AuxSyncMismatch`, `Rev2AuxSizeOutOfRange`,
+  `Rev2AuxEsScaleIndexOutOfRange`, `Rev2AuxDrcCountUnresolved`.
+
 - Round 398 (2026-07-08) — **§C.2.4 sum/difference decoding wired into
   the reconstruction chain**: the front L/R sum/difference matrix
   (`FrontLeft = L + R`, `FrontRight = L − R`) is now applied on the

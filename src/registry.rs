@@ -85,6 +85,15 @@ impl From<DtsError> for CoreError {
             DtsError::InvalidStepSize { .. } | DtsError::SampleCountMismatch { .. } => {
                 CoreError::InvalidData(e.to_string())
             }
+            // Round 406 §5.7.2 Rev2 auxiliary chunk errors: sync
+            // mismatch, invalid declared byte size, out-of-range
+            // embedded-ES scale index, or an underivable DRC value
+            // count all indicate a corrupt or false-positive Rev2
+            // chunk -> `InvalidData`.
+            DtsError::Rev2AuxSyncMismatch { .. }
+            | DtsError::Rev2AuxSizeOutOfRange { .. }
+            | DtsError::Rev2AuxEsScaleIndexOutOfRange { .. }
+            | DtsError::Rev2AuxDrcCountUnresolved { .. } => CoreError::InvalidData(e.to_string()),
             // Round 406 §5.7.1 auxiliary-data chunk errors: a sync
             // mismatch at a caller-supplied offset, a time-stamp
             // marker other than 0b1011, or an AMODE whose Table 5-4

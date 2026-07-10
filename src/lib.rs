@@ -462,11 +462,14 @@ mod lfe_synth;
 mod qmf_assemble;
 mod qmf_multichannel;
 mod qmf_synth;
+mod rev2_aux;
 mod side_info;
 mod step_size;
 mod subframe;
 mod subframe_pcm;
 mod sum_diff;
+#[cfg(test)]
+mod test_util;
 mod unpack14;
 
 #[cfg(feature = "registry")]
@@ -536,6 +539,10 @@ pub use crate::qmf_assemble::{
 };
 pub use crate::qmf_multichannel::{MultiChannelQmf, MultiChannelQmfError};
 pub use crate::qmf_synth::QmfSynthesis;
+pub use crate::rev2_aux::{
+    find_rev2_aux, parse_rev2_aux, parse_rev2_aux_at, Rev2AuxChunk, Rev2Drc, REV2_AUX_SYNC_WORD,
+    REV2_DRC_VERSION_SINGLE_BAND,
+};
 pub use crate::side_info::{
     decode_abits_at, decode_adj_at, decode_join_scale_at, decode_scales_at,
     decode_subsubframe_count_at, decode_tmode_at, AbitsCodebook, ScaleFactorAdjustment,
@@ -771,6 +778,37 @@ pub enum Error {
         /// The unresolvable 6-bit `AMODE` code.
         amode: u8,
     },
+    /// The bytes at the offset handed to
+    /// [`crate::parse_rev2_aux_at`] were not the §5.7.2 DWORD-aligned
+    /// Rev2 auxiliary sync word `0x7004C070` (`nSYNCRev2AUX`).
+    Rev2AuxSyncMismatch {
+        /// The 32-bit word actually read at the offset.
+        found: u32,
+    },
+    /// The §5.7.2 `nRev2AUXDataByteSize` field was outside its valid
+    /// `3..=128` range ("Error: Invalid range of Rev 2 Auxiliary Data
+    /// Chunk Size"), or the chunk's declared fields overran the
+    /// size-located `nRev2AUXCRC16` position.
+    Rev2AuxSizeOutOfRange {
+        /// The decoded chunk byte size (after the `+1` increment).
+        size: u8,
+    },
+    /// The §5.7.2 `nEmbESDownMixScaleIndex` was outside its valid
+    /// `40..=240` range (the encode side limits the `ESDmixScale`
+    /// parameters to `[-40 dB, 0 dB]`).
+    Rev2AuxEsScaleIndexOutOfRange {
+        /// The out-of-range 8-bit index.
+        index: u8,
+    },
+    /// The §5.7.2 per-subsubframe DRC value count could not be
+    /// derived: one 8-bit value is transmitted per 256-sample
+    /// subsubframe (Table 5-34), but the frame's block count is not a
+    /// whole number of subsubframes (`32·(NBLKS+1)` not a multiple of
+    /// 256).
+    Rev2AuxDrcCountUnresolved {
+        /// The frame's `NBLKS + 1` block count.
+        blocks: u8,
+    },
     /// A §5.7.1 Table 5-31 dynamic-downmix coefficient code word
     /// passed to [`crate::decode_dmix_code`] was wider than the
     /// documented 9-bit field, or its one-biased low byte resolved
@@ -906,6 +944,28 @@ impl core::fmt::Display for Error {
                 "oxideav-dts: §5.7.1 dynamic-downmix coefficient count cannot \
                  be derived: AMODE {amode} is a user-defined channel \
                  arrangement with no Table 5-4 channel count"
+            ),
+            Error::Rev2AuxSyncMismatch { found } => write!(
+                f,
+                "oxideav-dts: §5.7.2 Rev2 auxiliary-data parse expected the \
+                 DWORD-aligned sync word 0x7004c070, read 0x{found:08x}"
+            ),
+            Error::Rev2AuxSizeOutOfRange { size } => write!(
+                f,
+                "oxideav-dts: §5.7.2 Rev2 auxiliary chunk size {size} B is \
+                 invalid (valid range 3..=128, and the declared fields must \
+                 fit in front of the size-located CRC)"
+            ),
+            Error::Rev2AuxEsScaleIndexOutOfRange { index } => write!(
+                f,
+                "oxideav-dts: §5.7.2 embedded-ES downmix scale index {index} \
+                 is outside the valid 40..=240 range ([-40 dB, 0 dB])"
+            ),
+            Error::Rev2AuxDrcCountUnresolved { blocks } => write!(
+                f,
+                "oxideav-dts: §5.7.2 Rev2AUX DRC value count cannot be \
+                 derived: {blocks} blocks per frame is not a whole number of \
+                 256-sample subsubframes"
             ),
             Error::DownmixCodeOutOfRange { code } => write!(
                 f,

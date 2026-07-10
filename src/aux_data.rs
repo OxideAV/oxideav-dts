@@ -376,68 +376,7 @@ pub fn parse_aux_data(frame: &[u8], header: &DtsFrameHeader) -> Result<Option<Au
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse_frame_header;
-
-    /// Minimal MSB-first bit writer for constructing synthetic
-    /// Table 5-31 chunks in tests.
-    struct BitWriter {
-        bytes: Vec<u8>,
-        bit_len: usize,
-    }
-
-    impl BitWriter {
-        fn new() -> Self {
-            BitWriter {
-                bytes: Vec::new(),
-                bit_len: 0,
-            }
-        }
-
-        fn push_bits(&mut self, value: u64, n: u32) {
-            for i in (0..n).rev() {
-                let bit = (value >> i) & 1;
-                if self.bit_len % 8 == 0 {
-                    self.bytes.push(0);
-                }
-                let byte = self.bytes.last_mut().unwrap();
-                *byte |= (bit as u8) << (7 - (self.bit_len % 8));
-                self.bit_len += 1;
-            }
-        }
-
-        fn align(&mut self, bits: usize) {
-            while self.bit_len % bits != 0 {
-                self.push_bits(0, 1);
-            }
-        }
-
-        fn into_bytes(mut self) -> Vec<u8> {
-            self.align(8);
-            self.bytes
-        }
-    }
-
-    /// A parseable raw-BE header with the requested `AMODE` and
-    /// 13-bit flag window (`downmix .. predictor_history`; the 2-bit
-    /// `LFF` field sits at bits 2..1 of the window) for the
-    /// channel-count derivation.
-    fn synth_header(amode: u64, extra_13: u64) -> DtsFrameHeader {
-        let mut w = BitWriter::new();
-        w.push_bits(0x7FFE_8001, 32); // raw-BE sync
-        w.push_bits(1, 1); // FTYPE normal
-        w.push_bits(31, 5); // SHORT deficit -> 32 samples/block
-        w.push_bits(0, 1); // CPF
-        w.push_bits(15, 7); // NBLKS -> 16 blocks
-        w.push_bits(127, 14); // FSIZE -> 128 bytes
-        w.push_bits(amode, 6); // AMODE
-        w.push_bits(13, 4); // SFREQ 48 kHz
-        w.push_bits(10, 5); // RATE
-        w.push_bits(extra_13, 13); // downmix .. predictor_history
-        w.push_bits(0, 16); // post-CRC trailing window
-        let mut bytes = w.into_bytes();
-        bytes.resize(16, 0); // parser reads a 16-byte window
-        parse_frame_header(&bytes).expect("synthetic header parses")
-    }
+    use crate::test_util::{synth_header, BitWriter};
 
     /// AMODE 2 = stereo, 2 channels, no LFE.
     fn stereo_header() -> DtsFrameHeader {
