@@ -6,6 +6,16 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Marked the internal DSP / VQ / CRC / §D.10 spec-primitive plumbing
+  crate-root re-exports (QMF, block-code, side-info, aux/rev2-aux, step-size,
+  and related building blocks exposed for tests/fuzz) `#[doc(hidden)]` so
+  cargo-semver-checks no longer treats them as part of the stable public API.
+  The stable surface — header parse/encode types, `unpack14` conversions,
+  frame framing/iterators, the `decode_core_frame` family, and the registry
+  `Decoder` surface — remains visible. No signatures or visibility changed.
+
 ### Added
 
 - Round 408 (2026-07-10) — **Annex B CRC-16 algorithm**

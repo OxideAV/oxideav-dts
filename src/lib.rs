@@ -534,48 +534,78 @@ mod unpack14;
 #[cfg(feature = "registry")]
 mod registry;
 
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::audio_array::{
     decode_audio_data_subframe_at, decode_lfe_phase_at, AudioArrayDecodeError, AudioArrayError,
     SubbandSampleMatrix,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::audio_data::{
     audio_quant_type, terminal_sel_index, AudioQuantType, ABITS_MAX_BLOCK_CODE, ABITS_MAX_SEL,
     ABITS_TABLE_LEN, CODEBOOK_GROUP_SIZE, QUANT_LEVELS,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::audio_header::{decode_audio_coding_header_at, AudioCodingHeader, SEL_PLANE_LEN};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::audio_huff::{decode_audio_huff_at, AudioHuffCodebook};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::aux_data::{
     find_aux_data, parse_aux_data, parse_aux_data_at, AuxData, DownmixType, DynamicDownmix,
     AUX_SYNC_WORD, AUX_TIME_STAMP_MARKER,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::block_code::{block_code_max_code, block_code_offset, decode_block_code};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::cos_mod::{
     cos_mod_stage, precal_cos_mod, COS_MOD_BLOCK1_START, COS_MOD_BLOCK2_START,
     COS_MOD_BLOCK3_START, COS_MOD_BLOCK4_START, COS_MOD_LEN, NUM_SUBBAND,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::crc16::{
     dts_crc16, dts_crc16_update, DTS_CRC16_INIT, DTS_CRC16_POLY, DTS_CRC16_TABLE,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::d10_vq::{
     adpcm_vq_coeff, scan_hf_vq_indices_at, unpack_hfreq_vq_entry, ADPCM_VQ_BOOK_SIZE,
     ADPCM_VQ_COEFF_DIVISOR, ADPCM_VQ_INDEX_BITS, ADPCM_VQ_VECTOR_LEN, HFREQ_VQ_BOOK_SIZE,
     HFREQ_VQ_ELEMENT_DIVISOR, HFREQ_VQ_ENTRIES_PER_VECTOR, HFREQ_VQ_INDEX_BITS,
     HFREQ_VQ_VECTOR_LEN,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::d6_block_book::{
     d6_book_for_levels, decode_block_code_table, D6BlockBook, D6_BLOCK_ELEMENTS, D6_BOOK_13,
     D6_BOOK_17, D6_BOOK_25, D6_BOOK_3, D6_BOOK_5, D6_BOOK_7, D6_BOOK_9,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::dmix_coeff::{
     decode_dmix_code, dmix_scale, inv_dmix_scale, DMIX_TABLE, DMIX_TABLE_LEN,
     DMIX_TABLE_UNITY_INDEX, INV_DMIX_INDEX_OFFSET, INV_DMIX_TABLE, INV_DMIX_TABLE_LEN,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::drc_range::{
     drc_range, dts_dynrng_to_db, dts_dynrng_to_linear, DRC_RANGE_LEN, DRC_RANGE_MULTIPLIER,
     DRC_RANGE_UNITY_INDEX,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::dsync::{decode_dsync_at, dsync_present, DSYNC_WIRE_BITS, DSYNC_WORD};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::filter_bank::FilterBankSelection;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::fir_coeff::{FIR_COEFF_LEN, RA_COEFF_LOSSLESS, RA_COEFF_LOSSY};
 pub use crate::header::{
     encode_frame_header_14bit_be, encode_frame_header_14bit_le, encode_frame_header_be,
@@ -583,6 +613,8 @@ pub use crate::header::{
     DialogNormalization, DtsFrameHeader, FrameType, LfeMode, SampleFrequency, SourcePcmResolution,
     SyncWordEncoding, TargetedBitRate,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::inverse_adpcm::{
     inverse_adpcm_decode_f64, inverse_adpcm_decode_i32, inverse_adpcm_required, update_history_f64,
     update_history_i32, NUM_ADPCM_COEFF,
@@ -592,39 +624,65 @@ pub use crate::iter::{
     FrameIterator, FrameIterator14, FrameIteratorResync, FrameView, FrameView14, ResyncCause,
     ResyncEvent, SyncIterator, SyncMatch,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::join_scale::{
     join_scale, JOIN_SCALE_FACTOR, JOIN_SCALE_LEN, JOIN_SCALE_UNITY_INDEX,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::joint_subband::{
     joint_source_channel, joint_subband_decode_range_f64, joint_subband_decode_range_i32,
     joint_subband_required,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::lfe_fir_coeff::{LFE_FIR_COEFF_LEN, RA_COEFF_LFE128, RA_COEFF_LFE64};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::lfe_interp::LfeInterpolationSelection;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::lfe_synth::{
     LfeChannel, LfeChannelError, LfeInterpError, LfeInterpolator, LFE_HISTORY_LEN, LFE_SCALE_STEP,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::optional_info::{decode_optional_info_at, OptionalInfo, MAX_AUX_BYTE_COUNT};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::qmf_assemble::{
     assemble_xin, fir_step, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
     PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::qmf_multichannel::{MultiChannelQmf, MultiChannelQmfError};
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::qmf_synth::QmfSynthesis;
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::rev2_aux::{
     find_rev2_aux, parse_rev2_aux, parse_rev2_aux_at, Rev2AuxChunk, Rev2Drc, REV2_AUX_SYNC_WORD,
     REV2_DRC_VERSION_SINGLE_BAND,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::side_info::{
     decode_abits_at, decode_adj_at, decode_join_scale_at, decode_scales_at,
     decode_subsubframe_count_at, decode_tmode_at, AbitsCodebook, ScaleFactorAdjustment,
     ScalesCodebook, SubsubframeCount, TmodeCodebook, RMS_6BIT, RMS_7BIT,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::step_size::{
     dequant_scale, dequant_subsubframe, scale_subsubframe_samples, transient_scale_index,
     StepSizeTable, RATE_LOSSLESS, SAMPLES_PER_SUBSUBFRAME, STEP_SIZE_FIRST_INVALID,
     STEP_SIZE_LOSSLESS, STEP_SIZE_LOSSY, STEP_SIZE_SCALE_SHIFT, STEP_SIZE_TABLE_LEN,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::subframe::{
     decode_primary_side_info_at, decode_primary_side_info_tail_at, ChannelSideInfo,
     ChannelSideInfoParams, PrimarySideInfo, SideInfoTail, MAX_PRIMARY_CHANNELS,
@@ -633,6 +691,8 @@ pub use crate::subframe_pcm::{
     decode_core_frame, decode_core_frame_with_info, CoreFrameDecodeError, CoreStreamDecoder,
     Subframe, SubframePcm, SubframePcmDecoder, SubframePcmError, PCM_PER_SUBBAND_ROW,
 };
+// internal — exposed for tests/fuzz; not part of the stable API
+#[doc(hidden)]
 pub use crate::sum_diff::{
     front_sum_difference_required, sum_difference_decode_f64, sum_difference_decode_i32,
     sum_difference_decode_subband_pair_f64, sum_difference_decode_subband_pair_i32,
@@ -649,7 +709,9 @@ pub use crate::registry::{
 // `registry` submodule; its `__oxideav_entry` wrapper needs to be
 // reachable at the crate root so `oxideav-meta`'s build-time
 // discovery (which calls `<crate>::__oxideav_entry(ctx)`) finds it.
+// internal — exposed for tests/fuzz; not part of the stable API
 #[cfg(feature = "registry")]
+#[doc(hidden)]
 pub use crate::registry::__oxideav_entry;
 
 /// Crate-local error type. Round 1 surfaces only the parser-related
