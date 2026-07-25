@@ -6,6 +6,43 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Round 429 (2026-07-25) — **joint-intensity sub-bands now reach the
+  output**: the §C.2.5 QMF driving call was passed the jointly-coded
+  destination channel's *own* `nSUBS[ch]`, so the sub-band samples the
+  §C.2.3 joint import had just written into
+  `[nSUBS[ch], nSUBS[nSourceCh])` were zero-filled away as "inactive"
+  by the synthesis assembly — a `JOINX != 0` frame decoded without
+  error but silently dropped every imported high sub-band. Per the
+  §C.2.5 driving-call note (staged PDF p.184: "For joint intensity
+  coded subbands, it must be set to that of the source channel, in
+  order to reflect the true subband activity"), the decoder now widens
+  each jointly-coded channel's active-subband count to the source
+  channel's `nSUBS` for both the §C.2.4 sum/difference matrix and the
+  §C.2.5 synthesis. Validated bit-exactly against an analytic
+  reconstruction and shape-exactly (Pearson 1.000000, both channels)
+  against a black-box reference decode of a spec-built `JOINX = 1`
+  stream (`tests/joint_intensity_decode.rs`).
+
+### Added
+
+- Round 429 (2026-07-25) — **spec-built joint-intensity test streams**
+  (`tests/common/mod.rs`): a deterministic field-by-field §5.3/§5.4/§5.5
+  frame builder emitting stereo Core frames with `JOINX[1] = 1`
+  (channel 1 imports sub-bands 16..32 from channel 0 through the §D.3
+  joint-scale ramp). No reachable black-box encoder emits
+  `JOINX != 0` — the available encoder was swept across its whole
+  accepted bitrate/samplerate matrix and every frame parses as
+  `JOINX == 0` — so joint-intensity validation streams are built
+  straight from the staged spec's bit-stream tables, then confirmed by
+  parsing (`JOINX == [0, 1]` in every frame) and accepted cleanly by
+  the black-box reference decoder. `tests/joint_intensity_decode.rs`
+  pins the decode three ways: analytic bit-exact reconstruction
+  (known LCG content × §D.2 step × §D.1.1 scale, §C.2.3 import,
+  public-QMF synthesis), an ablation proving the import is audible,
+  and full-stream streaming decode.
+
 ### Changed
 
 - Marked the internal DSP / VQ / CRC / §D.10 spec-primitive plumbing

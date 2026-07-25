@@ -304,7 +304,12 @@ impl SubframePcmDecoder {
     /// channel's sub-band matrix, each jointly-coded channel imports
     /// sub-bands `[nSUBS[ch], nSUBS[nSourceCh])` from its source channel
     /// (`JOINX[ch] - 1`), each scaled by the matching `JOIN_SCALES`
-    /// factor, **before** the §C.2.5 QMF synthesis runs.
+    /// factor, **before** the §C.2.5 QMF synthesis runs — and the QMF's
+    /// per-channel active-subband count is widened to the source
+    /// channel's `nSUBS` for those channels, per the §C.2.5 driving-call
+    /// note ("For joint intensity coded subbands, it must be set to that
+    /// of the source channel, in order to reflect the true subband
+    /// activity"), so the imported sub-bands actually reach the output.
     #[allow(clippy::too_many_arguments)]
     pub fn decode_subframe_with_joint(
         &mut self,
@@ -405,6 +410,28 @@ impl SubframePcmDecoder {
             apply_joint_subband(&mut matrices, coding, &n_subs, join_scales)?;
         }
 
+        // (1b') Effective per-channel active-subband counts after the
+        // joint import. The §C.2.5 driving-call comment is explicit
+        // (staged PDF p.184): "nSUBS[ch] indicates the number of active
+        // subbands. Subbands above it are all zeros. For joint intensity
+        // coded subbands, it must be set to that of the source channel,
+        // in order to reflect the true subband activity." A jointly-
+        // coded destination channel therefore synthesizes (and, below,
+        // sum/difference-matrixes) over the source channel's count —
+        // otherwise the §C.2.3 import into [nSUBS[ch], nSUBS[src]) would
+        // be zero-filled away by the QMF's inactive-subband clear. The
+        // degenerate empty-range joint (source not wider than the
+        // destination) keeps the destination's own count.
+        let mut eff_n_subs = n_subs.clone();
+        for (ch, &joinx) in coding.joinx.iter().enumerate().take(channels) {
+            if let Some(src) = crate::joint_source_channel(joinx) {
+                let src = usize::from(src);
+                if src < n_subs.len() && n_subs[src] > eff_n_subs[ch] {
+                    eff_n_subs[ch] = n_subs[src];
+                }
+            }
+        }
+
         // (1c) §C.2.4 sum/difference decoding. When the front-sum flag
         // (`SUMF`) is set — or unconditionally for AMODE == 3, per the
         // spec's "This decoding is also required when AMODE = 3" — the
@@ -418,12 +445,12 @@ impl SubframePcmDecoder {
             header.front_sum || matches!(arrangement, AmodeArrangement::SumDifference);
         if apply_front {
             if let Some((l, r)) = arrangement.front_lr_channels() {
-                apply_sum_difference(&mut matrices, l, r, &n_subs)?;
+                apply_sum_difference(&mut matrices, l, r, &eff_n_subs)?;
             }
         }
         if header.surround_sum {
             if let Some((l, r)) = arrangement.surround_lr_channels() {
-                apply_sum_difference(&mut matrices, l, r, &n_subs)?;
+                apply_sum_difference(&mut matrices, l, r, &eff_n_subs)?;
             }
         }
 
@@ -432,7 +459,7 @@ impl SubframePcmDecoder {
             matrices.iter().map(|m| m.as_slice()).collect();
         let mut pcm: SubframePcm = vec![Vec::new(); channels];
         self.qmf
-            .synthesize_planar(&channel_samples, &n_subs, filter, r_scale, &mut pcm)?;
+            .synthesize_planar(&channel_samples, &eff_n_subs, filter, r_scale, &mut pcm)?;
 
         Ok((pcm, bits_consumed))
     }
