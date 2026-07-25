@@ -71,6 +71,18 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   reserved `JOIN_SHUFF = 7`, `JOINX` naming a non-existent source
   channel, and a biased `JOIN_SCALES` index outside the §D.3 table.
 
+- Round 429 (2026-07-25) — **joint-intensity adjacent coverage**: the
+  `JOINX` + `FRONT_SUM` interaction (the §C.2.4 front L/R matrix runs
+  after the §C.2.3 import and over the *effective*, widened active
+  range — asserted bit-exact against the analytic model), the
+  registry surface (`make_decoder` → `send_packet`/`receive_frame`)
+  decoding the joint fixture bit-identically to the direct
+  `CoreStreamDecoder` path (`tests/registry_joint_decode.rs` — the
+  dual-API contract covers joint coding), and the corruption-
+  robustness sweep now also runs over the joint fixture so the
+  Table 5-28 JOIN_SHUFF / JOIN_SCALES tail error paths are exercised
+  under single- and multi-byte damage.
+
 ### Changed
 
 - Marked the internal DSP / VQ / CRC / §D.10 spec-primitive plumbing

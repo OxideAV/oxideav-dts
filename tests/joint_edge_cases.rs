@@ -77,6 +77,23 @@ fn analytic_pcm(spec: &JointFrameSpec, header: &DtsFrameHeader) -> Vec<Vec<i32>>
             }
         }
 
+        // §C.2.4 front sum/difference over the active range (the
+        // effective counts, i.e. after the joint widening): the
+        // decoder recovers L = SUM+DIFF, R = SUM-DIFF in sub-band
+        // space before synthesis.
+        if spec.front_sum {
+            let n_active = eff[0].min(eff[1]);
+            let (left, right) = matrices.split_at_mut(1);
+            for (l_row, r_row) in left[0].iter_mut().zip(right[0].iter_mut()) {
+                for n in 0..n_active {
+                    let lv = l_row[n];
+                    let rv = r_row[n];
+                    l_row[n] = lv + rv;
+                    r_row[n] = lv - rv;
+                }
+            }
+        }
+
         // §C.2.5 synthesis (continuous across subframes), then the
         // §5.4.1 per-subframe RANGE gain on this subframe's PCM.
         let refs: Vec<&[[f64; NUM_SUBBAND]]> = matrices.iter().map(|m| m.as_slice()).collect();
@@ -288,5 +305,20 @@ fn zero_slack_frame_decodes() {
         .expect("frame has content")
         + 1;
     spec.frame_bytes = used.max(96); // FSIZE floor is 95+1
+    assert_matches_analytic(&spec);
+}
+
+/// `JOINX` + `FRONT_SUM`: the §C.2.4 front L/R matrix runs *after*
+/// the §C.2.3 joint import and over the **effective** (widened)
+/// active range — the imported sub-bands 16..32 participate in the
+/// sum/difference recovery. This pins the round-429 effective-`nSUBS`
+/// widening in the §C.2.4 step, not just at the QMF.
+#[test]
+fn joint_with_front_sum_matrixes_over_effective_range() {
+    let spec = JointFrameSpec {
+        front_sum: true,
+        seed: 0x50_4D1F,
+        ..JointFrameSpec::default_joint(0)
+    };
     assert_matches_analytic(&spec);
 }

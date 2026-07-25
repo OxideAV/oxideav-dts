@@ -135,6 +135,10 @@ pub struct JointFrameSpec {
     /// Total frame byte size (`FSIZE`); the payload is zero-padded up
     /// to it.
     pub frame_bytes: usize,
+    /// Sets the frame-header `FRONT_SUM` (`SUMF`) flag: the §C.2.4
+    /// front L/R sum/difference matrix runs on the reconstructed
+    /// sub-band samples after the §C.2.3 joint import.
+    pub front_sum: bool,
     /// LCG seed for the §5.5 audio content.
     pub seed: u32,
 }
@@ -154,6 +158,7 @@ impl JointFrameSpec {
             dynf_code: None,
             cpf: false,
             frame_bytes: JOINT_FRAME_BYTES,
+            front_sum: false,
             seed,
         }
     }
@@ -210,7 +215,7 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
     header.aspf = false;
     header.lfe = LfeMode::None;
     header.predictor_history = false;
-    header.front_sum = false;
+    header.front_sum = spec.front_sum;
     header.surround_sum = false;
 
     let header_bytes = oxideav_dts::encode_frame_header_be(&header).expect("header encodes");
