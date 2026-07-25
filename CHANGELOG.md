@@ -56,6 +56,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   committed stream is byte-for-byte re-derived from the deterministic
   builder in CI, keeping the fixture's provenance in source form.
 
+- Round 429 (2026-07-25) — **joint-intensity boundary battery**
+  (`tests/joint_edge_cases.rs`, over the now-parameterized
+  `JointFrameSpec` builder): forward-pointing `JOINX` (a destination
+  importing from a *later* channel), Huffman `JOIN_SHUFF = 0`
+  (SA129 / §D.5.3 Table A5 symbols, independently `+64`-biased — no
+  running accumulator), `Linear7Bit` joint scales, `JOINX` combined
+  with `DYNF` + `CPF` (full JOIN_SHUFF → JOIN_SCALES → RANGE → SICRC
+  tail order, with HCRC/AHCRC present), a two-subframe joint frame
+  (per-subframe tail re-read, continuous §C.2.5 filter), and a
+  zero-padding-slack frame — every positive case asserted bit-exact
+  against the analytic reconstruction (so tail bit-budget drift of
+  even one bit fails loudly), plus the three typed error paths:
+  reserved `JOIN_SHUFF = 7`, `JOINX` naming a non-existent source
+  channel, and a biased `JOIN_SCALES` index outside the §D.3 table.
+
 ### Changed
 
 - Marked the internal DSP / VQ / CRC / §D.10 spec-primitive plumbing
