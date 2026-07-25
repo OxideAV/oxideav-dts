@@ -21,13 +21,16 @@ chain, producing **bit-exact** PCM to the equivalent raw-16-bit frame
 per-channel QMF filter tail across frames** (`CoreStreamDecoder`) so a
 multi-frame elementary stream reconstructs without a per-frame
 filter-warmup transient. This full-chain output is **validated against
-black-box `ffmpeg -c:a dca` reference decodes** of two bundled
+black-box `ffmpeg` reference decodes** of three bundled
 fixtures: the 5-frame stereo stream (Pearson correlation 1.0, 100 %
-sign agreement on both channels) and — new in round 408 — a 10-frame
+sign agreement on both channels), a 10-frame
 **5.1 stream** (`AMODE 9` = C L R SL SR + `LFE Mode2`), where **all
 five primary channels and the LFE channel** are shape-identical to
 the reference (correlation 1.000000 per plane;
-`tests/black_box_ffmpeg_lfe.rs`), confirming the
+`tests/black_box_ffmpeg_lfe.rs`), and — new in round 429 — the
+5-frame spec-built **joint-intensity stream** (`JOINX = 1`),
+shape-identical on both channels
+(`tests/black_box_joint_intensity.rs`), confirming the
 reconstruction chain — including the §5.5 LFE phase and §C.2.6 64×
 interpolation — is correct up to the implementation-defined output
 `rScale` gain (the spec leaves §C.2.5 `rScale` non-normative). The
@@ -44,13 +47,33 @@ upsampled through the §C.2.6 `InterpolationFIR()` polyphase convolution
 (`LfeChannel`); the registry `Decoder` emits the decoded LFE channel as
 a trailing equal-length plane of the planar S32 `AudioFrame` (the
 interpolation lands exactly the primary `nSSC·256` per-frame length).
-**Joint-intensity frames** (`JOINX > 0`) now decode: the §5.4.1
-Table 5-28 `JOIN_SHUFF` / `JOIN_SCALES` side-info tail is walked (the
-per-channel 3-bit `QSCALES` selector then one biased quantization index
-per imported sub-band, resolved through the §D.3 joint-scale table
-`JScaleTbl`), and the §C.2.3 sub-band copy imports the source channel's
-sub-band samples — scaled by the matching `JOIN_SCALES` factor — before
-QMF synthesis. **Sum/difference frames** are also handled: the §C.2.4
+**Joint-intensity frames** (`JOINX > 0`) decode and are **validated**:
+the §5.4.1 Table 5-28 `JOIN_SHUFF` / `JOIN_SCALES` side-info tail is
+walked (the per-channel 3-bit `QSCALES` selector then one biased
+quantization index per imported sub-band, resolved through the §D.3
+joint-scale table `JScaleTbl`), the §C.2.3 sub-band copy imports the
+source channel's sub-band samples — scaled by the matching
+`JOIN_SCALES` factor — before QMF synthesis, and (round 429) the
+§C.2.5 driving call widens each jointly-coded channel's active-subband
+count to the **source** channel's `nSUBS` per the spec's driving-call
+note ("For joint intensity coded subbands, it must be set to that of
+the source channel"), so the imported sub-bands actually reach the
+output. Because no reachable black-box encoder emits `JOINX != 0`
+(verified by parsing its output across its whole accepted parameter
+matrix), the validation streams are **spec-built** field-by-field
+(deterministic builder, `tests/common/mod.rs`): every frame is
+confirmed by parsing to carry `JOINX == [0, 1]`, decode is bit-exact
+against an analytic reconstruction, and the committed 5-frame joint
+fixture is accepted cleanly by the black-box `ffmpeg` reference
+decoder with our PCM **shape-identical** to its decode on both
+channels (correlation 1.000000; `tests/black_box_joint_intensity.rs`
+— the jointly-coded channel's upper sixteen sub-bands exist only
+through the §C.2.3 import). A boundary battery
+(`tests/joint_edge_cases.rs`) covers forward-pointing `JOINX`,
+Huffman / Linear7 `JOIN_SHUFF` books, `JOINX`+`DYNF`+`CPF` tail
+ordering, `JOINX`+`FRONT_SUM` over the effective range,
+multi-subframe joint frames, zero-slack framing, and the three typed
+error paths. **Sum/difference frames** are also handled: the §C.2.4
 front L/R matrix (`L' = L+R`, `R' = L−R`) is applied on the reconstructed
 sub-band samples when the `FRONT_SUM` (`SUMF`) flag is set — or
 unconditionally for `AMODE == 3` — and the surround L/R matrix when
@@ -185,7 +208,14 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   channel's high sub-bands from its source channel
   (`nSourceCh = JOINX[ch] − 1`), each scaled by the matching
   `JOIN_SCALES` factor, on the decoded sub-band matrices **before** QMF
-  synthesis. `JOINX > 0` frames now decode end to end.
+  synthesis — and both the §C.2.4 sum/difference matrix and the §C.2.5
+  synthesis then run over the **effective** active-subband counts
+  (widened to the source channel's `nSUBS` for jointly-coded channels,
+  per the §C.2.5 driving-call note). `JOINX > 0` frames decode end to
+  end, bit-exact against an analytic reconstruction and shape-identical
+  to a black-box reference decode of the bundled spec-built joint
+  fixture (`tests/fixtures/dts_joint_5_frames.bin`, re-derived
+  byte-for-byte from its deterministic builder in CI).
 
 - **§5.6 Unpack Optional Information (Table 5-30)** —
   `decode_optional_info_at` walks the flag-gated region after the
