@@ -43,6 +43,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   public-QMF synthesis), an ablation proving the import is audible,
   and full-stream streaming decode.
 
+- Round 429 (2026-07-25) — **black-box joint-intensity reference
+  validation** (`tests/black_box_joint_intensity.rs` + the committed
+  `tests/fixtures/dts_joint_5_frames.bin` /
+  `dts_joint_5_frames_ffmpeg_ref.s32` pair): the spec-built 5-frame
+  `JOINX = 1` stereo stream is accepted cleanly by the black-box
+  `ffmpeg` reference decoder, and our PCM is **shape-identical** to
+  its decode on both channels (Pearson correlation 1.000000, total
+  sign agreement above the noise floor) — channel 1's upper sixteen
+  sub-bands exist only through the §C.2.3 import, so this is the
+  independent end-to-end proof of the joint-intensity chain. The
+  committed stream is byte-for-byte re-derived from the deterministic
+  builder in CI, keeping the fixture's provenance in source form.
+
 ### Changed
 
 - Marked the internal DSP / VQ / CRC / §D.10 spec-primitive plumbing
