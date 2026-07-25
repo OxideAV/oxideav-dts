@@ -5,7 +5,10 @@
 //! the joint-coding feature, not just the common Core case.
 
 use oxideav_core::{CodecId, CodecParameters, Decoder, Frame, Packet, TimeBase};
-use oxideav_dts::{iter_frames, make_decoder, CoreStreamDecoder, CODEC_ID_STR};
+use oxideav_dts::{
+    iter_frames, make_decoder, pack_16bit_to_14bit, CoreStreamDecoder, FourteenBitByteOrder,
+    CODEC_ID_STR,
+};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/dts_joint_5_frames.bin");
 
@@ -72,5 +75,37 @@ fn registry_joint_decode_matches_direct_path() {
     assert!(
         peak > 1000,
         "jointly-coded channel non-silent (peak {peak})"
+    );
+}
+
+/// The joint stream survives the 14-bit container round trip through
+/// the registry: each raw frame packed into the 14-bit big-endian
+/// container decodes to PCM bit-identical to the raw-path decode —
+/// joint-intensity and the container unpacking compose.
+#[test]
+fn registry_decodes_14bit_joint_container_matching_raw() {
+    let raw = decode_via_registry();
+
+    let params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
+    let mut dec: Box<dyn Decoder> = make_decoder(&params).expect("factory builds");
+    let mut packed_out: Vec<Vec<i32>> = vec![Vec::new(); 2];
+    for fv in iter_frames(FIXTURE) {
+        let fv = fv.expect("fixture frames iterate cleanly");
+        let (packed, _bits) = pack_16bit_to_14bit(fv.data, FourteenBitByteOrder::BigEndian);
+        let pkt = Packet::new(0, TimeBase::new(1, 48_000), packed);
+        dec.send_packet(&pkt).expect("14-bit packet accepted");
+        let Frame::Audio(audio) = dec.receive_frame().expect("14-bit joint frame decodes") else {
+            panic!("expected an audio frame");
+        };
+        for (ch, plane) in audio.data.iter().enumerate() {
+            for c in plane.chunks_exact(4) {
+                packed_out[ch].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+            }
+        }
+    }
+
+    assert_eq!(
+        packed_out, raw,
+        "14-bit container joint decode must be bit-identical to the raw path"
     );
 }

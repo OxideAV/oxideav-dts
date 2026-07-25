@@ -322,3 +322,33 @@ fn joint_with_front_sum_matrixes_over_effective_range() {
     };
     assert_matches_analytic(&spec);
 }
+
+/// `ASPF = 1`: a `DSYNC` word after **every** subsubframe of the
+/// joint frame's §5.5 region — the extra mid-subframe check words
+/// shift every later bit, so the equality doubles as proof the
+/// audio-cursor accounting honors the flag alongside the joint tail.
+#[test]
+fn aspf_joint_frame_decodes() {
+    let spec = JointFrameSpec {
+        aspf: true,
+        seed: 0xA5_9F00,
+        ..JointFrameSpec::default_joint(0)
+    };
+    assert_matches_analytic(&spec);
+}
+
+/// `nSSC = 1`: the TMODE plane is absent from the side info (Table
+/// 5-28 transmits it only when more than one subsubframe is present),
+/// and the joint import spans a single 8-row window. NBLKS drops to 7
+/// (8 blocks = 256 PCM samples per channel).
+#[test]
+fn single_subsubframe_joint_frame_decodes() {
+    let spec = JointFrameSpec {
+        n_ssc: 1,
+        seed: 0x0155_C001,
+        ..JointFrameSpec::default_joint(0)
+    };
+    let ours = decode_spec(&spec).expect("nSSC=1 joint frame decodes");
+    assert_eq!(ours[0].len(), 256);
+    assert_matches_analytic(&spec);
+}

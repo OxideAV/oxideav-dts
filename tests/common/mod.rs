@@ -135,6 +135,10 @@ pub struct JointFrameSpec {
     /// Total frame byte size (`FSIZE`); the payload is zero-padded up
     /// to it.
     pub frame_bytes: usize,
+    /// Sets the frame-header `ASPF` flag: a `DSYNC` word follows
+    /// **every** subsubframe of the §5.5 audio region, not just the
+    /// last one.
+    pub aspf: bool,
     /// Sets the frame-header `FRONT_SUM` (`SUMF`) flag: the §C.2.4
     /// front L/R sum/difference matrix runs on the reconstructed
     /// sub-band samples after the §C.2.3 joint import.
@@ -158,6 +162,7 @@ impl JointFrameSpec {
             dynf_code: None,
             cpf: false,
             frame_bytes: JOINT_FRAME_BYTES,
+            aspf: false,
             front_sum: false,
             seed,
         }
@@ -212,7 +217,7 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
     header.time_stamp = false;
     header.aux_data = false;
     header.ext_coding = false;
-    header.aspf = false;
+    header.aspf = spec.aspf;
     header.lfe = LfeMode::None;
     header.predictor_history = false;
     header.front_sum = spec.front_sum;
@@ -331,7 +336,7 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
         }
 
         // ---- §5.5 Audio Data (Table 5-29) ----
-        for _ssf in 0..spec.n_ssc {
+        for ssf in 0..spec.n_ssc {
             for ch in 0..2 {
                 for _n in 0..spec.n_subs[ch] {
                     for _m in 0..8 {
@@ -339,8 +344,11 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
                     }
                 }
             }
+            // DSYNC after every subsubframe when ASPF, else only the last.
+            if spec.aspf || ssf == spec.n_ssc - 1 {
+                b.push(0xffff, 16);
+            }
         }
-        b.push(0xffff, 16); // DSYNC after the last subsubframe (ASPF = 0)
     }
 
     let body = b.into_bytes();

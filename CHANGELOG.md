@@ -83,6 +83,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   Table 5-28 JOIN_SHUFF / JOIN_SCALES tail error paths are exercised
   under single- and multi-byte damage.
 
+- Round 429 (2026-07-25) — **battery extension**: `ASPF = 1` joint
+  frames (a `DSYNC` after every subsubframe — the equality proves the
+  audio-cursor accounting honors the flag alongside the joint tail),
+  `nSSC = 1` joint frames (no TMODE plane, single 8-row import
+  window), and a 14-bit-container round trip of the whole joint
+  stream through the registry (`pack_16bit_to_14bit` per frame →
+  bit-identical PCM to the raw path).
+
 ### Changed
 
 - Marked the internal DSP / VQ / CRC / §D.10 spec-primitive plumbing
