@@ -166,10 +166,11 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   chains the §5.3.2 Audio Coding Header (Table 5-21), the per-subframe
   §5.4.1 side-info walk (Table 5-28) **including the `RANGE`/`SICRC`
   tail**, and the §5.5 + §C.2.5 reconstruction into one raw-bytes-to-PCM
-  call. It decodes every frame whose channels all have `JOINX == 0`,
-  including `DYNF != 0` frames (the signed-Q2 dynamic-range gain is
-  applied to each subframe's PCM after synthesis) and `CPF == 1` frames
-  (the `SICRC` word is consumed). `SubframePcmDecoder` (with
+  call. It decodes normal **and termination** frames — including
+  `JOINX > 0` (joint-intensity, see below), `DYNF != 0` frames (the
+  signed-Q2 dynamic-range gain is applied to each subframe's PCM after
+  synthesis), `CPF == 1` frames (the `SICRC` word is consumed), and
+  §5.4.1 `PSC > 0` partial subsubframes. `SubframePcmDecoder` (with
   `decode_subframe` / `decode_frame`) is the lower-level composition of
   the §5.5 `decode_audio_data_subframe_at` walk and the §C.2.5
   `MultiChannelQmf` synthesis, owning a persistent per-channel filter so
@@ -217,6 +218,30 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   fixture (`tests/fixtures/dts_joint_5_frames.bin`, re-derived
   byte-for-byte from its deterministic builder in CI).
 
+- **§5.3.1 termination frames (`FTYPE = 0`) + §5.4.1 partial
+  subsubframe (`PSC`)** — a termination-frame subframe whose
+  `SSC`/`PSC` prefix signals `PSC ∈ 1..=7` decodes its **last**
+  subsubframe as partial (`PSC` subband samples per active subband
+  instead of 8), yielding the valid-prefix PCM
+  (`((nSSC−1)·8 + PSC) · 32` samples per channel; frame total always
+  `(NBLKS+1) · 32`) with the §5.5 bit budget exact through the
+  truncation — per-sample carriers extract `PSC` codewords, the
+  §D.6 block-code carrier extracts `ceil(PSC/4)` four-sample words
+  keeping the first `PSC`, and the DSYNC trailer follows the partial
+  subsubframe. `PSC > 0` on a *normal* frame declines with the typed
+  `PartialSubsubframeInNormalFrame` ("It exists only in a
+  termination frame", PDF p.30). The `SHORT` deficit surfaces as
+  `DtsFrameHeader::termination_pad_samples` (the `1..=31`-sample
+  output pad; the decode chain returns decoded samples only). LFE
+  planes are truncated to the valid prefix (the §5.5 LFE count
+  `2·LFF·nSSC` has no `PSC` term). Validated by a full `SSC × PSC`
+  grid, JOINX/DYNF/CPF/ASPF/LFE/multi-subframe interaction and
+  corruption batteries over a spec-built termination fixture
+  (`tests/fixtures/dts_term_5_frames.bin`, re-derived in CI); the
+  black-box reference decoder was observed to *skip* `FTYPE = 0`
+  frames at the parser level, so the reference comparison pins the
+  normal-frame prefix shape-exactly and the termination tail is
+  validated in-crate (`tests/black_box_termination.rs`).
 - **§5.6 Unpack Optional Information (Table 5-30)** —
   `decode_optional_info_at` walks the flag-gated region after the
   last audio-data array (`TIMES` time code stamp when `TIMEF`,

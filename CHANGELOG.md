@@ -6,6 +6,59 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Round 430 (2026-07-26) — **termination-frame partial-subsubframe
+  decode (§5.3.1 `FTYPE = 0` × §5.4.1 `PSC`)**: a subframe whose
+  side-info prefix signals `PSC ∈ 1..=7` now decodes its last
+  subsubframe as *partial* — `PSC` subband samples per active subband
+  instead of 8 — yielding the valid-prefix PCM
+  (`((nSSC−1)·8 + PSC) · 32` samples per channel) with the §5.5 bit
+  budget exact through the truncation: per-sample carriers (§D.5
+  Huffman, NFE binary) extract exactly `PSC` codewords, the
+  four-sample §D.6 block-code carrier extracts `ceil(PSC/4)` words
+  and keeps the first `PSC` samples, and the DSYNC trailer follows
+  the partial subsubframe (`ASPF` still adds one per subsubframe).
+  That the partial subsubframe is *counted by* `nSSC` follows from
+  the staged spec's own ranges (termination `NBLKS` raw may be as low
+  as 5 → 6 blocks, expressible only as `nSSC = 1`, `PSC = 6`; and
+  §5.2 caps a subframe at 4 subsubframes). New entry points:
+  `decode_audio_data_subframe_partial_at` and
+  `SubframePcmDecoder::decode_subframe_partial`; the header-driven
+  walks (`decode_core_frame`, `CoreStreamDecoder`, the registry
+  decoder) read each subframe's own `PSC` and apply it. `PSC > 0` on
+  a **normal** frame ("It exists only in a termination frame", PDF
+  p.30) declines with the new typed
+  `SubframePcmError::PartialSubsubframeInNormalFrame`. On LFE frames
+  the §5.5 LFE phase keeps its spec-literal whole-subsubframe size
+  (`2·LFF·nSSC`, no `PSC` term) and the interpolated plane is
+  truncated to the primaries' valid-prefix length.
+- Round 430 — **`DtsFrameHeader::termination_pad_samples`**: the
+  §5.3.1 `SHORT` deficit as the `1..=31`-sample output pad a
+  termination frame asks for (`Some(SHORT + 1)`; `None` on normal
+  frames). The decode chain returns only decoded samples; the
+  presentation pad ("zeros or copies of adjacent samples") is the
+  caller's output-layer decision.
+- Round 430 — **spec-built termination-frame fixture + batteries**:
+  the deterministic builder now emits termination frames
+  (`FTYPE`/`SHORT`/`PSC`/LFE knobs); the committed
+  `tests/fixtures/dts_term_5_frames.bin` (4 normal frames + 1
+  `PSC = 5` termination frame) is re-derived byte-for-byte in CI.
+  `tests/termination_decode.rs` covers the full `SSC × PSC` grid at
+  exact lengths, the minimum legal 6-block termination frame,
+  multi-subframe termination, JOINX × termination, DYNF/CPF/ASPF/LFE
+  tails on termination frames, the normal-frame `PSC` decline, the
+  §5.6 optional-info walk from the exact end-of-audio cursor, and
+  registry-vs-direct bit-identity. `tests/black_box_termination.rs`
+  pins the observed reference bound: the black-box reference decoder
+  *skips* `FTYPE = 0` frames at the parser level (4 × 512 samples
+  out, zero decode errors, wherever the frame sits), so the
+  shape-exact comparison (Pearson > 0.999, total sign agreement)
+  covers the normal-frame prefix while the 416-sample termination
+  tail is validated in-crate. The corruption-robustness sweeps now
+  also run over the termination fixture (damaged SSC/PSC prefixes,
+  flipped FTYPE, truncated partial subsubframes).
+
 ### Fixed
 
 - Round 429 (2026-07-25) — **joint-intensity sub-bands now reach the
