@@ -274,6 +274,29 @@ fn stream_of_normal_frames_ends_with_termination() {
     assert_eq!(total, [1024 + TERM_SAMPLES; 2]);
 }
 
+/// Dense corruption over the termination frame itself: every single
+/// byte of the frame XORed with two masks (header, SSC/PSC prefix,
+/// side-info planes, partial-subsubframe payload, DSYNC, zero-pad
+/// tail) must yield a typed error or a clean decode — never a panic.
+/// This is the per-byte-exhaustive complement of the strided
+/// whole-stream sweep in `tests/corruption_robustness.rs`.
+#[test]
+fn termination_frame_dense_corruption_never_panics() {
+    let spec = JointFrameSpec::default_termination(0xDEAD_0001);
+    let frame = common::build_frame_from_spec(&common::template_header(), &spec);
+    for offset in 0..frame.len() {
+        for mask in [0x80u8, 0xFF] {
+            let mut damaged = frame.clone();
+            damaged[offset] ^= mask;
+            let Ok(header) = parse_frame_header(&damaged) else {
+                continue; // typed header error is fine
+            };
+            // Typed decode errors are fine; panics are the failure.
+            let _ = decode_core_frame(&damaged, &header);
+        }
+    }
+}
+
 /// The dual-API contract covers termination frames too: the registry
 /// surface (`make_decoder` → `send_packet` / `receive_frame`) emits a
 /// 416-sample final frame, bit-identical to the direct

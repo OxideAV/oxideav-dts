@@ -948,6 +948,69 @@ mod tests {
         }
     }
 
+    /// Find the `(code, len)` pair a §D.5 book decodes to `level`, by
+    /// scanning prefixes through the decoder itself (test-side encode
+    /// for books whose encode direction is not otherwise needed).
+    fn huff_codeword(book: AudioHuffCodebook, level: i16) -> (u32, u8) {
+        for len in 1..=16u8 {
+            for code in 0..(1u32 << len) {
+                // Lay the candidate at the front of a padded buffer.
+                let padded = (code << (32 - len)) | ((1 << (32 - len)) - 1) >> 1;
+                let bytes = padded.to_be_bytes();
+                if let Ok((got, consumed)) = decode_audio_huff_at(&bytes, 0, book) {
+                    if consumed == usize::from(len) && got == level {
+                        return (code, len);
+                    }
+                }
+            }
+        }
+        panic!("no codeword for level {level}");
+    }
+
+    /// §D.5 Huffman partial subsubframe: the per-sample carrier
+    /// extracts exactly `PSC` codewords — verified with the 3-level
+    /// `ABITS = 1` book, `nSSC = 1`, `PSC = 3`, bit budget exact.
+    #[test]
+    fn psc_huffman_extracts_exactly_psc_codewords() {
+        let book = AudioHuffCodebook::from_abits_sel(1, 0).expect("ABITS=1 SEL=0 book exists");
+        let levels = [1i16, -1, 0];
+        let mut fields: Vec<(u32, u8)> = Vec::new();
+        let mut audio_bits = 0usize;
+        for &level in &levels {
+            let (code, len) = huff_codeword(book, level);
+            fields.push((code, len));
+            audio_bits += usize::from(len);
+        }
+        fields.push((0xffff, 16)); // DSYNC after the partial subsubframe
+        let stream = pack_fields(&fields);
+
+        let mut ch = ChannelSideInfo::cleared();
+        ch.abits[0] = 1;
+        ch.scales[0][0] = 1;
+        let side = vec![ch];
+
+        let (mats, bits) = decode_audio_data_subframe_partial_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 0, // SEL = 0 -> Huffman book A3
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            1,
+            3,
+            StepSizeTable::Lossy,
+            false,
+        )
+        .unwrap();
+        assert_eq!(mats[0].len(), 3);
+        assert_eq!(bits, audio_bits + 16, "exactly PSC codewords + DSYNC");
+        let step = StepSizeTable::Lossy.step_size(1).unwrap();
+        for (m, &level) in levels.iter().enumerate() {
+            assert!((mats[0][m][0] - step * f64::from(level)).abs() < 1e-9);
+        }
+    }
+
     /// ASPF on a partial subframe: a DSYNC follows the full
     /// subsubframe *and* the partial one (the p.30 "A DSYNC word will
     /// always occur after a partial subsubframe" clause composes with
