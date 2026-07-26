@@ -86,6 +86,21 @@ pub const JOINT_SAMPLES_PER_FRAME: usize = 512;
 /// aligned like real streams.
 pub const JOINT_FRAME_BYTES: usize = 608;
 
+/// Fixed byte size (`FSIZE`) of the plain (non-joint, both channels
+/// full-width) synthetic frames: large enough for every battery
+/// shape up to two subframes / `nSSC = 4`, 4-byte aligned.
+pub const PLAIN_FRAME_BYTES: usize = 2000;
+
+/// `PSC` of the committed termination fixture's last frame: its
+/// second subsubframe carries 5 subband samples per subband.
+pub const TERM_PSC: u8 = 5;
+/// Subband-sample blocks of the termination frame:
+/// `nSSC·8 - (8 - PSC) = 16 - 3 = 13` (`NBLKS` raw 12).
+pub const TERM_BLOCKS: usize = 2 * 8 - (8 - TERM_PSC as usize);
+/// Decoded PCM samples per channel of the termination frame
+/// (`13 · 32`).
+pub const TERM_SAMPLES: usize = TERM_BLOCKS * 32;
+
 /// The 16 per-subband `JOIN_SCALES` raw 6-bit indexes for channel 1
 /// (JOIN_SHUFF = 5 → Linear6Bit → biased `+64` into the §D.3 table:
 /// raw 0 → unity, raw 8 → ≈1.585, …). A varied ramp so the joint
@@ -143,6 +158,25 @@ pub struct JointFrameSpec {
     /// front L/R sum/difference matrix runs on the reconstructed
     /// sub-band samples after the §C.2.3 joint import.
     pub front_sum: bool,
+    /// §5.3.1 `FTYPE`: `FrameType::Termination` writes a termination
+    /// frame (required whenever `psc > 0`).
+    pub frame_type: FrameType,
+    /// §5.4.1 `PSC` written in the **last** subframe's side info
+    /// (`0` = no partial subsubframe; earlier subframes always write
+    /// `PSC = 0`). When `psc > 0` the last subframe's last
+    /// subsubframe carries `psc` samples per active subband instead
+    /// of 8, and the header's NBLKS shrinks by `8 - psc` blocks.
+    pub psc: u8,
+    /// §5.3.1 `SHORT` (Deficit Sample Count) raw wire value for a
+    /// termination frame, `0..=30` (the header stores `SHORT + 1`).
+    /// Ignored for normal frames (which write the `31` normal-frame
+    /// marker, i.e. 32 samples per block).
+    pub short_raw: u8,
+    /// Adds an LFE channel (`LFF = 1`, 128× interpolation): each
+    /// subframe's §5.5 region starts with `2·LFF·nSSC` 8-bit
+    /// decimated LFE samples plus the 8-bit `LFEscaleIndex` (Table
+    /// 5-29 — the count has no `PSC` term).
+    pub lfe: bool,
     /// LCG seed for the §5.5 audio content.
     pub seed: u32,
 }
@@ -164,7 +198,41 @@ impl JointFrameSpec {
             frame_bytes: JOINT_FRAME_BYTES,
             aspf: false,
             front_sum: false,
+            frame_type: FrameType::Normal,
+            psc: 0,
+            short_raw: 0,
+            lfe: false,
             seed,
+        }
+    }
+
+    /// A plain (non-joint) stereo normal frame: both channels carry
+    /// their own 32 sub-bands, `JOINX = [0, 0]`, one subframe,
+    /// `nSSC = 2` (16 blocks = 512 PCM samples per channel). The
+    /// `FSIZE` is roomier than the joint default's because both
+    /// channels carry full-width §5.5 payloads (and the batteries
+    /// scale it to `nSSC = 4` / two-subframe shapes).
+    pub fn default_plain(seed: u32) -> Self {
+        Self {
+            n_subs: [32, 32],
+            joinx: [0, 0],
+            join_symbols: Vec::new(),
+            frame_bytes: PLAIN_FRAME_BYTES,
+            ..Self::default_joint(seed)
+        }
+    }
+
+    /// The committed termination-frame shape: a plain stereo frame
+    /// with `FTYPE = 0`, one subframe, `nSSC = 2` whose second
+    /// subsubframe is **partial** (`PSC = 5` -> 13 blocks = 416 PCM
+    /// samples per channel), and a `SHORT` deficit of 11 pad samples
+    /// (`short_raw = 10`).
+    pub fn default_termination(seed: u32) -> Self {
+        Self {
+            frame_type: FrameType::Termination,
+            psc: TERM_PSC,
+            short_raw: 10,
+            ..Self::default_plain(seed)
         }
     }
 }
@@ -206,19 +274,48 @@ pub fn build_joint_frame(template: &DtsFrameHeader, seed: u32) -> Vec<u8> {
 /// field-by-field §5.3.2 / §5.4.1 / §5.5 writer behind
 /// [`build_joint_frame`], with every joint-intensity knob exposed.
 pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -> Vec<u8> {
+    assert!(
+        spec.psc == 0 || spec.frame_type == FrameType::Termination,
+        "PSC > 0 exists only in a termination frame (§5.4.1, PDF p.30)"
+    );
+    assert!(spec.psc < 8 && spec.short_raw <= 30);
+
+    // NBLKS + 1 = total subband-sample rows across all subframes; a
+    // partial last subsubframe (last subframe only) shrinks it by
+    // `8 - psc` blocks.
+    let total_blocks = spec.n_subframes * spec.n_ssc * 8
+        - if spec.psc > 0 {
+            8 - spec.psc as usize
+        } else {
+            0
+        };
+    assert!(
+        (6..=128).contains(&total_blocks),
+        "NBLKS raw must be 5..=127"
+    );
+
     let mut header = *template;
-    header.frame_type = FrameType::Normal;
-    header.sample_count_per_block = 32;
+    header.frame_type = spec.frame_type;
+    header.sample_count_per_block = match spec.frame_type {
+        FrameType::Normal => 32,
+        // SHORT (deficit) raw 0..=30 is stored as +1 by the parser's
+        // convention; the frame pads `short_raw + 1` PCM samples.
+        FrameType::Termination => spec.short_raw + 1,
+    };
     header.crc_present = spec.cpf;
     header.header_crc = if spec.cpf { Some(0) } else { None };
-    header.blocks_per_frame = (spec.n_subframes * spec.n_ssc * 8 - 1) as u8;
+    header.blocks_per_frame = (total_blocks - 1) as u8;
     header.frame_size_bytes = spec.frame_bytes as u16;
     header.dynamic_range = spec.dynf_code.is_some();
     header.time_stamp = false;
     header.aux_data = false;
     header.ext_coding = false;
     header.aspf = spec.aspf;
-    header.lfe = LfeMode::None;
+    header.lfe = if spec.lfe {
+        LfeMode::Mode1 // LFF = 1 -> 128x interpolation
+    } else {
+        LfeMode::None
+    };
     header.predictor_history = false;
     header.front_sum = spec.front_sum;
     header.surround_sum = false;
@@ -275,10 +372,16 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
     }
 
     let mut lcg = Lcg(spec.seed);
-    for _subframe in 0..spec.n_subframes {
+    for subframe in 0..spec.n_subframes {
+        // The partial subsubframe (PSC > 0) sits in the last subframe.
+        let sf_psc = if subframe == spec.n_subframes - 1 {
+            spec.psc as usize
+        } else {
+            0
+        };
         // ---- §5.4.1 Primary Audio Coding Side Information ----
         b.push((spec.n_ssc - 1) as u32, 2); // SSC
-        b.push(0, 3); // PSC = 0
+        b.push(sf_psc as u32, 3); // PSC
         for ch in 0..2 {
             for _ in 0..spec.n_subs[ch] {
                 b.push(0, 1); // PMODE[ch][n] = 0 (no ADPCM)
@@ -335,16 +438,35 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
             b.push(0xDEAD, 16); // SICRC — consumed, never verified
         }
 
+        // ---- §5.5 LFE phase (Table 5-29): 2·LFF·nSSC 8-bit samples
+        // + 8-bit LFEscaleIndex, before the audio-data arrays. The
+        // count has no PSC term (whole subsubframes).
+        if spec.lfe {
+            for _ in 0..2 * spec.n_ssc {
+                // Small signed 8-bit decimated samples.
+                b.push((lcg.next_u32() % 201).wrapping_sub(100) & 0xff, 8);
+            }
+            b.push(60, 8); // LFEscaleIndex (well inside the 7-bit RMS table)
+        }
+
         // ---- §5.5 Audio Data (Table 5-29) ----
         for ssf in 0..spec.n_ssc {
+            // §5.4.1 PSC: the last subsubframe of a termination-frame
+            // subframe is partial — `sf_psc` samples per subband.
+            let count = if sf_psc > 0 && ssf == spec.n_ssc - 1 {
+                sf_psc
+            } else {
+                8
+            };
             for ch in 0..2 {
                 for _n in 0..spec.n_subs[ch] {
-                    for _m in 0..8 {
+                    for _m in 0..count {
                         b.push((lcg.nfe_sample() as u32) & 0x1f, 5);
                     }
                 }
             }
-            // DSYNC after every subsubframe when ASPF, else only the last.
+            // DSYNC after every subsubframe when ASPF, else only the last
+            // (a DSYNC always occurs after a partial subsubframe).
             if spec.aspf || ssf == spec.n_ssc - 1 {
                 b.push(0xffff, 16);
             }
@@ -378,5 +500,33 @@ pub fn build_joint_stream(n_frames: usize) -> Vec<u8> {
     for k in 0..n_frames {
         stream.extend_from_slice(&build_joint_frame(&template, 0x1234_5678 ^ (k as u32) << 8));
     }
+    stream
+}
+
+/// The §5.3.1 header template shared by every synthetic frame: the
+/// first frame of the committed real stereo fixture (so AMODE/SFREQ/
+/// RATE/PCMR are values a real encoder emits).
+pub fn template_header() -> DtsFrameHeader {
+    let template_bytes = include_bytes!("../fixtures/dts_5_frames.bin");
+    parse_frame_header(template_bytes).expect("fixture header parses")
+}
+
+/// Build the synthetic **termination-ended** elementary stream:
+/// `n_frames - 1` plain normal stereo frames (512 samples each)
+/// followed by one termination frame ([`JointFrameSpec::
+/// default_termination`]: `FTYPE = 0`, `nSSC = 2`, `PSC = 5` -> 416
+/// samples, `SHORT` deficit 11) — the spec's own use case, "to
+/// accurately align the end of an audio sequence with a video frame
+/// end point" (§5.3.1, PDF p.18).
+pub fn build_termination_stream(n_frames: usize) -> Vec<u8> {
+    assert!(n_frames >= 1);
+    let template = template_header();
+    let mut stream = Vec::with_capacity(n_frames * JOINT_FRAME_BYTES);
+    for k in 0..n_frames - 1 {
+        let spec = JointFrameSpec::default_plain(0x5EED_0000 ^ (k as u32) << 8);
+        stream.extend_from_slice(&build_frame_from_spec(&template, &spec));
+    }
+    let spec = JointFrameSpec::default_termination(0x5EED_0000 ^ ((n_frames - 1) as u32) << 8);
+    stream.extend_from_slice(&build_frame_from_spec(&template, &spec));
     stream
 }
