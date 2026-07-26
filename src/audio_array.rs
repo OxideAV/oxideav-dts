@@ -190,21 +190,38 @@ fn sign_extend(value: u32, width: u32) -> i32 {
     ((value << shift) as i32) >> shift
 }
 
-/// Extract one subband's eight `AUDIO[m]` quantization indices for one
-/// subsubframe from `br`, dispatching on the `(abits, sel)` pair per
-/// the §5.5 Table 5-29 `switch (nQType)`.
+/// Extract one subband's `count` `AUDIO[m]` quantization indices for
+/// one subsubframe from `br`, dispatching on the `(abits, sel)` pair
+/// per the §5.5 Table 5-29 `switch (nQType)`.
 ///
-/// * [`AudioQuantType::NoBits`] — eight zeros, no bits read.
-/// * [`AudioQuantType::Huffman`] — eight §D.5 Huffman-coded indices.
-/// * [`AudioQuantType::NoEncoding`] — eight sign-extended binary-code
-///   fields of [`nfe_word_bits`] width.
-/// * [`AudioQuantType::BlockCode`] — two [`block_code_word_bits`]-wide
-///   block-code words, each expanded to four samples.
+/// `count` is 8 for a normal subsubframe and `PSC ∈ 1..=7` for the
+/// trailing **partial** subsubframe of a termination frame (§5.4.1
+/// PSC, PDF p.30: "PSC indicates the number of subband samples held
+/// in a partial subsubframe for each of the active subbands").
+///
+/// * [`AudioQuantType::NoBits`] — `count` zeros, no bits read.
+/// * [`AudioQuantType::Huffman`] — `count` §D.5 Huffman-coded indices
+///   (the code is per-sample, so a partial subsubframe extracts
+///   exactly `count` codewords).
+/// * [`AudioQuantType::NoEncoding`] — `count` sign-extended
+///   binary-code fields of [`nfe_word_bits`] width (likewise
+///   per-sample).
+/// * [`AudioQuantType::BlockCode`] — [`block_code_word_bits`]-wide
+///   block-code words, each expanding to **four** samples; a partial
+///   subsubframe extracts `ceil(count / 4)` words and keeps the first
+///   `count` decoded samples. The four-sample word is indivisible, so
+///   the encoder pads the trailing word the same way the spec
+///   documents for the other fixed-span carrier (§5.5 HFREQ, PDF
+///   p.33: samples beyond the subframe "are padded with either zeros
+///   or 'don't care' and then vector-quantized" and the decoder "will
+///   only pick" the live ones).
 fn extract_subband_audio(
     br: &mut BitReader<'_>,
     abits: u8,
     sel: u8,
+    count: usize,
 ) -> Result<[i32; SAMPLES_PER_SUBSUBFRAME]> {
+    debug_assert!((1..=SAMPLES_PER_SUBSUBFRAME).contains(&count));
     let mut audio = [0_i32; SAMPLES_PER_SUBSUBFRAME];
     match audio_quant_type(abits, sel) {
         AudioQuantType::NoBits => {}
@@ -212,14 +229,14 @@ fn extract_subband_audio(
             // SEL selects the §D.5 book within the ABITS group.
             let codebook = AudioHuffCodebook::from_abits_sel(abits, sel)
                 .ok_or(Error::HuffmanDecodeFailed { table: "AUDIO" })?;
-            for slot in audio.iter_mut() {
+            for slot in audio.iter_mut().take(count) {
                 let level = decode_audio_huff_in(br, codebook)?;
                 *slot = i32::from(level);
             }
         }
         AudioQuantType::NoEncoding => {
             let width = nfe_word_bits(abits).ok_or(Error::InvalidStepSize { abits })?;
-            for slot in audio.iter_mut() {
+            for slot in audio.iter_mut().take(count) {
                 let raw = br.read_bits(width)?;
                 *slot = sign_extend(raw, width);
             }
@@ -228,9 +245,18 @@ fn extract_subband_audio(
             let width = block_code_word_bits(abits).ok_or(Error::InvalidStepSize { abits })?;
             let n_levels = u32::from(crate::audio_data::QUANT_LEVELS[abits as usize]);
             let mut m = 0usize;
-            for _ in 0..2 {
+            while m < count {
                 let code = br.read_bits(width)?;
-                decode_block_code(code, n_levels, &mut audio[m..m + 4])?;
+                if count - m >= 4 {
+                    decode_block_code(code, n_levels, &mut audio[m..m + 4])?;
+                } else {
+                    // Trailing partial word: decode all four samples,
+                    // keep only the live `count - m` (the rest are the
+                    // encoder's pad).
+                    let mut word = [0_i32; 4];
+                    decode_block_code(code, n_levels, &mut word)?;
+                    audio[m..count].copy_from_slice(&word[..count - m]);
+                }
                 m += 4;
             }
         }
@@ -370,7 +396,73 @@ pub fn decode_audio_data_subframe_at(
     table: StepSizeTable,
     aspf: bool,
 ) -> core::result::Result<(Vec<SubbandSampleMatrix>, usize), AudioArrayDecodeError> {
+    decode_audio_data_subframe_partial_at(
+        bytes, bit_offset, side, sel, adj, n_vqsub, n_subs, n_ssc, 0, table, aspf,
+    )
+}
+
+/// [`decode_audio_data_subframe_at`] with the §5.4.1 `PSC` (Partial
+/// Subsubframe Sample Count) semantics of a **termination frame**
+/// applied: when `psc ∈ 1..=7`, the **last** of the subframe's `n_ssc`
+/// subsubframes is *partial* — it holds `psc` subband samples per
+/// active subband instead of 8 (PDF p.30: "PSC indicates the number
+/// of subband samples held in a partial subsubframe for each of the
+/// active subbands. A partial subsubframe is one which has less than
+/// 8 subband samples. It exists only in a termination frame and is
+/// always at the end of last normal subsubframe. A DSYNC word will
+/// always occur after a partial subsubframe.").
+///
+/// That the partial subsubframe is the last one **counted by** `nSSC`
+/// (rather than an extra, uncounted tail after them) follows from the
+/// staged spec's own ranges: a termination frame's `NBLKS` "can take
+/// any value in its valid range" `[5, 127]` (PDF p.18), so the
+/// minimum legal termination frame carries 6 subband-sample blocks —
+/// which is expressible as `nSSC = 1` with a 6-sample partial
+/// subsubframe but not as one full subsubframe *plus* a tail (8 + PSC
+/// ≥ 8 > 6); and §5.2's frame layout caps a subframe at "up to 4
+/// subsubframes" (PDF p.16), which an uncounted fifth tail after
+/// `nSSC = 4` would violate.
+///
+/// The partial subsubframe changes only the last iteration of the
+/// Table 5-29 sample loop:
+///
+/// * per-sample carriers (§D.5 Huffman, NFE binary) extract exactly
+///   `psc` codewords per active subband;
+/// * the four-sample §D.6 block-code carrier extracts
+///   `ceil(psc / 4)` words and keeps the first `psc` samples (see
+///   [`extract_subband_audio`]);
+/// * `ABITS = 0` subbands extract nothing, as always;
+/// * the `DSYNC` trailer placement is unchanged — after the last
+///   (here: partial) subsubframe always, and after every subsubframe
+///   when `ASPF` is set, which realises the p.30 "A DSYNC word will
+///   always occur after a partial subsubframe" clause.
+///
+/// The returned matrices have `(n_ssc - 1) * 8 + psc` rows per
+/// channel when `psc > 0` (the frame-level row budget is `NBLKS + 1`
+/// across all subframes), and `bits_consumed` accounts exactly for
+/// the truncated extraction.
+///
+/// `psc = 0` reproduces [`decode_audio_data_subframe_at`] verbatim.
+/// `psc` is trusted to be `< 8` (it is a 3-bit wire field); the
+/// termination-frame gating ("exists only in a termination frame")
+/// is the frame-level caller's to enforce, since this walk does not
+/// see the §5.3.1 `FTYPE`.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_audio_data_subframe_partial_at(
+    bytes: &[u8],
+    bit_offset: usize,
+    side: &[ChannelSideInfo],
+    sel: impl Fn(usize, u8) -> u8,
+    adj: impl Fn(usize, u8) -> ScaleFactorAdjustment,
+    n_vqsub: &[usize],
+    n_subs: &[usize],
+    n_ssc: usize,
+    psc: u8,
+    table: StepSizeTable,
+    aspf: bool,
+) -> core::result::Result<(Vec<SubbandSampleMatrix>, usize), AudioArrayDecodeError> {
     let n_pchs = side.len();
+    let psc = usize::from(psc) % SAMPLES_PER_SUBSUBFRAME;
 
     // Reject the VQ / ADPCM blockers up front so a partially-decoded
     // matrix is never returned.
@@ -393,7 +485,13 @@ pub fn decode_audio_data_subframe_at(
         }
     }
 
-    let rows = n_ssc * SAMPLES_PER_SUBSUBFRAME;
+    // Row budget: the last subsubframe is partial (psc rows) on a
+    // termination-frame subframe, full (8 rows) otherwise.
+    let rows = if psc > 0 {
+        (n_ssc - 1) * SAMPLES_PER_SUBSUBFRAME + psc
+    } else {
+        n_ssc * SAMPLES_PER_SUBSUBFRAME
+    };
     let mut matrices: Vec<SubbandSampleMatrix> = vec![vec![[0.0_f64; NUM_SUBBAND]; rows]; n_pchs];
 
     let byte_offset = bit_offset / 8;
@@ -405,6 +503,13 @@ pub fn decode_audio_data_subframe_at(
 
     for subsubframe in 0..n_ssc {
         let base = subsubframe * SAMPLES_PER_SUBSUBFRAME;
+        // §5.4.1 PSC: the last subsubframe of a termination-frame
+        // subframe holds `psc < 8` samples per active subband.
+        let count = if psc > 0 && subsubframe == n_ssc - 1 {
+            psc
+        } else {
+            SAMPLES_PER_SUBSUBFRAME
+        };
         for (ch, ch_side) in side.iter().enumerate() {
             let matrix = &mut matrices[ch];
             // `n` is the subband index, used to address ch_side.abits /
@@ -414,7 +519,7 @@ pub fn decode_audio_data_subframe_at(
             for n in 0..n_vqsub[ch] {
                 let abits = ch_side.abits[n];
                 let sel_val = sel(ch, abits);
-                let audio = extract_subband_audio(&mut br, abits, sel_val)?;
+                let audio = extract_subband_audio(&mut br, abits, sel_val, count)?;
 
                 // §5.5 transient-aware rScale composition.
                 let scale_idx = transient_scale_index(ch_side.tmode[n], n_ssc, subsubframe);
@@ -422,7 +527,7 @@ pub fn decode_audio_data_subframe_at(
                 let step = table.step_size(abits)?;
                 let r_scale = step * f64::from(scale) * adj(ch, abits).multiplier_f64();
 
-                for (m, &index) in audio.iter().enumerate() {
+                for (m, &index) in audio.iter().enumerate().take(count) {
                     matrix[base + m][n] = r_scale * f64::from(index);
                 }
                 // PMODE != 0 subbands were already rejected above, so no
@@ -681,6 +786,234 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bits, 32);
+    }
+
+    // -----------------------------------------------------------
+    // §5.4.1 PSC — termination-frame partial subsubframe.
+    // -----------------------------------------------------------
+
+    /// `psc = 0` through the partial entry point is bit-for-bit the
+    /// normal walk: same matrices, same bit count.
+    #[test]
+    fn psc_zero_is_identity_with_normal_walk() {
+        let mut ch = ChannelSideInfo::cleared();
+        ch.abits[0] = 8;
+        ch.scales[0][0] = 4;
+        let side = vec![ch];
+        let vals = [1i32, -1, 2, -2, 3, -3, 4, -4];
+        let mut fields: Vec<(u32, u8)> = vals.iter().map(|&v| ((v as u32) & 0x1f, 5u8)).collect();
+        fields.push((0xffff, 16));
+        let stream = pack_fields(&fields);
+
+        let normal = decode_audio_data_subframe_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 7,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            1,
+            StepSizeTable::Lossy,
+            false,
+        )
+        .unwrap();
+        let partial = decode_audio_data_subframe_partial_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 7,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            1,
+            0,
+            StepSizeTable::Lossy,
+            false,
+        )
+        .unwrap();
+        assert_eq!(normal, partial);
+    }
+
+    /// NFE (per-sample binary) partial subsubframe: `nSSC = 2`,
+    /// `PSC = 3` extracts 8 + 3 five-bit fields, returns 11 rows, and
+    /// the bit budget is exactly `11·5 + 16` (one DSYNC).
+    #[test]
+    fn psc_nfe_truncates_rows_and_bits_exactly() {
+        let mut ch = ChannelSideInfo::cleared();
+        ch.abits[0] = 8;
+        ch.scales[0][0] = 4;
+        let side = vec![ch];
+
+        let vals = [1i32, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6];
+        let mut fields: Vec<(u32, u8)> = vals.iter().map(|&v| ((v as u32) & 0x1f, 5u8)).collect();
+        fields.push((0xffff, 16)); // DSYNC after the partial subsubframe
+        let stream = pack_fields(&fields);
+
+        let (mats, bits) = decode_audio_data_subframe_partial_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 7,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            2,
+            3,
+            StepSizeTable::Lossy,
+            false,
+        )
+        .unwrap();
+        assert_eq!(mats[0].len(), 11, "(nSSC-1)*8 + PSC rows");
+        assert_eq!(bits, 11 * 5 + 16, "bit budget exact through truncation");
+        let step = StepSizeTable::Lossy.step_size(8).unwrap();
+        let r = step * 4.0;
+        for (m, &v) in vals.iter().enumerate() {
+            assert!((mats[0][m][0] - r * f64::from(v)).abs() < 1e-9);
+        }
+    }
+
+    /// §D.6 block-code partial subsubframe, `PSC ≤ 4`: one four-sample
+    /// word is extracted (`ceil(3/4) = 1`), the first three decoded
+    /// samples are kept, the fourth (encoder pad) is discarded.
+    #[test]
+    fn psc_block_code_single_word_keeps_live_samples() {
+        let mut ch = ChannelSideInfo::cleared();
+        ch.abits[0] = 1; // V3: 3 levels, 7-bit word, 4 samples/word
+        ch.scales[0][0] = 1;
+        let side = vec![ch];
+
+        // Base-3 digits LSD-first (element i = code%3 - 1): live
+        // samples (+1, -1, 0), pad digit 2 (= +1, must be ignored).
+        // code = 2 + 3·0 + 9·1 + 27·2 = 65.
+        let stream = pack_fields(&[(65, 7), (0xffff, 16)]);
+
+        let (mats, bits) = decode_audio_data_subframe_partial_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 1, // terminal SEL for the ABITS=1 group -> block code
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            1,
+            3,
+            StepSizeTable::Lossy,
+            false,
+        )
+        .unwrap();
+        assert_eq!(mats[0].len(), 3);
+        assert_eq!(bits, 7 + 16, "one 7-bit V3 word + DSYNC");
+        let step = StepSizeTable::Lossy.step_size(1).unwrap();
+        let got: Vec<f64> = (0..3).map(|m| mats[0][m][0]).collect();
+        let want = [step, -step, 0.0];
+        for (g, w) in got.iter().zip(want) {
+            assert!((g - w).abs() < 1e-9, "got {got:?}");
+        }
+    }
+
+    /// §D.6 block-code partial subsubframe, `PSC = 5`: two words
+    /// (`ceil(5/4) = 2`), the second word contributes one live sample.
+    #[test]
+    fn psc_block_code_two_words_for_five_samples() {
+        let mut ch = ChannelSideInfo::cleared();
+        ch.abits[0] = 1;
+        ch.scales[0][0] = 1;
+        let side = vec![ch];
+
+        // Word 1: (+1, +1, -1, -1) -> digits (2,2,0,0) -> 2 + 6 = 8.
+        // Word 2: live (-1), pads 0 -> digits (0,1,1,1) -> 3+9+27 = 39.
+        let stream = pack_fields(&[(8, 7), (39, 7), (0xffff, 16)]);
+
+        let (mats, bits) = decode_audio_data_subframe_partial_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 1,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            1,
+            5,
+            StepSizeTable::Lossy,
+            false,
+        )
+        .unwrap();
+        assert_eq!(mats[0].len(), 5);
+        assert_eq!(bits, 2 * 7 + 16, "two 7-bit V3 words + DSYNC");
+        let step = StepSizeTable::Lossy.step_size(1).unwrap();
+        let want = [step, step, -step, -step, -step];
+        for (m, w) in want.iter().enumerate() {
+            assert!((mats[0][m][0] - w).abs() < 1e-9);
+        }
+    }
+
+    /// ASPF on a partial subframe: a DSYNC follows the full
+    /// subsubframe *and* the partial one (the p.30 "A DSYNC word will
+    /// always occur after a partial subsubframe" clause composes with
+    /// the per-subsubframe ASPF rule).
+    #[test]
+    fn psc_with_aspf_places_dsync_after_both_subsubframes() {
+        let mut ch = ChannelSideInfo::cleared();
+        ch.abits[0] = 8;
+        ch.scales[0][0] = 4;
+        let side = vec![ch];
+
+        let mut fields: Vec<(u32, u8)> = (0..8).map(|_| (0u32, 5u8)).collect();
+        fields.push((0xffff, 16)); // ASPF DSYNC after subsubframe 0
+        fields.extend((0..2).map(|_| (0u32, 5u8))); // partial: PSC = 2
+        fields.push((0xffff, 16)); // DSYNC after the partial subsubframe
+        let stream = pack_fields(&fields);
+
+        let (mats, bits) = decode_audio_data_subframe_partial_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 7,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            2,
+            2,
+            StepSizeTable::Lossy,
+            true,
+        )
+        .unwrap();
+        assert_eq!(mats[0].len(), 10);
+        assert_eq!(bits, 10 * 5 + 2 * 16);
+    }
+
+    /// A truncated partial subsubframe (stream ends inside the PSC
+    /// samples) surfaces a typed EOF, not a panic or a padded matrix.
+    #[test]
+    fn psc_truncated_stream_is_typed_eof() {
+        let mut ch = ChannelSideInfo::cleared();
+        ch.abits[0] = 8;
+        ch.scales[0][0] = 4;
+        let side = vec![ch];
+
+        // 8 full samples then only 1 of the 3 partial samples.
+        let fields: Vec<(u32, u8)> = (0..9).map(|_| (0u32, 5u8)).collect();
+        let stream = pack_fields(&fields);
+
+        let err = decode_audio_data_subframe_partial_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 7,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            2,
+            3,
+            StepSizeTable::Lossy,
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AudioArrayDecodeError::Bitstream(Error::UnexpectedEof)
+        ));
     }
 
     // -----------------------------------------------------------

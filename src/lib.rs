@@ -537,8 +537,8 @@ mod registry;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use crate::audio_array::{
-    decode_audio_data_subframe_at, decode_lfe_phase_at, AudioArrayDecodeError, AudioArrayError,
-    SubbandSampleMatrix,
+    decode_audio_data_subframe_at, decode_audio_data_subframe_partial_at, decode_lfe_phase_at,
+    AudioArrayDecodeError, AudioArrayError, SubbandSampleMatrix,
 };
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]

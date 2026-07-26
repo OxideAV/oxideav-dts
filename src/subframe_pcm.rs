@@ -4,7 +4,7 @@
 //! Round 346 (2026-06-20) composes the two already-landed halves of the
 //! Core reconstruction chain into one per-subframe call:
 //!
-//! 1. the round-340 §5.5 [`decode_audio_data_subframe_at`] walk, which
+//! 1. the round-340 §5.5 [`crate::decode_audio_data_subframe_at`] walk, which
 //!    turns the §5.4.1 side information + the §5.5 `Audio Data` arrays
 //!    into the per-channel subband-sample matrices
 //!    `aPrmCh[ch].aSubband[n].aSample[m]`, and
@@ -37,7 +37,11 @@
 //! Each channel's `nSSC*8` per-sample subband rows synthesise to
 //! `nSSC*8*32` PCM samples (the §C.2.5 driver emits 32 PCM samples per
 //! subband-sample row). A subframe therefore yields `nSSC * 256` PCM
-//! samples per channel.
+//! samples per channel — except on a **termination frame** (§5.3.1
+//! `FTYPE = 0`) whose subframe signals a §5.4.1 partial subsubframe
+//! (`PSC > 0`): its last subsubframe carries `PSC < 8` samples per
+//! subband, so the subframe yields `((nSSC-1)*8 + PSC) * 32` PCM
+//! samples (see [`SubframePcmDecoder::decode_subframe_partial`]).
 //!
 //! # Persistence across subframes
 //!
@@ -68,7 +72,8 @@
 //! joint step.
 
 use crate::audio_array::{
-    decode_audio_data_subframe_at, decode_lfe_phase_at, AudioArrayDecodeError, SubbandSampleMatrix,
+    decode_audio_data_subframe_partial_at, decode_lfe_phase_at, AudioArrayDecodeError,
+    SubbandSampleMatrix,
 };
 use crate::audio_header::AudioCodingHeader;
 use crate::cos_mod::NUM_SUBBAND;
@@ -81,7 +86,8 @@ use crate::subframe::{ChannelSideInfo, SideInfoTail};
 /// One subframe's reconstructed PCM, planar (one `Vec<i32>` per
 /// channel). Every channel's vec has the same length — `nSSC * 256`
 /// samples (`nSSC` subsubframes × 8 samples × 32 PCM samples per
-/// subband-sample row).
+/// subband-sample row), or `((nSSC-1)·8 + PSC) · 32` samples when a
+/// termination frame's subframe ends in a §5.4.1 partial subsubframe.
 pub type SubframePcm = Vec<Vec<i32>>;
 
 /// PCM samples one §C.2.5 subband-sample row expands to (the driver
@@ -93,7 +99,7 @@ pub const PCM_PER_SUBBAND_ROW: usize = NUM_SUBBAND;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SubframePcmError {
-    /// The §5.5 [`decode_audio_data_subframe_at`] walk failed: a
+    /// The §5.5 [`crate::decode_audio_data_subframe_at`] walk failed: a
     /// bit-stream-level error, or an Annex D VQ-codebook blocker
     /// (`PMODE != 0` / `nVQSUB < nSUBS`). Carries the underlying
     /// [`AudioArrayDecodeError`].
@@ -140,6 +146,19 @@ pub enum SubframePcmError {
         /// 0-based destination channel whose joint import failed.
         ch: usize,
     },
+    /// A subframe's §5.4.1 `PSC` (Partial Subsubframe Sample Count) was
+    /// non-zero but the §5.3.1 frame header's `FTYPE` says **normal**
+    /// frame. Per PDF p.30 a partial subsubframe "exists only in a
+    /// termination frame", so a normal frame signalling one is
+    /// structurally invalid and the decode declines rather than
+    /// truncating a normal frame's audio. Carries the 0-based subframe
+    /// index and the offending wire `PSC`.
+    PartialSubsubframeInNormalFrame {
+        /// 0-based subframe index whose side info carried `PSC > 0`.
+        subframe: usize,
+        /// The offending 3-bit wire `PSC` value (`1..=7`).
+        psc: u8,
+    },
 }
 
 impl core::fmt::Display for SubframePcmError {
@@ -165,6 +184,12 @@ impl core::fmt::Display for SubframePcmError {
                 f,
                 "channel {ch} joint-intensity sub-band copy failed: JOIN_SCALES / \
                  nSUBS bounds inconsistent with the decoded sub-band matrices"
+            ),
+            SubframePcmError::PartialSubsubframeInNormalFrame { subframe, psc } => write!(
+                f,
+                "subframe {subframe} signals a partial subsubframe (PSC={psc}) \
+                 but the frame header's FTYPE is normal; a partial subsubframe \
+                 exists only in a termination frame (§5.4.1, PDF p.30)"
             ),
         }
     }
@@ -247,7 +272,7 @@ impl SubframePcmDecoder {
 
     /// Decode one §5.4/§5.5 audio subframe to planar PCM, end to end.
     ///
-    /// Runs the §5.5 [`decode_audio_data_subframe_at`] walk to get the
+    /// Runs the §5.5 [`crate::decode_audio_data_subframe_at`] walk to get the
     /// per-channel subband-sample matrices, then the §C.2.5
     /// [`MultiChannelQmf`] synthesis to turn them into PCM. The
     /// per-channel filter state persists into the next call.
@@ -322,6 +347,61 @@ impl SubframePcmDecoder {
         aspf: bool,
         join_scales: &[Vec<f64>],
     ) -> Result<(SubframePcm, usize), SubframePcmError> {
+        self.decode_subframe_partial(
+            bytes,
+            bit_offset,
+            header,
+            coding,
+            side,
+            n_ssc,
+            0,
+            aspf,
+            join_scales,
+        )
+    }
+
+    /// Like [`Self::decode_subframe_with_joint`] but with the §5.4.1
+    /// `PSC` (Partial Subsubframe Sample Count) of a **termination
+    /// frame** applied: when `psc ∈ 1..=7`, the last of this
+    /// subframe's `n_ssc` subsubframes is *partial* — it carries `psc`
+    /// subband samples per active subband instead of 8, so the
+    /// subframe reconstructs to `((n_ssc - 1) * 8 + psc) * 32` PCM
+    /// samples per channel and the §5.5 bit budget shrinks exactly by
+    /// the untransmitted samples (see
+    /// [`crate::decode_audio_data_subframe_partial_at`] for the
+    /// spec-clause derivation). `psc = 0` is the normal-frame case and
+    /// reproduces [`Self::decode_subframe_with_joint`] verbatim.
+    ///
+    /// The spec ties `PSC > 0` to termination frames only ("It exists
+    /// only in a termination frame", PDF p.30); this per-subframe
+    /// entry point trusts the caller on that frame-level gate (the
+    /// frame walk [`decode_core_frame`] enforces it, surfacing
+    /// [`SubframePcmError::PartialSubsubframeInNormalFrame`]).
+    ///
+    /// When the frame carries an LFE channel, the §5.5 LFE phase is
+    /// extracted and interpolated at its spec-literal size (Table
+    /// 5-29: `2·LFF·nSSC` decimated samples — the count has no `PSC`
+    /// term, so the LFE always covers whole subsubframes) and the
+    /// interpolated plane is then truncated to the primary channels'
+    /// PCM length, keeping every output plane aligned on the valid
+    /// prefix of the terminated subframe.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::decode_subframe_with_joint`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_subframe_partial(
+        &mut self,
+        bytes: &[u8],
+        bit_offset: usize,
+        header: &DtsFrameHeader,
+        coding: &AudioCodingHeader,
+        side: &[ChannelSideInfo],
+        n_ssc: usize,
+        psc: u8,
+        aspf: bool,
+        join_scales: &[Vec<f64>],
+    ) -> Result<(SubframePcm, usize), SubframePcmError> {
         let channels = self.qmf.channel_count();
         if side.len() != channels {
             return Err(SubframePcmError::ChannelCountMismatch {
@@ -366,26 +446,42 @@ impl SubframePcmDecoder {
 
         let table = StepSizeTable::for_rate(header.rate_index);
 
+        // Subband-sample rows this subframe reconstructs: the last
+        // subsubframe is partial (psc rows) on a termination-frame
+        // subframe, full (8 rows) otherwise.
+        let rows = if psc > 0 {
+            (n_ssc - 1) * 8 + usize::from(psc)
+        } else {
+            n_ssc * 8
+        };
+
         // (0) §5.5 LFE phase (§2.2): present only when the header's `LFF`
         // is non-zero. The high-frequency-VQ phase (§2.1) is empty for
         // the accepted Core case (`nVQSUB == nSUBS`), so the LFE phase is
         // the first thing in the §5.5 region; reading it advances the
         // cursor to the audio-data phase. Its bits count toward the
-        // subframe's total so the caller advances correctly.
+        // subframe's total so the caller advances correctly. The Table
+        // 5-29 sample count (`2·LFF·nSSC`) has no PSC term — the LFE
+        // plane always covers whole subsubframes — so on a partial
+        // (termination) subframe the interpolated plane is truncated
+        // below to the primary channels' PCM length.
         let lff = header.lfe.code();
         let mut cursor = bit_offset;
         if lff != 0 {
-            let (lfe_pcm, lfe_bits) =
+            let (mut lfe_pcm, lfe_bits) =
                 decode_lfe_phase_at(bytes, cursor, lff, n_ssc, &mut self.lfe)?;
+            lfe_pcm.truncate(rows * PCM_PER_SUBBAND_ROW);
             self.last_lfe_pcm = lfe_pcm;
             cursor += lfe_bits;
         } else {
             self.last_lfe_pcm = Vec::new();
         }
 
-        // (1) §5.5 Audio Data -> per-channel subband-sample matrices.
+        // (1) §5.5 Audio Data -> per-channel subband-sample matrices
+        // (`rows` per channel; the §5.4.1 PSC truncation of the last
+        // subsubframe is applied inside the walk, bit-exactly).
         let (matrices, audio_bits): (Vec<SubbandSampleMatrix>, usize) =
-            decode_audio_data_subframe_at(
+            decode_audio_data_subframe_partial_at(
                 bytes,
                 cursor,
                 side,
@@ -394,6 +490,7 @@ impl SubframePcmDecoder {
                 &n_vqsub,
                 &n_subs,
                 n_ssc,
+                psc,
                 table,
                 aspf,
             )?;
@@ -483,7 +580,12 @@ impl SubframePcmDecoder {
     ///
     /// Returns the concatenated planar PCM (one `Vec<i32>` per channel,
     /// `Σ nSSC · 256` samples each) plus the total bits consumed from
-    /// `first_audio_bit`.
+    /// `first_audio_bit`. This driver assumes whole subsubframes
+    /// (`PSC = 0` in every supplied subframe); for a termination
+    /// frame's partial subsubframe use
+    /// [`Self::decode_subframe_partial`] per subframe or the
+    /// header-driven [`decode_core_frame`] walk, which reads each
+    /// subframe's own `SSC`/`PSC` prefix.
     ///
     /// # Errors
     ///
@@ -657,7 +759,9 @@ impl From<crate::Error> for CoreFrameDecodeError {
 /// [`CoreFrameDecodeError::Decode`].
 ///
 /// Returns planar PCM (one `Vec<i32>` per channel, `Σ nSSC · 256`
-/// samples each).
+/// samples each; a termination frame's trailing partial subsubframe
+/// shrinks its subframe's contribution to `((nSSC-1)·8 + PSC) · 32` —
+/// the frame total is always `(NBLKS + 1) · 32`).
 ///
 /// # Errors
 ///
@@ -914,7 +1018,7 @@ impl SubframePcmDecoder {
 
         let n_subs = coding.n_subs();
         let mut bit = header_bits + ach_bits;
-        for _ in 0..coding.n_subframes {
+        for subframe_index in 0..coding.n_subframes {
             // §5.4.1 side info (Table 5-28) through the end of the
             // SCALES block.
             let (side, side_bits) = crate::decode_primary_side_info_at(bytes, bit, &params)?;
@@ -935,13 +1039,27 @@ impl SubframePcmDecoder {
             bit += tail_bits;
 
             let n_ssc = side.subsubframe_count.n_ssc() as usize;
-            let (mut block, audio_bits) = self.decode_subframe_with_joint(
+            // §5.4.1 PSC: a partial (fewer-than-8-sample) trailing
+            // subsubframe "exists only in a termination frame" (PDF
+            // p.30) — a normal frame signalling one is structurally
+            // invalid and declines rather than truncating its audio.
+            let psc = side.subsubframe_count.psc;
+            if psc > 0 && header.frame_type != crate::header::FrameType::Termination {
+                return Err(CoreFrameDecodeError::Decode(
+                    SubframePcmError::PartialSubsubframeInNormalFrame {
+                        subframe: subframe_index,
+                        psc,
+                    },
+                ));
+            }
+            let (mut block, audio_bits) = self.decode_subframe_partial(
                 bytes,
                 bit,
                 header,
                 &coding,
                 &side.channels,
                 n_ssc,
+                psc,
                 header.aspf,
                 &tail.join_scales,
             )?;
@@ -1230,7 +1348,7 @@ mod tests {
 
         // Reference: walk + driver by hand.
         let table = StepSizeTable::for_rate(header.rate_index);
-        let (mats, ref_bits) = decode_audio_data_subframe_at(
+        let (mats, ref_bits) = crate::audio_array::decode_audio_data_subframe_at(
             &stream,
             0,
             &side,

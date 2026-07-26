@@ -988,6 +988,33 @@ impl DtsFrameHeader {
             .map(|bits| (2.0_f64).powi(i32::from(bits) - 1))
     }
 
+    /// The §5.3.1 `SHORT` (Deficit Sample Count) padding a
+    /// **termination frame** asks the decoder to append, in PCM
+    /// samples per channel — or `None` for a normal frame.
+    ///
+    /// Per ETSI TS 102 114 §5.3.1 (PDF p.18): a termination frame
+    /// "carries n×32 core audio samples where block length n is
+    /// adjusted to just fall short of the video end point", and "On
+    /// completion of a termination frame, (SHORT+1) PCM core samples
+    /// must be padded to the output buffers of each channel. The
+    /// padded samples may be zeros or they may be copies of adjacent
+    /// samples." `SHORT` is valid in `[0, 30]` for termination frames
+    /// (Table 5-3; `31` indicates a normal frame), so the returned
+    /// pad is `1..=31` samples.
+    ///
+    /// The decode chain ([`crate::decode_core_frame`] /
+    /// [`crate::CoreStreamDecoder`]) returns only the **decoded**
+    /// samples; appending the presentation pad (and choosing its
+    /// fill) is the caller's output-layer decision, made with this
+    /// accessor. [`Self::sample_count_per_block`] stores the wire
+    /// field as `SHORT + 1`.
+    pub fn termination_pad_samples(&self) -> Option<u8> {
+        match self.frame_type {
+            FrameType::Termination => Some(self.sample_count_per_block),
+            FrameType::Normal => None,
+        }
+    }
+
     /// Resolve [`Self::dialog_normalization`] to a Dialog
     /// Normalization Gain in decibels per **ETSI TS 102 114 V1.3.1
     /// §5.3.1, Table 5-20** (PDF p.24), routed through
