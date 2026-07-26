@@ -21,6 +21,13 @@ const FIVE_ONE: &[u8] = include_bytes!("fixtures/dts_51_lfe.bin");
 /// error paths (reserved selector, out-of-range biased §D.3 index,
 /// bad JOINX source) under damage.
 const JOINT: &[u8] = include_bytes!("fixtures/dts_joint_5_frames.bin");
+/// The spec-built termination-ended stream (round 430): corruption
+/// here additionally exercises the §5.4.1 PSC paths under damage — a
+/// flipped FTYPE bit trips the partial-in-normal-frame decline, a
+/// damaged SSC/PSC prefix reshapes the partial subsubframe's bit
+/// budget (DSYNC mismatch / EOF), and damage inside the truncated
+/// last subsubframe hits the ceil(PSC/4) block-code tail.
+const TERM: &[u8] = include_bytes!("fixtures/dts_term_5_frames.bin");
 
 /// Drive the full decode surface over one (possibly damaged) buffer:
 /// resync-tolerant framing, header parse, PCM decode, LFE plane, and
@@ -46,7 +53,7 @@ fn drive(bytes: &[u8], channels: usize) {
 /// what bounds the stride).
 #[test]
 fn single_byte_corruption_never_panics() {
-    for (fixture, channels) in [(STEREO, 2usize), (FIVE_ONE, 5), (JOINT, 2)] {
+    for (fixture, channels) in [(STEREO, 2usize), (FIVE_ONE, 5), (JOINT, 2), (TERM, 2)] {
         for offset in (0..fixture.len()).step_by(37) {
             for mask in [0x80u8, 0xFF] {
                 let mut damaged = fixture.to_vec();
@@ -69,7 +76,7 @@ fn multi_byte_corruption_and_truncation_never_panic() {
         state ^= state << 5;
         state
     };
-    for (fixture, channels) in [(STEREO, 2usize), (FIVE_ONE, 5), (JOINT, 2)] {
+    for (fixture, channels) in [(STEREO, 2usize), (FIVE_ONE, 5), (JOINT, 2), (TERM, 2)] {
         for _ in 0..200 {
             let mut damaged = fixture.to_vec();
             let hits = 2 + (next() as usize % 6);
