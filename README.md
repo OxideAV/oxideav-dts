@@ -87,12 +87,17 @@ through the §D.11 `DmixTable` and applicable to planar PCM via
 `DynamicDownmix::apply_planar`), and `parse_rev2_aux` /
 `FrameView::rev2_aux` walk the §5.7.2 Rev2 chunk (embedded-ES downmix
 scale, per-subsubframe broadcast DRC values, `DIALNORM_rev2aux`).
-Only the §D.10 VQ /
-ADPCM code books (high-frequency VQ sub-bands and ADPCM prediction
-coefficients) still surface
-`CoreError::Unsupported`; those two tables are **not printed in the
-staged ETSI spec** ("Due to its extensive size, this table is not
-included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
+The §D.10 VQ / ADPCM
+sub-paths (high-frequency VQ sub-bands and ADPCM prediction) are now
+**fully implemented behind a caller-supplied data drop-in**
+(`VqCodebooks`, round 434): the two code books' numeric contents are
+the only missing piece — they are **not printed in the staged ETSI
+spec** ("Due to its extensive size, this table is not included here",
+§D.10.1/§D.10.2), a documented docs-gap that the round-9 container
+forensics settled as final for the staged PDF — so without books those
+frames surface `CoreError::Unsupported`, and with (synthetic stand-in)
+books the full chain is validated bit-exactly in-crate and
+black-box-accepted by the reference decoder.
 
 ### What works today
 
@@ -298,6 +303,35 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
   per-subframe `RANGE` multiply and scale each Table 5-34 256-sample
   subsubframe window by its own Rev2 gain instead
   (`tests/rev2_drc_override.rs`).
+- **§D.10 recovered-book decode paths (round 434)** — the two §5.5
+  sub-paths blocked on the spec-omitted §D.10 code books are fully
+  implemented behind a caller-supplied data drop-in: `HfVqCodebook`
+  (§D.10.2, 1024 × 32; built from raw 16-bit entries via the
+  two-int8-÷ 24 unpacking, or from decoded elements), `AdpcmVqCodebook`
+  (§D.10.1, 4096 × 4; stored integers ÷ 2¹³), `VqCodebooks`, and
+  `SubframePcmDecoder::set_vq_codebooks` /
+  `CoreStreamDecoder::set_vq_codebooks`. With a §D.10.2 book, an
+  HF-VQ frame decodes end to end — the phase-1 10-bit `nVQIndex`
+  region (ahead of the LFE phase) is walked and each HF subband's
+  rows are `SCALES[ch][n][0] · HFREQ[m]` (the Table 5-29
+  `Scale`/`rScale` naming conflation is spec-verbatim; the p.33 HFREQ
+  prose resolves it, and also gives the termination-frame valid-prefix
+  pick rule). With a §D.10.1 book, `PMODE != 0` subbands run the
+  §C.2.2 inverse-ADPCM predictor from the captured 12-bit `PVQ`
+  index, the per-subband reconstruction history (`AdpcmHistory`)
+  carried across subsubframes/subframes and gated at frame boundaries
+  by the §5.3.1 `HFLAG` Predictor History Flag Switch. Without books
+  the typed blocker is unchanged (and now fires before any §5.5 bit
+  is read). Validated bit-exactly against analytic reconstructions
+  with synthetic stand-in books (`tests/d10_vq_decode.rs`: HFLAG
+  carry/reset grid, PSC × HF-VQ, PSC × ADPCM, an
+  HF+ADPCM+LFE+JOINX+DYNF kitchen-sink frame), and black-box
+  (`tests/black_box_d10.rs` + `tests/fixtures/dts_d10_5_frames.bin`):
+  the reference decoder accepts the spec-built HF-VQ/PMODE stream
+  cleanly — exactly `5 × 512` samples per channel, zero errors,
+  books-independent prefix shape-identical (Pearson ≈ 1.0) — pinning
+  our §5.4.1 VQSUB/PMODE/PVQ planes and phase-1 layout against a real
+  decoder's walk.
 - **Annex B CRC-16** — `dts_crc16` / `dts_crc16_update` /
   `DTS_CRC16_TABLE`: the single normative DTS CRC (CRC-CCITT,
   polynomial `0x1021`, init `0xFFFF`, MSB-first, no reflection, no
@@ -309,29 +343,32 @@ included here", §D.10.1/§D.10.2), so they remain a documented docs-gap.
 
 ### Not yet implemented
 
-- The §D.10.1 ADPCM-coefficient VQ and §D.10.2 high-frequency-subband VQ
-  code books (a `PMODE != 0` or `nVQSUB < nSUBS` subband surfaces a typed
-  blocker). These are the last Core-profile blockers, and they are a
-  **recorded docs-gap** (`docs/audio/dts/dts-d10-vq-tables-GAP.md`):
-  the staged ETSI spec deliberately omits both tables ("Due to its
-  extensive size, this table is not included here", §D.10.1 / §D.10.2,
-  PDF p.255) across every edition of the standard, so the 4096 × 4
-  ADPCM book and the 1024 × 32 high-frequency book cannot be
-  transcribed from `docs/audio/dts/`, and clean-room rules bar
-  re-deriving them from any decoder source. The gap doc records the
-  legitimate recovery path — an observer-derived black-box trace
-  sweeping each VQ index in isolation (the values are data, not
-  implementation). Everything the spec *does* define is already
-  landed as the drop-in shell (`d10_vq`): the 10-/12-bit index
-  widths, book dimensions, the §D.10.2
-  two-signed-bytes-each-÷ 24 entry decoding (`unpack_hfreq_vq_entry`;
-  the divisor is the literal 24, **not** `2^4` — settled by the
-  round-408 trace correction), the §D.10.1 ÷ 2¹³ scaling
-  (`adpcm_vq_coeff`, spec anchor `9928 → 1.2119140625`), and the
-  structural §5.5 phase-1 index scanner (`scan_hf_vq_indices_at`).
-  (The `JOIN_SHUFF` / `JOIN_SCALES` joint-intensity tail
-  and the §C.2.3 sub-band copy — previously listed here — *are* now
-  decoded; see "What works today".)
+- The **numeric contents** of the §D.10.1 ADPCM-coefficient VQ and
+  §D.10.2 high-frequency-subband VQ code books (a `PMODE != 0` or
+  `nVQSUB < nSUBS` subband surfaces a typed blocker when no book is
+  supplied). This is the last Core-profile blocker, it is a **recorded
+  docs-gap** (`docs/audio/dts/dts-d10-vq-tables-GAP.md`), and it is
+  now **data acquisition only**: the staged ETSI spec deliberately
+  omits both tables ("Due to its extensive size, this table is not
+  included here", §D.10.1 / §D.10.2, PDF p.255), and the round-9
+  container forensics
+  (`docs/audio/dts/provenance/09-dts-d10-pdf-forensics.md`) settled
+  that the numbers are absent from the staged PDF **in any form** —
+  no attachments, no object streams, exactly one document revision,
+  no hidden layers, no invisible / off-page / clipped text, and a TOC
+  that allocates both subclauses one shared page — so no further work
+  on that file can produce them, and clean-room rules bar re-deriving
+  them from any decoder source. The recovery path on record is an
+  observer-derived black-box trace through a **lawfully-usable
+  vendor decoder oracle** (none is currently staged in `docs/`; the
+  FFmpeg-derived components of the staged codec packs are forbidden
+  as oracles). Everything else is landed: the wire facts and §D.10
+  entry decodings (`unpack_hfreq_vq_entry` — literal ÷ 24, settled
+  round 408 and re-verified round 9; `adpcm_vq_coeff` — ÷ 2¹³, spec
+  anchor `9928 → 1.2119140625`), the structural index scanner
+  (`scan_hf_vq_indices_at`), **and the complete decode paths behind
+  the `VqCodebooks` drop-in** (see "What works today"), so a
+  recovered book is a pure data drop with zero code changes.
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the
   current Core-profile effort.
 - `DtsFrameHeader::verify_header_crc` returns `None` **by design**,
