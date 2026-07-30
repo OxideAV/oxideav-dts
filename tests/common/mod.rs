@@ -129,6 +129,25 @@ pub struct JointFrameSpec {
     pub n_ssc: usize,
     /// Per-channel `nSUBS` (2 channels).
     pub n_subs: [usize; 2],
+    /// Per-channel count of **trailing** §D.10.2 high-frequency-VQ
+    /// subbands (`nVQSUB = nSUBS − hf_subbands`). Those subbands'
+    /// §5.5 region is one 10-bit `nVQIndex` per subband (phase 1,
+    /// before the LFE phase), from [`hf_vq_index`], and their side
+    /// info is the single SCALES factor of the Table 5-28 HF tail
+    /// loop. Default `[0, 0]` = no HF-VQ subbands (a count, not an
+    /// absolute bound, so a spec that overrides `n_subs` keeps the
+    /// no-HF default without also updating this field).
+    pub hf_subbands: [usize; 2],
+    /// Per-channel count of **leading** subbands with `PMODE = 1`
+    /// (ADPCM prediction active): each writes a 12-bit `PVQ` index
+    /// ([`pvq_index`]) in the §5.4.1 PVQ plane. Must be
+    /// `<= nVQSUB[ch]`. Default `[0, 0]` = no prediction.
+    pub adpcm_subbands: [usize; 2],
+    /// §5.3.1 `HFLAG` (Predictor History Flag Switch): when `true`
+    /// the decoder uses the previous frame's §C.2.2 reconstruction
+    /// history; when `false` the history is ignored (entry-point
+    /// frame).
+    pub predictor_history: bool,
     /// Per-channel `JOINX` (0 = no joint coding; `k` = source channel
     /// `k - 1`).
     pub joinx: [u8; 2],
@@ -182,6 +201,15 @@ pub struct JointFrameSpec {
 }
 
 impl JointFrameSpec {
+    /// The per-channel `nVQSUB` this spec resolves to
+    /// (`nSUBS − hf_subbands`).
+    pub fn n_vqsub(&self) -> [usize; 2] {
+        [
+            self.n_subs[0] - self.hf_subbands[0],
+            self.n_subs[1] - self.hf_subbands[1],
+        ]
+    }
+
     /// The committed-fixture shape: one subframe, `nSSC = 2`,
     /// `nSUBS = [32, 16]`, `JOINX = [0, 1]`, Linear6Bit joint scales
     /// from [`JOINT_SCALE_RAW`], no DYNF, no CPF.
@@ -190,6 +218,9 @@ impl JointFrameSpec {
             n_subframes: 1,
             n_ssc: JOINT_N_SSC,
             n_subs: [JOINT_N_SUBS_CH0, JOINT_N_SUBS_CH1],
+            hf_subbands: [0, 0],
+            adpcm_subbands: [0, 0],
+            predictor_history: false,
             joinx: [0, 1],
             join_shuff: 5,
             join_symbols: JOINT_SCALE_RAW.iter().map(|&r| r as i32).collect(),
@@ -279,6 +310,17 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
         "PSC > 0 exists only in a termination frame (§5.4.1, PDF p.30)"
     );
     assert!(spec.psc < 8 && spec.short_raw <= 30);
+    let n_vqsub = spec.n_vqsub();
+    for (ch, &nv) in n_vqsub.iter().enumerate() {
+        assert!(
+            (1..=spec.n_subs[ch]).contains(&nv),
+            "nVQSUB must be 1..=nSUBS"
+        );
+        assert!(
+            spec.adpcm_subbands[ch] <= nv,
+            "PMODE subbands must be audio-coded (n < nVQSUB)"
+        );
+    }
 
     // NBLKS + 1 = total subband-sample rows across all subframes; a
     // partial last subsubframe (last subframe only) shrinks it by
@@ -316,7 +358,7 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
     } else {
         LfeMode::None
     };
-    header.predictor_history = false;
+    header.predictor_history = spec.predictor_history;
     header.front_sum = spec.front_sum;
     header.surround_sum = false;
 
@@ -335,8 +377,9 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
     for ch in 0..2 {
         b.push((spec.n_subs[ch] - 2) as u32, 5); // SUBS[ch]
     }
-    for ch in 0..2 {
-        b.push((spec.n_subs[ch] - 1) as u32, 5); // VQSUB[ch] == nSUBS (no HF-VQ)
+    for &nv in &n_vqsub {
+        // VQSUB[ch]: nVQSUB = VQSUB + 1; == nSUBS means no HF-VQ.
+        b.push((nv - 1) as u32, 5);
     }
     for ch in 0..2 {
         b.push(spec.joinx[ch] as u32, 3); // JOINX[ch]
@@ -383,25 +426,40 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
         b.push((spec.n_ssc - 1) as u32, 2); // SSC
         b.push(sf_psc as u32, 3); // PSC
         for ch in 0..2 {
-            for _ in 0..spec.n_subs[ch] {
-                b.push(0, 1); // PMODE[ch][n] = 0 (no ADPCM)
+            for n in 0..spec.n_subs[ch] {
+                // PMODE plane covers all active subbands; prediction
+                // is active on the leading `adpcm_subbands` ones.
+                b.push(u32::from(n < spec.adpcm_subbands[ch]), 1);
             }
         }
-        // No PVQ plane (all PMODE zero). ABITS plane, BHUFF=6 -> Linear5Bit.
+        // PVQ plane: one 12-bit §D.10.1 index per PMODE-set subband.
         for ch in 0..2 {
-            for _ in 0..spec.n_subs[ch] {
+            for n in 0..spec.adpcm_subbands[ch] {
+                b.push(pvq_index(subframe, ch, n), 12);
+            }
+        }
+        // ABITS plane over the audio-coded subbands only (`n <
+        // nVQSUB`, Table 5-28 "Not for VQ encoded subbands"),
+        // BHUFF=6 -> Linear5Bit.
+        for &nv in &n_vqsub {
+            for _ in 0..nv {
                 b.push(8, 5); // ABITS[ch][n] = 8 -> NFE 5-bit samples
             }
         }
-        // TMODE plane, transmitted only when nSSC > 1 (Table 5-28).
+        // TMODE plane, transmitted only when nSSC > 1 (Table 5-28),
+        // audio-coded subbands only.
         if spec.n_ssc > 1 {
-            for ch in 0..2 {
-                for _ in 0..spec.n_subs[ch] {
+            for &nv in &n_vqsub {
+                for _ in 0..nv {
                     b.push(0, 2); // THUFF=3 -> D4 raw 2-bit; no transient
                 }
             }
         }
-        // SCALES plane, SHUFF=5 -> Linear6Bit absolute indexes.
+        // SCALES plane, SHUFF=5 -> Linear6Bit absolute indexes: one
+        // factor per bit-allocated audio-coded subband, then the
+        // Table 5-28 "High frequency VQ subbands" tail (one factor
+        // each) — a single 0..nSUBS ramp here since every coded
+        // subband has ABITS > 0.
         for ch in 0..2 {
             for n in 0..spec.n_subs[ch] {
                 b.push(scales_index(n), 6);
@@ -438,6 +496,14 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
             b.push(0xDEAD, 16); // SICRC — consumed, never verified
         }
 
+        // ---- §5.5 phase 1 (Table 5-29): one 10-bit `nVQIndex` per
+        // high-frequency-VQ subband, ahead of the LFE phase.
+        for (ch, &nv) in n_vqsub.iter().enumerate() {
+            for n in nv..spec.n_subs[ch] {
+                b.push(hf_vq_index(subframe, ch, n), 10);
+            }
+        }
+
         // ---- §5.5 LFE phase (Table 5-29): 2·LFF·nSSC 8-bit samples
         // + 8-bit LFEscaleIndex, before the audio-data arrays. The
         // count has no PSC term (whole subsubframes).
@@ -458,8 +524,10 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
             } else {
                 8
             };
-            for ch in 0..2 {
-                for _n in 0..spec.n_subs[ch] {
+            for &nv in &n_vqsub {
+                // Audio-coded subbands only — the HF-VQ subbands'
+                // whole §5.5 payload is their phase-1 index.
+                for _n in 0..nv {
                     for _m in 0..count {
                         b.push((lcg.nfe_sample() as u32) & 0x1f, 5);
                     }
@@ -484,6 +552,77 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
     );
     frame.resize(spec.frame_bytes, 0);
     frame
+}
+
+/// The deterministic 10-bit §D.10.2 `nVQIndex` the builder writes for
+/// high-frequency-VQ subband `n` of channel `ch` in subframe
+/// `subframe` — a pure function so analytic reconstructions recompute
+/// it without parsing.
+pub fn hf_vq_index(subframe: usize, ch: usize, n: usize) -> u32 {
+    ((subframe * 131 + ch * 61 + n * 7 + 3) % 1024) as u32
+}
+
+/// The deterministic 12-bit §D.10.1 `PVQ` index the builder writes for
+/// a `PMODE = 1` subband — pure-function counterpart of
+/// [`hf_vq_index`].
+pub fn pvq_index(subframe: usize, ch: usize, n: usize) -> u32 {
+    ((subframe * 257 + ch * 89 + n * 11 + 5) % 4096) as u32
+}
+
+/// Element `m` of §D.10.2 vector `v` of the **synthetic** test book —
+/// the two-int8-÷ 24 §D.10.2 entry decoding applied to a deterministic
+/// int8 ramp covering the full ±1 element range.
+pub fn synthetic_hf_element(v: usize, m: usize) -> f64 {
+    f64::from(synthetic_hf_int8(v, m)) / 24.0
+}
+
+fn synthetic_hf_int8(v: usize, m: usize) -> i8 {
+    (((v * 31 + m * 17 + 7) % 49) as i32 - 24) as i8
+}
+
+/// The synthetic §D.10.2 `HFreqVQ` book (1024 × 32), built through the
+/// packed-entry constructor so the spec's 16-bit two-element packing
+/// is exercised end-to-end.
+pub fn synthetic_hf_book() -> oxideav_dts::HfVqCodebook {
+    let entries: Vec<[u16; 16]> = (0..1024)
+        .map(|v| {
+            let mut packed = [0u16; 16];
+            for (k, e) in packed.iter_mut().enumerate() {
+                let hi = synthetic_hf_int8(v, 2 * k) as u8;
+                let lo = synthetic_hf_int8(v, 2 * k + 1) as u8;
+                *e = (u16::from(hi) << 8) | u16::from(lo);
+            }
+            packed
+        })
+        .collect();
+    oxideav_dts::HfVqCodebook::from_packed_entries(&entries).expect("1024 vectors")
+}
+
+/// Coefficient `j` of §D.10.1 vector `i` of the **synthetic** test
+/// book: stored integers in `[-1024, 1024]` (÷ 2¹³ -> |coeff| ≤ 0.125,
+/// keeping the 4-tap predictor comfortably stable).
+pub fn synthetic_adpcm_coeff(i: usize, j: usize) -> f64 {
+    f64::from(synthetic_adpcm_entry(i, j)) / 8192.0
+}
+
+fn synthetic_adpcm_entry(i: usize, j: usize) -> i32 {
+    ((i * 97 + j * 13 + 1) % 2049) as i32 - 1024
+}
+
+/// The synthetic §D.10.1 `ADPCMCoeffVQ` book (4096 × 4), built through
+/// the stored-integer constructor so the ÷ 2¹³ scaling is exercised.
+pub fn synthetic_adpcm_book() -> oxideav_dts::AdpcmVqCodebook {
+    let entries: Vec<[i32; 4]> = (0..4096)
+        .map(|i| [0, 1, 2, 3].map(|j| synthetic_adpcm_entry(i, j)))
+        .collect();
+    oxideav_dts::AdpcmVqCodebook::from_entries(&entries).expect("4096 vectors")
+}
+
+/// Both synthetic books as a [`oxideav_dts::VqCodebooks`] pair.
+pub fn synthetic_vq_codebooks() -> oxideav_dts::VqCodebooks {
+    oxideav_dts::VqCodebooks::none()
+        .with_hfreq(synthetic_hf_book())
+        .with_adpcm(synthetic_adpcm_book())
 }
 
 /// Build the multi-frame synthetic joint-intensity elementary stream:

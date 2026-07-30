@@ -8,6 +8,71 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 434 (2026-07-31) — **§D.10 recovered-book decode paths**: the
+  two §5.5 sub-paths blocked on the omitted §D.10 VQ code books are
+  now fully implemented behind a caller-supplied data drop-in, so the
+  recorded docs gap (`docs/audio/dts/dts-d10-vq-tables-GAP.md`) is
+  **data acquisition only** — no code remains to write when a book is
+  recovered. New stable surface: `HfVqCodebook` (§D.10.2, 1024 × 32;
+  constructors from raw 16-bit entries via the two-int8-÷ 24 unpacking
+  or from decoded elements), `AdpcmVqCodebook` (§D.10.1, 4096 × 4;
+  from stored integers via ÷ 2¹³ or from scaled coefficients),
+  `VqCodebooks` (the optional pair, `Arc`-shared), and
+  `SubframePcmDecoder::set_vq_codebooks` /
+  `CoreStreamDecoder::set_vq_codebooks`. With a §D.10.2 book attached,
+  a `nVQSUB < nSUBS` frame decodes end to end: the phase-1 10-bit
+  `nVQIndex` region (which precedes the LFE phase) is walked, each HF
+  subband's samples are `SCALES[ch][n][0] · HFREQ[m]` over exactly the
+  subframe's rows — the Table 5-29 `Scale`/`rScale` naming conflation
+  is the spec's own (re-verified verbatim by the round-9 extraction
+  pass) and is resolved by the §5.5 HFREQ prose (p.33: the decoder
+  picks `nSSC × 8` of the 32 samples "and scale[s] them with the
+  scale factor SCALES"), and a termination frame's partial subsubframe
+  picks the `(nSSC−1)·8 + PSC` valid prefix per the p.33 pad rule.
+  With a §D.10.1 book attached, `PMODE != 0` subbands run the §C.2.2
+  inverse-ADPCM predictor: captured 12-bit `PVQ` index → four ÷ 2¹³
+  coefficients → per-subsubframe in-place 4-tap prediction, with the
+  per-subband reconstruction history carried across subsubframes and
+  subframes (`AdpcmHistory`), advanced over **all** subbands so a
+  subband turning `PMODE` on later still finds its history, and gated
+  at frame boundaries by the §5.3.1 `HFLAG` Predictor History Flag
+  Switch ("the decoder will use reconstruction history of the previous
+  frame if HFLAG = 1. Otherwise, the history will be ignored") —
+  `decode_core_frame` / `CoreStreamDecoder` zero the history on
+  `HFLAG = 0` frames. Without books, both blockers surface the exact
+  typed `VqCodebookUnavailable` refusal as before — now checked
+  *before* any §5.5 bit is read, so a blocked frame no longer mutates
+  the persistent LFE interpolator state. Validated by a spec-built
+  battery (`tests/d10_vq_decode.rs`) with **synthetic** stand-in
+  books: bit-exact analytic reconstruction (through the public §C.2.5
+  QMF) for HF-VQ frames, ADPCM frames (multi-subframe history carry),
+  both `HFLAG` gates across a two-frame stream, termination-frame
+  `PSC` interactions with both paths, a kitchen-sink
+  HF+ADPCM+LFE+JOINX+DYNF frame, blocker preservation per missing
+  book, truncation EOF, and a no-perturbation guard on the common
+  Core path. The frame builder (`tests/common/mod.rs`) gained
+  `hf_subbands` / `adpcm_subbands` / `predictor_history` knobs
+  (writing the VQSUB plane, the 12-bit PVQ plane, the phase-1 index
+  region, and the ABITS/TMODE/SCALES planes with their Table 5-28
+  `n < nVQSUB` bounds).
+- Round 434 — **Extractor-09 reconciliation**: the crate's §D.10
+  documentation now records the round-9 PDF **container forensics**
+  verdict (`docs/audio/dts/provenance/09-dts-d10-pdf-forensics.md`):
+  the books were never in the staged file in any form — no
+  attachments, no object streams, one revision, no hidden layers, no
+  invisible/clipped text, TOC allocates both subclauses one shared
+  page — so the gap is final for this PDF and the recovery path is a
+  lawfully-usable vendor decoder oracle (none currently staged). The
+  ÷ 24 / ÷ 2¹³ scalings now rest on two independent reads of p.255
+  (round-408 400-dpi render + round-9 text extraction), and the
+  round-9 walker-doc corrections (#214: the `HFreqVQ`
+  "already-extracted" overclaim, the missing ÷ 24 element scaling, the
+  `raCoeffLfe64/128` filenames) were re-checked against the crate —
+  all three were already implemented correctly (`unpack_hfreq_vq_entry`,
+  `adpcm_vq_coeff`, `RA_COEFF_LFE64/128`).
+
+### Added
+
 - Round 430 (2026-07-26) — **termination-frame partial-subsubframe
   decode (§5.3.1 `FTYPE = 0` × §5.4.1 `PSC`)**: a subframe whose
   side-info prefix signals `PSC ∈ 1..=7` now decodes its last
