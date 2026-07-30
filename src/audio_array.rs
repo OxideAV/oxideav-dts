@@ -1397,6 +1397,250 @@ mod tests {
         assert_eq!(pcm[0], expected0);
     }
 
+    // -----------------------------------------------------------
+    // §D.10 recovered-book walk (round 434).
+    // -----------------------------------------------------------
+
+    fn tiny_hf_book() -> crate::HfVqCodebook {
+        // Vector v, element m: (v + m) / 24 — small, distinct, exact.
+        let vectors: Vec<[f64; 32]> = (0i32..1024)
+            .map(|v| core::array::from_fn(|m| f64::from(v + m as i32) / 24.0))
+            .collect();
+        crate::HfVqCodebook::from_elements(&vectors).unwrap()
+    }
+
+    fn tiny_adpcm_book() -> crate::AdpcmVqCodebook {
+        // Vector i: coefficients (i mod 5 − 2) / 16 in every tap.
+        let vectors: Vec<[f64; 4]> = (0i32..4096)
+            .map(|i| [(f64::from(i % 5) - 2.0) / 16.0; 4])
+            .collect();
+        crate::AdpcmVqCodebook::from_coefficients(&vectors).unwrap()
+    }
+
+    /// A supplied HF fill whose capture shape disagrees with the
+    /// per-channel `[nVQSUB, nSUBS)` bounds surfaces the typed shape
+    /// error (wrong outer length and wrong per-channel count).
+    #[test]
+    fn hf_fill_shape_mismatch_is_typed() {
+        let book = tiny_hf_book();
+        let side = vec![ChannelSideInfo::cleared()];
+        let stream = pack_fields(&[(0xffff, 16)]);
+
+        // Outer capture length 2 for a 1-channel walk.
+        let indices = vec![vec![0u16], vec![]];
+        let err = decode_audio_data_subframe_vq_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 0,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[2],
+            1,
+            0,
+            StepSizeTable::Lossy,
+            false,
+            Some(HfVqFill {
+                book: &book,
+                indices: &indices,
+            }),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AudioArrayDecodeError::Blocked(AudioArrayError::HfVqIndexShape { ch: 1 })
+        ));
+
+        // Right outer length, wrong per-channel count (2 for 1 HF
+        // subband).
+        let indices = vec![vec![0u16, 1]];
+        let err = decode_audio_data_subframe_vq_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 0,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[2],
+            1,
+            0,
+            StepSizeTable::Lossy,
+            false,
+            Some(HfVqFill {
+                book: &book,
+                indices: &indices,
+            }),
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AudioArrayDecodeError::Blocked(AudioArrayError::HfVqIndexShape { ch: 0 })
+        ));
+    }
+
+    /// A hand-built `PMODE != 0` subband with no captured PVQ index is
+    /// rejected with the typed error even when the book is present.
+    #[test]
+    fn missing_pvq_index_is_typed() {
+        let book = tiny_adpcm_book();
+        let mut ch = ChannelSideInfo::cleared();
+        ch.pmode[0] = 1; // pvq_index stays None — impossible via decode
+        let side = vec![ch];
+        let mut history = AdpcmHistory::new(1);
+        let err = decode_audio_data_subframe_vq_at(
+            &[0u8; 8],
+            0,
+            &side,
+            |_, _| 0,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            1,
+            0,
+            StepSizeTable::Lossy,
+            false,
+            None,
+            Some(AdpcmContext {
+                book: &book,
+                history: &mut history,
+            }),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            AudioArrayDecodeError::Blocked(AudioArrayError::MissingPvqIndex { ch: 0, n: 0 })
+        ));
+    }
+
+    /// The HF fill populates exactly the `[nVQSUB, nSUBS)` columns
+    /// with `SCALES[ch][n][0] · vector[m]`, consumes no §5.5 bits,
+    /// and lifts the bookless blocker.
+    #[test]
+    fn hf_fill_populates_hf_columns() {
+        let book = tiny_hf_book();
+        let mut ch = ChannelSideInfo::cleared();
+        ch.scales[1][0] = 3; // HF subband n=1: SCALES[ch][1][0] = 3
+        ch.scales[2][0] = 5; // HF subband n=2
+        let side = vec![ch];
+        let stream = pack_fields(&[(0xffff, 16)]); // just the DSYNC
+        let indices = vec![vec![7u16, 100]];
+        let (mats, bits) = decode_audio_data_subframe_vq_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 0,
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[3],
+            1,
+            0,
+            StepSizeTable::Lossy,
+            false,
+            Some(HfVqFill {
+                book: &book,
+                indices: &indices,
+            }),
+            None,
+        )
+        .unwrap();
+        assert_eq!(bits, 16, "the fill itself reads no bits");
+        for (m, row) in mats[0].iter().enumerate() {
+            assert_eq!(row[0], 0.0, "coded subband (ABITS=0) stays 0");
+            assert_eq!(row[1], 3.0 * (f64::from(7 + m as i32) / 24.0));
+            assert_eq!(row[2], 5.0 * (f64::from(100 + m as i32) / 24.0));
+        }
+    }
+
+    /// [`AdpcmHistory::absorb_matrices`] slides the last four rows in
+    /// (oldest first), with the short-subframe shift semantics for
+    /// fewer than four rows.
+    #[test]
+    fn adpcm_history_absorb_semantics() {
+        let mut hist = AdpcmHistory::new(1);
+        // 5 rows: subband 0 carries 1..=5.
+        let mut m: SubbandSampleMatrix = vec![[0.0; NUM_SUBBAND]; 5];
+        for (k, row) in m.iter_mut().enumerate() {
+            row[0] = (k + 1) as f64;
+        }
+        hist.absorb_matrices(std::slice::from_ref(&m));
+        assert_eq!(hist.subband(0, 0), &[2.0, 3.0, 4.0, 5.0]);
+
+        // A 2-row (short) subframe shifts and appends.
+        let mut m2: SubbandSampleMatrix = vec![[0.0; NUM_SUBBAND]; 2];
+        m2[0][0] = 10.0;
+        m2[1][0] = 11.0;
+        hist.absorb_matrices(std::slice::from_ref(&m2));
+        assert_eq!(hist.subband(0, 0), &[4.0, 5.0, 10.0, 11.0]);
+    }
+
+    /// The ADPCM context reconstructs a predicted subband: residuals
+    /// plus the 4-tap dot product over the priming history, history
+    /// advanced to the block's final rows.
+    #[test]
+    fn adpcm_context_predicts_and_advances_history() {
+        let book = tiny_adpcm_book();
+        // PVQ index 1 -> coefficients [-1/16; 4].
+        let mut ch = ChannelSideInfo::cleared();
+        ch.pmode[0] = 1;
+        ch.pvq_index[0] = Some(1);
+        ch.abits[0] = 8;
+        ch.scales[0][0] = 1;
+        let side = vec![ch];
+
+        // One subsubframe of NFE residuals: 16, 0, 0, 0, 0, 0, 0, 0
+        // — but NFE range for ABITS=8 is 5 bits, so use 8.
+        let vals = [8i32, 0, 0, 0, 0, 0, 0, 0];
+        let mut fields: Vec<(u32, u8)> = vals.iter().map(|&v| ((v as u32) & 0x1f, 5u8)).collect();
+        fields.push((0xffff, 16));
+        let stream = pack_fields(&fields);
+
+        let mut history = AdpcmHistory::new(1);
+        let (mats, _) = decode_audio_data_subframe_vq_at(
+            &stream,
+            0,
+            &side,
+            |_, _| 7, // terminal NFE SEL for ABITS=8
+            |_, _| ScaleFactorAdjustment::Adj0,
+            &[1],
+            &[1],
+            1,
+            0,
+            StepSizeTable::Lossy,
+            false,
+            None,
+            Some(AdpcmContext {
+                book: &book,
+                history: &mut history,
+            }),
+        )
+        .unwrap();
+
+        // Analytic: r[0] = 8·step; r[m] = Σ c·r[m-1..m-4], c = -1/16.
+        let step = StepSizeTable::Lossy.step_size(8).unwrap();
+        let c = -1.0 / 16.0;
+        let mut expect = [0.0f64; 8];
+        let residual = [8.0 * step, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        for m in 0..8 {
+            let mut acc = residual[m];
+            for t in 0..4usize {
+                if m > t {
+                    acc += c * expect[m - t - 1];
+                }
+            }
+            expect[m] = acc;
+        }
+        for m in 0..8 {
+            assert!((mats[0][m][0] - expect[m]).abs() < 1e-12, "row {m}");
+        }
+        // History advanced to rows 4..8.
+        let h = history.subband(0, 0);
+        for k in 0..4 {
+            assert!((h[k] - expect[4 + k]).abs() < 1e-12);
+        }
+    }
+
     /// A reserved §D.1.2 scale index surfaces the typed LFE-phase blocker.
     #[test]
     fn lfe_phase_rejects_reserved_scale_index() {
