@@ -537,9 +537,13 @@ mod registry;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use crate::audio_array::{
-    decode_audio_data_subframe_at, decode_audio_data_subframe_partial_at, decode_lfe_phase_at,
-    AudioArrayDecodeError, AudioArrayError, SubbandSampleMatrix,
+    decode_audio_data_subframe_at, decode_audio_data_subframe_partial_at,
+    decode_audio_data_subframe_vq_at, decode_lfe_phase_at, AdpcmContext, AudioArrayDecodeError,
+    AudioArrayError, HfVqFill, SubbandSampleMatrix,
 };
+// Stable: the persistent §C.2.2 reconstruction history a caller may
+// inspect/reset around the recovered-§D.10 ADPCM decode path.
+pub use crate::audio_array::AdpcmHistory;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use crate::audio_data::{
@@ -580,6 +584,10 @@ pub use crate::d10_vq::{
     HFREQ_VQ_ELEMENT_DIVISOR, HFREQ_VQ_ENTRIES_PER_VECTOR, HFREQ_VQ_INDEX_BITS,
     HFREQ_VQ_VECTOR_LEN,
 };
+// Stable drop-in containers for recovered §D.10 VQ code books (the
+// recorded docs gap): a caller holding an observer-derived book feeds
+// it to the decode chain through these.
+pub use crate::d10_vq::{AdpcmVqCodebook, HfVqCodebook, VqCodebookShapeError, VqCodebooks};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use crate::d6_block_book::{

@@ -72,11 +72,12 @@
 //! joint step.
 
 use crate::audio_array::{
-    decode_audio_data_subframe_partial_at, decode_lfe_phase_at, AudioArrayDecodeError,
-    SubbandSampleMatrix,
+    decode_audio_data_subframe_vq_at, decode_lfe_phase_at, AdpcmContext, AdpcmHistory,
+    AudioArrayDecodeError, AudioArrayError, HfVqFill, SubbandSampleMatrix,
 };
 use crate::audio_header::AudioCodingHeader;
 use crate::cos_mod::NUM_SUBBAND;
+use crate::d10_vq::{scan_hf_vq_indices_at, VqCodebooks};
 use crate::filter_bank::FilterBankSelection;
 use crate::header::{AmodeArrangement, DtsFrameHeader};
 use crate::qmf_multichannel::{MultiChannelQmf, MultiChannelQmfError};
@@ -231,6 +232,15 @@ pub struct SubframePcmDecoder {
     /// [`Self::take_last_lfe_pcm`] so the primary-channel return tuple is
     /// unchanged.
     last_lfe_pcm: Vec<i32>,
+    /// Recovered §D.10 VQ code books, when the caller supplied any
+    /// ([`Self::set_vq_codebooks`]). Default: none — the recorded
+    /// docs-gap state, under which HF-VQ / ADPCM frames surface the
+    /// typed blocker.
+    vq_codebooks: VqCodebooks,
+    /// The persistent §C.2.2 per-subband reconstruction history that
+    /// primes the inverse-ADPCM predictor across subframe (and, per
+    /// the §5.3.1 `HFLAG` gate, frame) boundaries.
+    adpcm_history: AdpcmHistory,
 }
 
 impl SubframePcmDecoder {
@@ -243,7 +253,44 @@ impl SubframePcmDecoder {
             qmf: MultiChannelQmf::new(channels),
             lfe: crate::LfeChannel::new(),
             last_lfe_pcm: Vec::new(),
+            vq_codebooks: VqCodebooks::none(),
+            adpcm_history: AdpcmHistory::new(channels),
         }
+    }
+
+    /// Supply recovered §D.10 VQ code books ([`VqCodebooks`]),
+    /// enabling the high-frequency-VQ (`nVQSUB < nSUBS`) and
+    /// inverse-ADPCM (`PMODE != 0`) §5.5 sub-paths that otherwise
+    /// surface the typed
+    /// [`AudioArrayError::VqCodebookUnavailable`] blocker (the
+    /// books' numeric contents are the recorded
+    /// `docs/audio/dts/dts-d10-vq-tables-GAP.md` gap — this is the
+    /// drop-in point for an observer-derived recovery).
+    pub fn set_vq_codebooks(&mut self, books: VqCodebooks) {
+        self.vq_codebooks = books;
+    }
+
+    /// The currently attached §D.10 books (default: none).
+    #[must_use]
+    pub fn vq_codebooks(&self) -> &VqCodebooks {
+        &self.vq_codebooks
+    }
+
+    /// Borrow the persistent §C.2.2 reconstruction history.
+    #[must_use]
+    pub fn adpcm_history(&self) -> &AdpcmHistory {
+        &self.adpcm_history
+    }
+
+    /// Zero the §C.2.2 reconstruction history — the §5.3.1
+    /// `HFLAG = 0` entry-point state ("these frames can be coded
+    /// without the previous frame predictor history … Otherwise, the
+    /// history will be ignored"). The frame-level walks
+    /// ([`decode_core_frame`] / [`CoreStreamDecoder::decode_frame`])
+    /// apply this automatically from the frame header; it is public
+    /// for callers driving the per-subframe API directly.
+    pub fn reset_adpcm_history(&mut self) {
+        self.adpcm_history.clear();
     }
 
     /// Take the LFE PCM decoded by the most recent
@@ -455,18 +502,62 @@ impl SubframePcmDecoder {
             n_ssc * 8
         };
 
-        // (0) §5.5 LFE phase (§2.2): present only when the header's `LFF`
-        // is non-zero. The high-frequency-VQ phase (§2.1) is empty for
-        // the accepted Core case (`nVQSUB == nSUBS`), so the LFE phase is
-        // the first thing in the §5.5 region; reading it advances the
-        // cursor to the audio-data phase. Its bits count toward the
+        // (0a) §D.10 blocker gates, checked BEFORE any bit is read so
+        // a blocked frame fails cleanly without disturbing the
+        // persistent LFE / filter / history state. Each gate lifts
+        // when the matching recovered book was supplied
+        // ([`Self::set_vq_codebooks`]).
+        let has_hf_vq = (0..channels).any(|ch| n_vqsub[ch] < n_subs[ch]);
+        if has_hf_vq && self.vq_codebooks.hfreq.is_none() {
+            let ch = (0..channels)
+                .find(|&ch| n_vqsub[ch] < n_subs[ch])
+                .unwrap_or(0);
+            return Err(SubframePcmError::AudioData(
+                AudioArrayError::VqCodebookUnavailable {
+                    ch,
+                    n: n_vqsub[ch],
+                    high_frequency_vq: true,
+                }
+                .into(),
+            ));
+        }
+        if self.vq_codebooks.adpcm.is_none() {
+            for (ch, ch_side) in side.iter().enumerate() {
+                if let Some(n) = ch_side.pmode[..n_vqsub[ch]].iter().position(|&p| p != 0) {
+                    return Err(SubframePcmError::AudioData(
+                        AudioArrayError::VqCodebookUnavailable {
+                            ch,
+                            n,
+                            high_frequency_vq: false,
+                        }
+                        .into(),
+                    ));
+                }
+            }
+        }
+
+        // (0b) §5.5 phase 1 — high-frequency VQ subbands: the 10-bit
+        // `nVQIndex` fields precede the LFE phase (Table 5-29). Empty
+        // for the common Core case (`nVQSUB == nSUBS` everywhere).
+        let mut cursor = bit_offset;
+        let hf_indices: Option<Vec<Vec<u16>>> = if has_hf_vq {
+            let (indices, hf_bits) = scan_hf_vq_indices_at(bytes, cursor, &n_vqsub, &n_subs)
+                .map_err(|e| SubframePcmError::AudioData(e.into()))?;
+            cursor += hf_bits;
+            Some(indices)
+        } else {
+            None
+        };
+
+        // (0c) §5.5 LFE phase (§2.2): present only when the header's
+        // `LFF` is non-zero; it follows the phase-1 HF-VQ region and
+        // precedes the audio-data phase. Its bits count toward the
         // subframe's total so the caller advances correctly. The Table
         // 5-29 sample count (`2·LFF·nSSC`) has no PSC term — the LFE
         // plane always covers whole subsubframes — so on a partial
         // (termination) subframe the interpolated plane is truncated
         // below to the primary channels' PCM length.
         let lff = header.lfe.code();
-        let mut cursor = bit_offset;
         if lff != 0 {
             let (mut lfe_pcm, lfe_bits) =
                 decode_lfe_phase_at(bytes, cursor, lff, n_ssc, &mut self.lfe)?;
@@ -479,9 +570,24 @@ impl SubframePcmDecoder {
 
         // (1) §5.5 Audio Data -> per-channel subband-sample matrices
         // (`rows` per channel; the §5.4.1 PSC truncation of the last
-        // subsubframe is applied inside the walk, bit-exactly).
+        // subsubframe is applied inside the walk, bit-exactly), with
+        // the recovered-book sub-paths enabled where supplied: the
+        // phase-1 HF-VQ fill and the §C.2.2 inverse-ADPCM prediction
+        // (whose reconstruction history persists across subframes; the
+        // §5.3.1 HFLAG frame gate is applied by the frame-level walk).
+        let hf_fill = match (&self.vq_codebooks.hfreq, &hf_indices) {
+            (Some(book), Some(indices)) => Some(HfVqFill {
+                book: book.as_ref(),
+                indices: indices.as_slice(),
+            }),
+            _ => None,
+        };
+        let adpcm_ctx = self.vq_codebooks.adpcm.as_ref().map(|book| AdpcmContext {
+            book: book.as_ref(),
+            history: &mut self.adpcm_history,
+        });
         let (matrices, audio_bits): (Vec<SubbandSampleMatrix>, usize) =
-            decode_audio_data_subframe_partial_at(
+            decode_audio_data_subframe_vq_at(
                 bytes,
                 cursor,
                 side,
@@ -493,6 +599,8 @@ impl SubframePcmDecoder {
                 psc,
                 table,
                 aspf,
+                hf_fill,
+                adpcm_ctx,
             )?;
         let bits_consumed = (cursor - bit_offset) + audio_bits;
 
@@ -867,6 +975,21 @@ impl CoreStreamDecoder {
         &self.decoder
     }
 
+    /// Supply recovered §D.10 VQ code books for the whole stream —
+    /// see [`SubframePcmDecoder::set_vq_codebooks`]. The §C.2.2
+    /// reconstruction history then carries across frames per each
+    /// frame header's `HFLAG` gate (§5.3.1: history used when
+    /// `HFLAG = 1`, ignored — zeroed — otherwise).
+    pub fn set_vq_codebooks(&mut self, books: VqCodebooks) {
+        self.decoder.set_vq_codebooks(books);
+    }
+
+    /// The currently attached §D.10 books (default: none).
+    #[must_use]
+    pub fn vq_codebooks(&self) -> &VqCodebooks {
+        self.decoder.vq_codebooks()
+    }
+
     /// Take the LFE PCM decoded by the most recent
     /// [`Self::decode_frame`] call (empty when the frame carried no LFE
     /// channel, `LFF == 0`). See
@@ -1015,6 +1138,18 @@ impl SubframePcmDecoder {
                 drc.version == crate::REV2_DRC_VERSION_SINGLE_BAND && !drc.codes.is_empty()
             })
             .map(|drc| drc.multipliers());
+
+        // §5.3.1 HFLAG (Predictor History Flag Switch): "When
+        // generating ADPCM predictions for current frame, the decoder
+        // will use reconstruction history of the previous frame if
+        // HFLAG = 1. Otherwise, the history will be ignored" — an
+        // entry-point frame is coded without the previous frame's
+        // predictor history, so the persistent §C.2.2 history is
+        // zeroed before this frame's first subframe. (Within the
+        // frame the history always carries across subframes.)
+        if !header.predictor_history {
+            self.adpcm_history.clear();
+        }
 
         let n_subs = coding.n_subs();
         let mut bit = header_bits + ach_bits;

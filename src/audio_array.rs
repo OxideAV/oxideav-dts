@@ -83,7 +83,9 @@ use crate::audio_huff::{decode_audio_huff_at, AudioHuffCodebook};
 use crate::bitreader::BitReader;
 use crate::block_code::decode_block_code;
 use crate::cos_mod::NUM_SUBBAND;
+use crate::d10_vq::{AdpcmVqCodebook, HfVqCodebook};
 use crate::dsync::DSYNC_WORD;
+use crate::inverse_adpcm::{inverse_adpcm_decode_f64, NUM_ADPCM_COEFF};
 use crate::side_info::ScaleFactorAdjustment;
 use crate::step_size::{transient_scale_index, StepSizeTable, SAMPLES_PER_SUBSUBFRAME};
 use crate::subframe::ChannelSideInfo;
@@ -116,6 +118,25 @@ pub enum AudioArrayError {
     /// `RMS_7BIT` scale index or an absent LFE channel
     /// ([`crate::LfeChannelError`]).
     LfePhase(crate::LfeChannelError),
+    /// The caller-supplied §5.5 phase-1 HF-VQ index capture does not
+    /// match the per-channel `[nVQSUB, nSUBS)` shape the walk needs
+    /// (wrong channel count or wrong per-channel index count).
+    HfVqIndexShape {
+        /// 0-based channel index whose captured indices mismatched
+        /// (equal to the channel count when the outer capture is the
+        /// wrong length).
+        ch: usize,
+    },
+    /// A `PMODE != 0` subband carried no captured 12-bit `PVQ` index
+    /// (a structurally impossible [`ChannelSideInfo`] — the §5.4.1
+    /// walk always captures the index when the PMODE bit is set —
+    /// so this only surfaces on hand-built side info).
+    MissingPvqIndex {
+        /// 0-based channel index.
+        ch: usize,
+        /// 0-based subband index.
+        n: usize,
+    },
 }
 
 impl core::fmt::Display for AudioArrayError {
@@ -139,6 +160,16 @@ impl core::fmt::Display for AudioArrayError {
                 )
             }
             AudioArrayError::LfePhase(e) => write!(f, "oxideav-dts: §5.5 LFE phase: {e}"),
+            AudioArrayError::HfVqIndexShape { ch } => write!(
+                f,
+                "oxideav-dts: §5.5 phase-1 HF-VQ index capture shape mismatch \
+                 at channel {ch}"
+            ),
+            AudioArrayError::MissingPvqIndex { ch, n } => write!(
+                f,
+                "oxideav-dts: channel {ch} subband {n} has PMODE set but no \
+                 captured §5.4.1 PVQ index"
+            ),
         }
     }
 }
@@ -348,6 +379,107 @@ pub fn decode_lfe_phase_at(
     Ok((pcm, bits_consumed))
 }
 
+/// Persistent per-channel, per-subband §C.2.2 reconstruction history
+/// — the four most recently reconstructed subband samples that prime
+/// the inverse-ADPCM predictor of the next decode block ("history
+/// from last subframe or subsubframe", §C.2.2; "the decoder will use
+/// reconstruction history of the previous frame if HFLAG = 1",
+/// §5.3.1).
+///
+/// The walk updates it from every decoded subframe's final rows
+/// (whether or not any subband was predicted, since any subband may
+/// turn `PMODE` on in a later subframe); the frame-level driver
+/// clears it at a frame boundary whose header says `HFLAG = 0`
+/// (entry-point frames are coded without the previous frame's
+/// predictor history).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdpcmHistory {
+    /// `per_channel[ch][n]` = the §C.2.2 `raSample[-4..0)` slots of
+    /// channel `ch`, subband `n`, **oldest first** (slot 0 =
+    /// `raSample[-4]`, slot 3 = `raSample[-1]`).
+    per_channel: Vec<[[f64; NUM_ADPCM_COEFF]; NUM_SUBBAND]>,
+}
+
+impl AdpcmHistory {
+    /// Cleared history for `channels` primary channels (the state of
+    /// a stream entry point: "the history will be ignored" when
+    /// `HFLAG = 0`, i.e. treated as zero).
+    #[must_use]
+    pub fn new(channels: usize) -> Self {
+        Self {
+            per_channel: vec![[[0.0; NUM_ADPCM_COEFF]; NUM_SUBBAND]; channels],
+        }
+    }
+
+    /// The configured channel count.
+    #[must_use]
+    pub fn channel_count(&self) -> usize {
+        self.per_channel.len()
+    }
+
+    /// Zero every subband's history (the §5.3.1 `HFLAG = 0` frame
+    /// gate: "Otherwise, the history will be ignored").
+    pub fn clear(&mut self) {
+        for ch in &mut self.per_channel {
+            *ch = [[0.0; NUM_ADPCM_COEFF]; NUM_SUBBAND];
+        }
+    }
+
+    /// The four-sample history of one `(ch, n)` subband, oldest
+    /// first.
+    #[must_use]
+    pub fn subband(&self, ch: usize, n: usize) -> &[f64; NUM_ADPCM_COEFF] {
+        &self.per_channel[ch][n]
+    }
+
+    /// Slide every subband's history forward over a decoded
+    /// subframe's reconstructed sample matrices (`matrices[ch]` with
+    /// `rows` rows): the last four rows become the new history, with
+    /// the short-subframe (`rows < 4`) shift semantics of
+    /// [`crate::update_history_f64`].
+    pub fn absorb_matrices(&mut self, matrices: &[SubbandSampleMatrix]) {
+        for (ch_hist, matrix) in self.per_channel.iter_mut().zip(matrices) {
+            let rows = matrix.len();
+            let take = rows.min(NUM_ADPCM_COEFF);
+            for (n, hist) in ch_hist.iter_mut().enumerate() {
+                if take < NUM_ADPCM_COEFF {
+                    hist.copy_within(take.., 0);
+                }
+                for (k, row) in matrix[rows - take..].iter().enumerate() {
+                    hist[NUM_ADPCM_COEFF - take + k] = row[n];
+                }
+            }
+        }
+    }
+}
+
+/// The §5.5 phase-1 high-frequency-VQ inputs for
+/// [`decode_audio_data_subframe_vq_at`]: a recovered §D.10.2 book
+/// plus the 10-bit indices captured (in walk order) by
+/// [`crate::scan_hf_vq_indices_at`] from the region that precedes the
+/// LFE phase.
+#[derive(Debug, Clone, Copy)]
+pub struct HfVqFill<'a> {
+    /// The recovered §D.10.2 `HFreqVQ` book.
+    pub book: &'a HfVqCodebook,
+    /// `indices[ch]` = the captured `nVQIndex` values for channel
+    /// `ch`'s subbands `nVQSUB[ch]..nSUBS[ch]`, in subband order.
+    pub indices: &'a [Vec<u16>],
+}
+
+/// The §D.10.1 / §C.2.2 inverse-ADPCM inputs for
+/// [`decode_audio_data_subframe_vq_at`]: a recovered coefficient book
+/// plus the persistent per-subband reconstruction history the
+/// predictor primes from (and which the walk advances).
+#[derive(Debug)]
+pub struct AdpcmContext<'a> {
+    /// The recovered §D.10.1 `ADPCMCoeffVQ` book.
+    pub book: &'a AdpcmVqCodebook,
+    /// The persistent reconstruction history (advanced by the walk
+    /// over **all** subbands, predicted or not).
+    pub history: &'a mut AdpcmHistory,
+}
+
 /// Decode the §5.5 `Audio Data` block for one subframe, given the
 /// already-decoded §5.4.1 side information and §5.3.2 header context.
 ///
@@ -461,13 +593,75 @@ pub fn decode_audio_data_subframe_partial_at(
     table: StepSizeTable,
     aspf: bool,
 ) -> core::result::Result<(Vec<SubbandSampleMatrix>, usize), AudioArrayDecodeError> {
+    decode_audio_data_subframe_vq_at(
+        bytes, bit_offset, side, sel, adj, n_vqsub, n_subs, n_ssc, psc, table, aspf, None, None,
+    )
+}
+
+/// [`decode_audio_data_subframe_partial_at`] with the two §D.10
+/// VQ-book sub-paths **enabled** by caller-supplied recovered books:
+///
+/// * `hf` — the §5.5 phase-1 high-frequency-VQ reconstruction. The
+///   10-bit indices (captured by [`crate::scan_hf_vq_indices_at`]
+///   from the region *before* the LFE phase) select 32-element
+///   §D.10.2 vectors, and each HF subband's samples are
+///   `SCALES[ch][n][0] · HFREQ[ch][n][m]` for the subframe's `m`
+///   rows. The Table 5-29 listing assigns
+///   `Scale = (real)SCALES[ch][n][0]` and then multiplies by a
+///   variable it spells `rScale` — a spec-verbatim naming conflation
+///   (re-verified against the staged PDF by the round-9 extraction
+///   pass) that the §5.5 HFREQ prose on p.33 resolves: the decoder
+///   picks `nSSC × 8` of the 32 samples "and scale[s] them with the
+///   scale factor SCALES". On a termination-frame subframe the valid
+///   prefix (`(nSSC−1)·8 + PSC` rows) is picked instead — the p.33
+///   pad rule ("padded with either zeros or 'don't care' … the
+///   decoder will only pick" the live ones) makes the vector tail
+///   don't-care.
+/// * `adpcm` — the §5.5 `if (PMODE[ch][n] != 0) InverseADPCM()` step:
+///   the four §C.2.2 predictor coefficients are looked up from the
+///   §D.10.1 book by the subband's captured 12-bit `PVQ` index, and
+///   the dequantized residuals of every subsubframe are reconstructed
+///   in walk order, primed by the persistent [`AdpcmHistory`] (which
+///   the walk advances over the subframe's final rows — for **all**
+///   subbands, so a subband that turns `PMODE` on later still finds
+///   its reconstruction history; the §5.3.1 `HFLAG` frame gate is the
+///   frame-level caller's).
+///
+/// With `None` for a needed book the corresponding blocker surfaces
+/// as before ([`AudioArrayError::VqCodebookUnavailable`]); with both
+/// `None` this is exactly [`decode_audio_data_subframe_partial_at`].
+///
+/// # Errors
+///
+/// As [`decode_audio_data_subframe_partial_at`], plus
+/// [`AudioArrayError::HfVqIndexShape`] when `hf` is supplied with a
+/// capture that does not match the per-channel `[nVQSUB, nSUBS)`
+/// shape, and [`AudioArrayError::MissingPvqIndex`] for a hand-built
+/// `PMODE != 0` subband lacking its captured index.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_audio_data_subframe_vq_at(
+    bytes: &[u8],
+    bit_offset: usize,
+    side: &[ChannelSideInfo],
+    sel: impl Fn(usize, u8) -> u8,
+    adj: impl Fn(usize, u8) -> ScaleFactorAdjustment,
+    n_vqsub: &[usize],
+    n_subs: &[usize],
+    n_ssc: usize,
+    psc: u8,
+    table: StepSizeTable,
+    aspf: bool,
+    hf: Option<HfVqFill<'_>>,
+    mut adpcm: Option<AdpcmContext<'_>>,
+) -> core::result::Result<(Vec<SubbandSampleMatrix>, usize), AudioArrayDecodeError> {
     let n_pchs = side.len();
     let psc = usize::from(psc) % SAMPLES_PER_SUBSUBFRAME;
 
     // Reject the VQ / ADPCM blockers up front so a partially-decoded
-    // matrix is never returned.
+    // matrix is never returned. Each blocker is lifted exactly when
+    // the matching recovered book is supplied.
     for (ch, ch_side) in side.iter().enumerate() {
-        if n_vqsub[ch] < n_subs[ch] {
+        if n_vqsub[ch] < n_subs[ch] && hf.is_none() {
             return Err(AudioArrayError::VqCodebookUnavailable {
                 ch,
                 n: n_vqsub[ch],
@@ -476,12 +670,30 @@ pub fn decode_audio_data_subframe_partial_at(
             .into());
         }
         if let Some(n) = ch_side.pmode[..n_vqsub[ch]].iter().position(|&p| p != 0) {
-            return Err(AudioArrayError::VqCodebookUnavailable {
-                ch,
-                n,
-                high_frequency_vq: false,
+            match &adpcm {
+                None => {
+                    return Err(AudioArrayError::VqCodebookUnavailable {
+                        ch,
+                        n,
+                        high_frequency_vq: false,
+                    }
+                    .into());
+                }
+                Some(_) if ch_side.pvq_index[n].is_none() => {
+                    return Err(AudioArrayError::MissingPvqIndex { ch, n }.into());
+                }
+                Some(_) => {}
             }
-            .into());
+        }
+    }
+    if let Some(fill) = &hf {
+        if fill.indices.len() != n_pchs {
+            return Err(AudioArrayError::HfVqIndexShape { ch: n_pchs }.into());
+        }
+        for (ch, ch_indices) in fill.indices.iter().enumerate() {
+            if ch_indices.len() != n_subs[ch] - n_vqsub[ch] {
+                return Err(AudioArrayError::HfVqIndexShape { ch }.into());
+            }
         }
     }
 
@@ -493,6 +705,25 @@ pub fn decode_audio_data_subframe_partial_at(
         n_ssc * SAMPLES_PER_SUBSUBFRAME
     };
     let mut matrices: Vec<SubbandSampleMatrix> = vec![vec![[0.0_f64; NUM_SUBBAND]; rows]; n_pchs];
+
+    // §5.5 phase 1 — high-frequency VQ subbands: fill the HF columns
+    // from the recovered §D.10.2 book before the audio-data walk (the
+    // indices were extracted from the bit stream ahead of the LFE
+    // phase; the fill itself consumes no bits here).
+    if let Some(fill) = &hf {
+        for (ch, ch_indices) in fill.indices.iter().enumerate() {
+            for (k, &index) in ch_indices.iter().enumerate() {
+                let n = n_vqsub[ch] + k;
+                // The p.33 HFREQ rule: pick the subframe's rows out of
+                // the 32-sample vector, scaled by SCALES[ch][n][0].
+                let scale = f64::from(side[ch].scales[n][0]);
+                let vector = fill.book.vector(index);
+                for (row, &element) in matrices[ch].iter_mut().zip(vector.iter().take(rows)) {
+                    row[n] = scale * element;
+                }
+            }
+        }
+    }
 
     let byte_offset = bit_offset / 8;
     let intra_byte = bit_offset % 8;
@@ -530,8 +761,38 @@ pub fn decode_audio_data_subframe_partial_at(
                 for (m, &index) in audio.iter().enumerate().take(count) {
                     matrix[base + m][n] = r_scale * f64::from(index);
                 }
-                // PMODE != 0 subbands were already rejected above, so no
-                // inverse-ADPCM runs here in this round's scope.
+
+                // §5.5: "if (PMODE[ch][n] != 0)
+                // aPrmCh[ch].aSubband[n].InverseADPCM();" — the four
+                // §C.2.2 coefficients come from the recovered §D.10.1
+                // book via the subband's captured PVQ index; the
+                // history is the four samples preceding this
+                // subsubframe (earlier rows of this subframe, else
+                // the persistent inter-subframe history).
+                if ch_side.pmode[n] != 0 {
+                    if let Some(ctx) = adpcm.as_mut() {
+                        // Checked non-None in the pre-walk validation.
+                        let pvq = ch_side.pvq_index[n].unwrap_or_default();
+                        let coeffs = ctx.book.coefficients(pvq);
+                        let mut hist = [0.0_f64; NUM_ADPCM_COEFF];
+                        for (j, slot) in hist.iter_mut().enumerate() {
+                            // Logical row `base - 4 + j`.
+                            *slot = if base + j >= NUM_ADPCM_COEFF {
+                                matrix[base + j - NUM_ADPCM_COEFF][n]
+                            } else {
+                                ctx.history.subband(ch, n)[j]
+                            };
+                        }
+                        let mut block = [0.0_f64; SAMPLES_PER_SUBSUBFRAME];
+                        for (m, slot) in block.iter_mut().enumerate().take(count) {
+                            *slot = matrix[base + m][n];
+                        }
+                        inverse_adpcm_decode_f64(&hist, coeffs, &mut block[..count])?;
+                        for (m, &value) in block.iter().enumerate().take(count) {
+                            matrix[base + m][n] = value;
+                        }
+                    }
+                }
             }
         }
         // DSYNC trailer: present after the last subsubframe always, and
@@ -546,6 +807,12 @@ pub fn decode_audio_data_subframe_partial_at(
                 .into());
             }
         }
+    }
+
+    // Advance the persistent §C.2.2 reconstruction history over this
+    // subframe's final rows (all subbands — see [`AdpcmHistory`]).
+    if let Some(ctx) = adpcm.as_mut() {
+        ctx.history.absorb_matrices(&matrices);
     }
 
     let bits_consumed = br.absolute_bit_position() - bit_offset;
