@@ -642,6 +642,39 @@ pub fn build_joint_stream(n_frames: usize) -> Vec<u8> {
     stream
 }
 
+/// Build the synthetic **§D.10-bearing** elementary stream committed
+/// as `tests/fixtures/dts_d10_5_frames.bin`: two plain normal frames,
+/// then an HF-VQ frame (`nVQSUB < nSUBS` on both channels), an ADPCM
+/// frame (`PMODE = 1` on leading subbands, `HFLAG = 0`), and a
+/// combined HF-VQ + ADPCM frame with `HFLAG = 1` (history carried
+/// over the previous frame). 512 samples per channel per frame.
+pub fn build_d10_stream() -> Vec<u8> {
+    let template = template_header();
+    let specs = [
+        JointFrameSpec::default_plain(0xD10_5EED),
+        JointFrameSpec::default_plain(0xD10_5EED ^ 0x100),
+        JointFrameSpec {
+            hf_subbands: [8, 4],
+            ..JointFrameSpec::default_plain(0xD10_5EED ^ 0x200)
+        },
+        JointFrameSpec {
+            adpcm_subbands: [4, 2],
+            ..JointFrameSpec::default_plain(0xD10_5EED ^ 0x300)
+        },
+        JointFrameSpec {
+            hf_subbands: [8, 0],
+            adpcm_subbands: [2, 2],
+            predictor_history: true,
+            ..JointFrameSpec::default_plain(0xD10_5EED ^ 0x400)
+        },
+    ];
+    let mut stream = Vec::new();
+    for spec in &specs {
+        stream.extend_from_slice(&build_frame_from_spec(&template, spec));
+    }
+    stream
+}
+
 /// The §5.3.1 header template shared by every synthetic frame: the
 /// first frame of the committed real stereo fixture (so AMODE/SFREQ/
 /// RATE/PCMR are values a real encoder emits).

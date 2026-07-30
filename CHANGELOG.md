@@ -55,6 +55,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   (writing the VQSUB plane, the 12-bit PVQ plane, the phase-1 index
   region, and the ABITS/TMODE/SCALES planes with their Table 5-28
   `n < nVQSUB` bounds).
+- Round 434 — **black-box §D.10 framing validation**
+  (`tests/black_box_d10.rs` + the committed
+  `tests/fixtures/dts_d10_5_frames.bin` /
+  `dts_d10_5_frames_ffmpeg_ref.s32` pair): a spec-built 5-frame
+  stream — two plain frames, an HF-VQ frame, a `PMODE`/PVQ frame
+  (`HFLAG = 0`), and a combined frame (`HFLAG = 1`) — is accepted
+  **cleanly** by the black-box `ffmpeg` reference decoder: exactly
+  `5 × 512` samples per channel, zero decode errors, and the
+  books-independent two-frame prefix shape-identical to our decode
+  (Pearson ≈ 1.0). Since the reference carries the *real* §D.10
+  books, its §D.10-frame PCM is not numerically comparable to our
+  synthetic-book decode; what the run pins black-box is that our
+  spec-built §5.3.2 `VQSUB` plane, §5.4.1 `PMODE`/`PVQ` planes,
+  §5.5 phase-1 10-bit index region, and HF-tail SCALES loop are
+  bit-compatible with a real decoder's walk (any mis-sized field
+  would desync `DSYNC` or the framing). The stream is re-derived
+  byte-for-byte from the deterministic builder in CI.
 - Round 434 — **Extractor-09 reconciliation**: the crate's §D.10
   documentation now records the round-9 PDF **container forensics**
   verdict (`docs/audio/dts/provenance/09-dts-d10-pdf-forensics.md`):
