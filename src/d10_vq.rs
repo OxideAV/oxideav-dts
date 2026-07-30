@@ -14,6 +14,30 @@
 //! surfaces the typed
 //! [`crate::AudioArrayError::VqCodebookUnavailable`] refusal.
 //!
+//! ## The gap is final for the staged PDF (round-9 forensics)
+//!
+//! The round-9 extraction pass
+//! (`docs/audio/dts/provenance/09-dts-d10-pdf-forensics.md`, folded
+//! into the GAP doc) audited the staged spec PDF as a **container**,
+//! not just as rendered pages, and ruled out every place the numeric
+//! books could still hide: no embedded-file attachments, no object
+//! streams (so a raw name scan is exhaustive), exactly one document
+//! revision (the two `%%EOF` markers are the linearization pair and no
+//! object number is ever superseded), all streams accounted for by
+//! reference key, no optional-content layers, no images anywhere near
+//! p.255, no invisible / off-page / clipped text on p.255, and no font
+//! whose glyph inventory implies undrawn content. The document's own
+//! TOC allocates both §D.10 subclauses one shared page. **The books
+//! were never in the file**; no further work on this PDF can produce
+//! them. The same pass also recorded that no lawfully-usable DTS
+//! decoder oracle is currently staged anywhere in `docs/` (the GAP doc
+//! names the permitted class: a vendor-proprietary, independently
+//! implemented DTS decoder staged with the usual acquisition record).
+//! The remaining §D.10 blocker is therefore **data acquisition only**
+//! — every structural fact around the missing numbers is pinned and
+//! implemented here, and [`HfVqCodebook`] / [`AdpcmVqCodebook`] accept
+//! a recovered book at runtime without further code changes.
+//!
 //! What this module ships **now** is the spec-defined shell around the
 //! missing data, so a recovered book drops straight in:
 //!
@@ -28,7 +52,7 @@
 //!   the indices a future lookup will consume — and that an
 //!   observer-derived recovery harness needs for cross-checking.
 //!
-//! ## The `/24` correction (round 408)
+//! ## The `/24` correction (round 408, re-verified round 9)
 //!
 //! An earlier trace revision left the §D.10.2 element scaling
 //! ambiguous (`24` vs `2⁴`). The corrected
@@ -36,7 +60,12 @@
 //! `dts-d10-vq-tables-GAP.md` settle it: the divisor is the **literal
 //! number 24** (verified against a 400-dpi render of the spec page:
 //! the `24` sits on the text baseline at normal glyph size, unlike
-//! §D.10.1's `2^13` whose exponent is a raised superscript).
+//! §D.10.1's `2^13` whose exponent is a raised superscript). The
+//! round-9 forensics pass re-verified both scalings independently via
+//! the extracted p.255 text ("each divided by 24" on the baseline;
+//! `9928 / 2¹³ = 1.2119140625` with the raised exponent), so the two
+//! entry-decoding primitives below rest on two independent reads of
+//! the same staged page.
 
 use crate::bitreader::BitReader;
 use crate::Result;
@@ -115,6 +144,248 @@ pub const ADPCM_VQ_COEFF_DIVISOR: f64 = 8192.0;
 #[must_use]
 pub fn adpcm_vq_coeff(entry: i32) -> f64 {
     f64::from(entry) / ADPCM_VQ_COEFF_DIVISOR
+}
+
+// ------------------------------------------------------------------
+// Drop-in containers for recovered §D.10 books
+// ------------------------------------------------------------------
+
+/// A caller-supplied §D.10 code book had the wrong shape (vector
+/// count or vector length). The §D.10 dimensions are wire facts —
+/// 1024 × 32 for `HFreqVQ`, 4096 × 4 for `ADPCMCoeffVQ` — so a
+/// mis-shaped book is rejected up front rather than silently
+/// truncated or padded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VqCodebookShapeError {
+    /// The §D.10 book size the constructor requires.
+    pub expected_vectors: usize,
+    /// The vector count the caller supplied.
+    pub got_vectors: usize,
+}
+
+impl core::fmt::Display for VqCodebookShapeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "oxideav-dts: §D.10 VQ code book has {} vectors, expected {}",
+            self.got_vectors, self.expected_vectors
+        )
+    }
+}
+
+impl std::error::Error for VqCodebookShapeError {}
+
+/// A decoded §D.10.2 `HFreqVQ` high-frequency-subband code book:
+/// [`HFREQ_VQ_BOOK_SIZE`] vectors of [`HFREQ_VQ_VECTOR_LEN`] scaled
+/// elements, ready for the §5.5 phase-1
+/// `HFreqVQ.LookUp(nVQIndex, HFREQ[ch][n])`.
+///
+/// The book's **numeric contents are not in the staged spec** (the
+/// recorded §D.10 gap — see the module docs); this container exists so
+/// an observer-derived recovery, once staged under `docs/audio/dts/`,
+/// drops straight into the decode chain
+/// ([`crate::SubframePcmDecoder::set_vq_codebooks`]) with no code
+/// changes. Everything *around* the numbers — the 10-bit index, the
+/// 1024 × 32 dimensions, the two-int8-per-entry packing, the ÷ 24
+/// element scaling — is spec-pinned and enforced here.
+#[derive(Clone)]
+pub struct HfVqCodebook {
+    vectors: Vec<[f64; HFREQ_VQ_VECTOR_LEN]>,
+}
+
+impl core::fmt::Debug for HfVqCodebook {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("HfVqCodebook")
+            .field("vectors", &self.vectors.len())
+            .field("vector_len", &HFREQ_VQ_VECTOR_LEN)
+            .finish()
+    }
+}
+
+impl HfVqCodebook {
+    /// Build the book from its raw 16-bit table entries —
+    /// [`HFREQ_VQ_ENTRIES_PER_VECTOR`] (= 16) entries per vector, each
+    /// unpacked to two elements via [`unpack_hfreq_vq_entry`]
+    /// (high-byte element first, then low-byte element; the spec
+    /// publishes no anchor pinning the intra-entry order, so a
+    /// recovered book whose trace settles the order the other way
+    /// should use [`HfVqCodebook::from_elements`] instead).
+    ///
+    /// # Errors
+    ///
+    /// [`VqCodebookShapeError`] unless exactly
+    /// [`HFREQ_VQ_BOOK_SIZE`] vectors are supplied.
+    pub fn from_packed_entries(
+        entries: &[[u16; HFREQ_VQ_ENTRIES_PER_VECTOR]],
+    ) -> core::result::Result<Self, VqCodebookShapeError> {
+        if entries.len() != HFREQ_VQ_BOOK_SIZE {
+            return Err(VqCodebookShapeError {
+                expected_vectors: HFREQ_VQ_BOOK_SIZE,
+                got_vectors: entries.len(),
+            });
+        }
+        let vectors = entries
+            .iter()
+            .map(|packed| {
+                let mut v = [0.0_f64; HFREQ_VQ_VECTOR_LEN];
+                for (pair, out) in packed.iter().zip(v.chunks_exact_mut(2)) {
+                    out.copy_from_slice(&unpack_hfreq_vq_entry(*pair));
+                }
+                v
+            })
+            .collect();
+        Ok(Self { vectors })
+    }
+
+    /// Build the book from already-decoded vector elements (the ÷ 24
+    /// scaling already applied, intra-entry order already settled).
+    ///
+    /// # Errors
+    ///
+    /// [`VqCodebookShapeError`] unless exactly
+    /// [`HFREQ_VQ_BOOK_SIZE`] vectors are supplied.
+    pub fn from_elements(
+        vectors: &[[f64; HFREQ_VQ_VECTOR_LEN]],
+    ) -> core::result::Result<Self, VqCodebookShapeError> {
+        if vectors.len() != HFREQ_VQ_BOOK_SIZE {
+            return Err(VqCodebookShapeError {
+                expected_vectors: HFREQ_VQ_BOOK_SIZE,
+                got_vectors: vectors.len(),
+            });
+        }
+        Ok(Self {
+            vectors: vectors.to_vec(),
+        })
+    }
+
+    /// Look up one 32-element vector by its 10-bit `nVQIndex`. Every
+    /// wire-representable index (`0..1024`) is in range, so the §5.5
+    /// phase-1 lookup cannot fail on a well-shaped book.
+    #[must_use]
+    pub fn vector(&self, index: u16) -> &[f64; HFREQ_VQ_VECTOR_LEN] {
+        &self.vectors[usize::from(index) % HFREQ_VQ_BOOK_SIZE]
+    }
+}
+
+/// A decoded §D.10.1 `ADPCMCoeffVQ` prediction-coefficient code book:
+/// [`ADPCM_VQ_BOOK_SIZE`] vectors of [`ADPCM_VQ_VECTOR_LEN`] (= 4)
+/// scaled coefficients, ready for the §5.4.1
+/// `ADPCMCoeffVQ.LookUp(nVQIndex, PVQ[ch][n])` that feeds the §C.2.2
+/// inverse-ADPCM predictor.
+///
+/// Like [`HfVqCodebook`], the numeric contents are the recorded §D.10
+/// gap; the container makes a recovered book a pure data drop-in.
+#[derive(Clone)]
+pub struct AdpcmVqCodebook {
+    coeffs: Vec<[f64; ADPCM_VQ_VECTOR_LEN]>,
+}
+
+impl core::fmt::Debug for AdpcmVqCodebook {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("AdpcmVqCodebook")
+            .field("vectors", &self.coeffs.len())
+            .field("vector_len", &ADPCM_VQ_VECTOR_LEN)
+            .finish()
+    }
+}
+
+impl AdpcmVqCodebook {
+    /// Build the book from its raw stored-integer entries, applying
+    /// the §D.10.1 ÷ 2¹³ scaling ([`adpcm_vq_coeff`]) to each element.
+    ///
+    /// # Errors
+    ///
+    /// [`VqCodebookShapeError`] unless exactly
+    /// [`ADPCM_VQ_BOOK_SIZE`] vectors are supplied.
+    pub fn from_entries(
+        entries: &[[i32; ADPCM_VQ_VECTOR_LEN]],
+    ) -> core::result::Result<Self, VqCodebookShapeError> {
+        if entries.len() != ADPCM_VQ_BOOK_SIZE {
+            return Err(VqCodebookShapeError {
+                expected_vectors: ADPCM_VQ_BOOK_SIZE,
+                got_vectors: entries.len(),
+            });
+        }
+        let coeffs = entries
+            .iter()
+            .map(|stored| stored.map(adpcm_vq_coeff))
+            .collect();
+        Ok(Self { coeffs })
+    }
+
+    /// Build the book from already-scaled coefficients.
+    ///
+    /// # Errors
+    ///
+    /// [`VqCodebookShapeError`] unless exactly
+    /// [`ADPCM_VQ_BOOK_SIZE`] vectors are supplied.
+    pub fn from_coefficients(
+        vectors: &[[f64; ADPCM_VQ_VECTOR_LEN]],
+    ) -> core::result::Result<Self, VqCodebookShapeError> {
+        if vectors.len() != ADPCM_VQ_BOOK_SIZE {
+            return Err(VqCodebookShapeError {
+                expected_vectors: ADPCM_VQ_BOOK_SIZE,
+                got_vectors: vectors.len(),
+            });
+        }
+        Ok(Self {
+            coeffs: vectors.to_vec(),
+        })
+    }
+
+    /// Look up the four §C.2.2 predictor coefficients by the 12-bit
+    /// `PVQ` index. Every wire-representable index (`0..4096`) is in
+    /// range, so the lookup cannot fail on a well-shaped book.
+    #[must_use]
+    pub fn coefficients(&self, index: u16) -> &[f64; ADPCM_VQ_VECTOR_LEN] {
+        &self.coeffs[usize::from(index) % ADPCM_VQ_BOOK_SIZE]
+    }
+}
+
+/// The (optional) pair of recovered §D.10 code books a decoder may
+/// carry. `Default` is the shipped state — **both absent** (the
+/// recorded docs gap) — under which the affected sub-paths keep
+/// surfacing the typed
+/// [`crate::AudioArrayError::VqCodebookUnavailable`] refusal exactly
+/// as before. The books are held behind [`std::sync::Arc`] so a
+/// stream decoder clone (the all-or-nothing decode pattern) does not
+/// copy the table data.
+#[derive(Debug, Clone, Default)]
+pub struct VqCodebooks {
+    /// The §D.10.2 high-frequency-subband book (`HFreqVQ`), when
+    /// recovered.
+    pub hfreq: Option<std::sync::Arc<HfVqCodebook>>,
+    /// The §D.10.1 ADPCM prediction-coefficient book
+    /// (`ADPCMCoeffVQ`), when recovered.
+    pub adpcm: Option<std::sync::Arc<AdpcmVqCodebook>>,
+}
+
+impl VqCodebooks {
+    /// No books — the shipped docs-gap state.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// `true` when neither book is present.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.hfreq.is_none() && self.adpcm.is_none()
+    }
+
+    /// Attach a §D.10.2 `HFreqVQ` book.
+    #[must_use]
+    pub fn with_hfreq(mut self, book: HfVqCodebook) -> Self {
+        self.hfreq = Some(std::sync::Arc::new(book));
+        self
+    }
+
+    /// Attach a §D.10.1 `ADPCMCoeffVQ` book.
+    #[must_use]
+    pub fn with_adpcm(mut self, book: AdpcmVqCodebook) -> Self {
+        self.adpcm = Some(std::sync::Arc::new(book));
+        self
+    }
 }
 
 // ------------------------------------------------------------------
@@ -267,6 +538,87 @@ mod tests {
         let (idx, bits) = scan_hf_vq_indices_at(&[0u8; 4], 0, &[2, 4], &[2, 4]).unwrap();
         assert_eq!(bits, 0);
         assert_eq!(idx, vec![Vec::<u16>::new(), Vec::new()]);
+    }
+
+    /// [`HfVqCodebook::from_packed_entries`] applies the §D.10.2
+    /// two-int8 ÷ 24 unpacking to every entry, high byte first, and
+    /// the 10-bit lookup returns the decoded vector.
+    #[test]
+    fn hf_book_from_packed_entries_decodes_all_elements() {
+        let mut entries = vec![[0u16; HFREQ_VQ_ENTRIES_PER_VECTOR]; HFREQ_VQ_BOOK_SIZE];
+        // Vector 5: entry k packs (hi = k+1, lo = -(k+1)).
+        for (k, e) in entries[5].iter_mut().enumerate() {
+            let hi = (k as i8 + 1) as u8;
+            let lo = (-(k as i8 + 1)) as u8;
+            *e = (u16::from(hi) << 8) | u16::from(lo);
+        }
+        let book = HfVqCodebook::from_packed_entries(&entries).unwrap();
+        let v = book.vector(5);
+        for k in 0..HFREQ_VQ_ENTRIES_PER_VECTOR {
+            let want = f64::from(k as i8 + 1) / HFREQ_VQ_ELEMENT_DIVISOR;
+            assert_eq!(v[2 * k], want);
+            assert_eq!(v[2 * k + 1], -want);
+        }
+        // Every other vector decodes to zeros.
+        assert!(book.vector(0).iter().all(|&x| x == 0.0));
+        assert!(book.vector(1023).iter().all(|&x| x == 0.0));
+    }
+
+    /// The book constructors reject wrong vector counts with the
+    /// typed shape error (the §D.10 dimensions are wire facts).
+    #[test]
+    fn book_constructors_reject_wrong_shapes() {
+        let short_hf = vec![[0u16; HFREQ_VQ_ENTRIES_PER_VECTOR]; 1023];
+        assert_eq!(
+            HfVqCodebook::from_packed_entries(&short_hf).unwrap_err(),
+            VqCodebookShapeError {
+                expected_vectors: HFREQ_VQ_BOOK_SIZE,
+                got_vectors: 1023
+            }
+        );
+        let long_adpcm = vec![[0i32; ADPCM_VQ_VECTOR_LEN]; ADPCM_VQ_BOOK_SIZE + 1];
+        assert_eq!(
+            AdpcmVqCodebook::from_entries(&long_adpcm).unwrap_err(),
+            VqCodebookShapeError {
+                expected_vectors: ADPCM_VQ_BOOK_SIZE,
+                got_vectors: ADPCM_VQ_BOOK_SIZE + 1
+            }
+        );
+        assert!(
+            HfVqCodebook::from_elements(&vec![[0.0; HFREQ_VQ_VECTOR_LEN]; HFREQ_VQ_BOOK_SIZE])
+                .is_ok()
+        );
+        assert!(AdpcmVqCodebook::from_coefficients(&vec![
+            [0.0; ADPCM_VQ_VECTOR_LEN];
+            ADPCM_VQ_BOOK_SIZE
+        ])
+        .is_ok());
+    }
+
+    /// [`AdpcmVqCodebook::from_entries`] applies the §D.10.1 ÷ 2¹³
+    /// scaling — pinned by the spec's own printed anchor.
+    #[test]
+    fn adpcm_book_applies_divisor_with_spec_anchor() {
+        let mut entries = vec![[0i32; ADPCM_VQ_VECTOR_LEN]; ADPCM_VQ_BOOK_SIZE];
+        entries[4095] = [9928, -8192, 0, 4096];
+        let book = AdpcmVqCodebook::from_entries(&entries).unwrap();
+        assert_eq!(book.coefficients(4095), &[1.2119140625, -1.0, 0.0, 0.5]);
+        assert_eq!(book.coefficients(0), &[0.0; 4]);
+    }
+
+    /// `VqCodebooks` defaults to the shipped no-books state and the
+    /// builder methods attach each book independently.
+    #[test]
+    fn vq_codebooks_default_is_empty() {
+        let none = VqCodebooks::none();
+        assert!(none.is_empty());
+        assert!(none.hfreq.is_none() && none.adpcm.is_none());
+
+        let hf = HfVqCodebook::from_elements(&vec![[0.0; HFREQ_VQ_VECTOR_LEN]; HFREQ_VQ_BOOK_SIZE])
+            .unwrap();
+        let with_hf = VqCodebooks::none().with_hfreq(hf);
+        assert!(!with_hf.is_empty());
+        assert!(with_hf.hfreq.is_some() && with_hf.adpcm.is_none());
     }
 
     /// A truncated region reports EOF rather than fabricating indices.
