@@ -188,9 +188,11 @@ black-box-accepted by the reference decoder.
   per-call decoder) keeps single-frame semantics; `CoreStreamDecoder` is
   the multi-frame path. The registry `Decoder::receive_frame` holds a
   persistent `CoreStreamDecoder` so multi-packet streams carry the
-  filter tail across packets, and emits a planar S32 `AudioFrame`;
-  joint-intensity tails and §D.10 VQ/ADPCM blockers return a typed
-  `CoreFrameDecodeError` (mapped to `Unsupported`). Carrying the
+  filter tail across packets, and emits a planar S32 `AudioFrame`; a
+  bookless §D.10 VQ/ADPCM blocker returns a typed
+  `CoreFrameDecodeError` (mapped to `Unsupported`; joint-intensity
+  frames decode — see above — and the §D.10 paths decode once a
+  recovered book is attached via `set_vq_codebooks`). Carrying the
   inter-frame tail is what makes the decode match the `ffmpeg` reference
   (correlation 1.0 vs 0.73 with a per-frame reset — see
   `tests/black_box_ffmpeg_pcm.rs`).
