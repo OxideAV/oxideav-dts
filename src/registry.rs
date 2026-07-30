@@ -166,7 +166,9 @@ oxideav_core::register!("dts", register);
 /// [`Decoder::send_packet`] and decode through the identical chain.
 /// Only a §D.10 VQ/ADPCM blocker still surfaces [`CoreError::Unsupported`]
 /// (the two large Annex D VQ code books are not printed in the staged
-/// ETSI spec).
+/// ETSI spec; the decode paths themselves are implemented behind
+/// [`crate::SubframePcmDecoder::set_vq_codebooks`] — the registry
+/// decoder ships bookless until a recovered book is staged).
 pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
     Ok(Box::new(DtsDecoderHandle {
         codec_id: params.codec_id.clone(),

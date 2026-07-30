@@ -532,3 +532,78 @@ fn books_do_not_perturb_common_core_decode() {
     let with_books = decode_with_books(&frame, &header, synthetic_vq_codebooks());
     assert_eq!(plain, with_books);
 }
+
+/// `nSSC = 4` (the maximum subframe): the HF fill consumes **all 32**
+/// elements of each §D.10.2 vector — the p.33 "maximum possible
+/// subframe" case with no pad — and still matches the analytic
+/// reconstruction bit-exactly.
+#[test]
+fn nssc4_hf_vq_uses_full_32_element_vectors() {
+    let template = template_header();
+    let spec = JointFrameSpec {
+        n_ssc: 4,
+        hf_subbands: [8, 4],
+        ..JointFrameSpec::default_plain(0xD10_0000C)
+    };
+    let frame = build_frame_from_spec(&template, &spec);
+    let header = parse_frame_header(&frame).expect("nSSC=4 frame parses");
+
+    let ours = decode_with_books(&frame, &header, synthetic_vq_codebooks());
+    assert_eq!(ours[0].len(), 32 * 32, "4 subsubframes x 8 rows x 32 PCM");
+
+    let mut history = [[[0.0; 4]; NUM_SUBBAND]; 2];
+    let matrices = analytic_matrices(&spec, header.rate_index, &mut history);
+    assert_eq!(matrices[0].len(), 32, "all 32 vector elements consumed");
+    let expect = synthesize(&mut MultiChannelQmf::new(2), &matrices, [32, 32], &header);
+    assert_eq!(ours, expect, "full-vector HF fill must match");
+}
+
+/// Two subframes x HF-VQ x ADPCM x ASPF x CPF: per-subframe phase-1
+/// index regions (different indices per subframe), per-subframe PVQ
+/// planes, a DSYNC after every subsubframe, HCRC/AHCRC/SICRC framing
+/// — all cursors exact, bit-exact against the analytic chain.
+#[test]
+fn multi_subframe_hf_adpcm_aspf_cpf_grid_matches_analytic() {
+    let template = template_header();
+    let spec = JointFrameSpec {
+        n_subframes: 2,
+        hf_subbands: [8, 4],
+        adpcm_subbands: [3, 2],
+        aspf: true,
+        cpf: true,
+        ..JointFrameSpec::default_plain(0xD10_0000D)
+    };
+    let frame = build_frame_from_spec(&template, &spec);
+    let header = parse_frame_header(&frame).expect("grid frame parses");
+    assert!(header.crc_present && header.aspf);
+
+    let ours = decode_with_books(&frame, &header, synthetic_vq_codebooks());
+    assert_eq!(ours[0].len(), 2 * 512);
+
+    let mut history = [[[0.0; 4]; NUM_SUBBAND]; 2];
+    let matrices = analytic_matrices(&spec, header.rate_index, &mut history);
+    let expect = synthesize(&mut MultiChannelQmf::new(2), &matrices, [32, 32], &header);
+    assert_eq!(ours, expect, "the full grid must compose bit-exactly");
+}
+
+/// Attaching books does not perturb the decode of the bundled *real*
+/// encoder streams (both are common-Core: no HF-VQ, no PMODE) — the
+/// recovered-book paths are strictly additive.
+#[test]
+fn books_do_not_perturb_real_fixture_streams() {
+    use oxideav_dts::iter_frames;
+    for (fixture, channels) in [
+        (&include_bytes!("fixtures/dts_5_frames.bin")[..], 2usize),
+        (&include_bytes!("fixtures/dts_51_lfe.bin")[..], 5),
+    ] {
+        let mut plain = CoreStreamDecoder::new(channels);
+        let mut with_books = CoreStreamDecoder::new(channels);
+        with_books.set_vq_codebooks(synthetic_vq_codebooks());
+        for fv in iter_frames(fixture) {
+            let fv = fv.expect("real fixture frames iterate cleanly");
+            let a = plain.decode_frame(fv.data, &fv.header).expect("plain");
+            let b = with_books.decode_frame(fv.data, &fv.header).expect("books");
+            assert_eq!(a, b, "books must be strictly additive");
+        }
+    }
+}

@@ -442,6 +442,14 @@
 //!   contents are a recorded gap
 //!   (`docs/audio/dts/dts-d10-vq-tables-GAP.md`) pending an
 //!   observer-derived trace. Added in round 408.
+//! - [`HfVqCodebook`] / [`AdpcmVqCodebook`] / [`VqCodebooks`] +
+//!   [`SubframePcmDecoder::set_vq_codebooks`] — the **drop-in
+//!   containers and decode paths for recovered §D.10 books** (round
+//!   434): with books attached, `nVQSUB < nSUBS` (phase-1 HF-VQ) and
+//!   `PMODE != 0` (§C.2.2 inverse-ADPCM, [`AdpcmHistory`], §5.3.1
+//!   `HFLAG` frame gate) frames decode end to end; without them the
+//!   typed blocker is unchanged, so the remaining gap is data
+//!   acquisition only.
 //! - [`dts_dynrng_to_db`] / [`dts_dynrng_to_linear`] — the §5.4.1 /
 //!   §5.7.2 DRC code resolution: the 8-bit `RANGE` /
 //!   `subsubFrameDRC_Rev2AUX[]` byte is **signed Q2 two's-complement**

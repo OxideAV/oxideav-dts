@@ -61,22 +61,25 @@
 //!   `nVQIndex = ExtractBits(10); HFreqVQ.LookUp(...)`) needs the §D.10.2
 //!   "High Frequency Subbands" 32-sample VQ code book (1024 vectors;
 //!   entries decode as two 8-bit signed integers **each ÷ 24** —
-//!   [`crate::unpack_hfreq_vq_entry`]). A subband whose
-//!   `nVQSUB < nSUBS` cannot be reconstructed without it, though its
-//!   10-bit indices can be captured structurally
-//!   ([`crate::scan_hf_vq_indices_at`]).
+//!   [`crate::unpack_hfreq_vq_entry`]). Its 10-bit indices are captured
+//!   structurally ([`crate::scan_hf_vq_indices_at`]) and — round 434 —
+//!   a recovered book supplied as an [`HfVqFill`] to
+//!   [`decode_audio_data_subframe_vq_at`] reconstructs the subband
+//!   (`SCALES[ch][n][0] · HFREQ[m]` over the subframe's rows).
 //! * The **inverse-ADPCM coefficient lookup** (`PMODE != 0`, the §5.4.1
 //!   `ADPCMCoeffVQ.LookUp(nVQIndex, PVQ[ch][n])`) needs the §D.10.1
 //!   ADPCM-coefficient VQ code book (4096 × 4 stored integers, actual
-//!   coefficient = entry ÷ 2¹³ — [`crate::adpcm_vq_coeff`]) to turn
-//!   the captured 12-bit `pvq_index` into the four predictor taps;
-//!   the §C.2.2 predictor itself is landed but cannot run without the
-//!   coefficients.
+//!   coefficient = entry ÷ 2¹³ — [`crate::adpcm_vq_coeff`]); with a
+//!   recovered book supplied as an [`AdpcmContext`] the §C.2.2
+//!   predictor runs per subsubframe from the captured 12-bit
+//!   `pvq_index`, primed by the persistent [`AdpcmHistory`].
 //!
-//! Both surface [`AudioArrayError::VqCodebookUnavailable`]. A frame
+//! Without the matching book each sub-path surfaces
+//! [`AudioArrayError::VqCodebookUnavailable`] — the shipped state,
+//! since the books' numeric contents are the recorded docs gap. A frame
 //! whose primary channels are all linearly / Huffman / block coded with
 //! `PMODE == 0` and `nVQSUB == nSUBS` (the common Core case) decodes to
-//! PCM end-to-end with the landed primitives.
+//! PCM end-to-end with the landed primitives and no books.
 
 use crate::audio_data::{audio_quant_type, AudioQuantType};
 use crate::audio_huff::{decode_audio_huff_at, AudioHuffCodebook};

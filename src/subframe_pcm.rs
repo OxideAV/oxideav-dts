@@ -55,12 +55,19 @@
 //! # Scope
 //!
 //! The walker's §D.10.1 ADPCM-coefficient-VQ (`PMODE != 0`) and §D.10.2
-//! high-frequency-VQ (`nVQSUB < nSUBS`) blockers are still surfaced as
-//! typed [`AudioArrayError::VqCodebookUnavailable`] errors (those Annex D
-//! VQ code books are not transcribed in `docs/audio/dts/`). A subframe
-//! whose primary channels are all linearly / Huffman / block coded with
-//! `PMODE == 0` and `nVQSUB == nSUBS` — the common Core case — now
-//! reconstructs to PCM end-to-end through this one call.
+//! high-frequency-VQ (`nVQSUB < nSUBS`) sub-paths are fully implemented
+//! behind the recovered-book drop-in
+//! ([`SubframePcmDecoder::set_vq_codebooks`], round 434): with books
+//! attached those frames reconstruct to PCM end-to-end (phase-1 HF-VQ
+//! fill, §C.2.2 prediction with the persistent
+//! [`AdpcmHistory`] and the §5.3.1 `HFLAG` frame gate). Without books —
+//! the shipped state, since the books' numeric contents are the
+//! recorded `docs/audio/dts/dts-d10-vq-tables-GAP.md` gap — such
+//! frames surface the typed
+//! [`AudioArrayError::VqCodebookUnavailable`] error before any §5.5
+//! bit is read. A subframe whose primary channels are all linearly /
+//! Huffman / block coded with `PMODE == 0` and `nVQSUB == nSUBS` — the
+//! common Core case — reconstructs to PCM end-to-end with no books.
 //!
 //! Joint-intensity subband coding (`JOINX[ch] > 0`) is not applied here:
 //! the §C.2.3 joint-subband decode is landed
