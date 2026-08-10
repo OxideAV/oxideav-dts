@@ -231,9 +231,10 @@ fn hf_vq_frame_decode_matches_analytic_reconstruction() {
     assert_ne!(ours, ablated_pcm, "the HF-VQ fill must be audible");
 }
 
-/// Without the §D.10.2 book the HF-VQ frame surfaces the exact typed
-/// blocker as before (first offending channel/subband), through both
-/// the bare decoder and one carrying only the ADPCM book.
+/// A book-stripped decoder ([`VqCodebooks::none`]) surfaces the exact
+/// typed HF-VQ blocker (first offending channel/subband), also when
+/// carrying only the ADPCM book — while the default decoder (built-in
+/// real books, round 439) decodes the same frame outright.
 #[test]
 fn hf_vq_frame_without_book_stays_blocked() {
     let template = template_header();
@@ -244,7 +245,13 @@ fn hf_vq_frame_without_book_stays_blocked() {
     let frame = build_frame_from_spec(&template, &spec);
     let header = parse_frame_header(&frame).expect("synthetic frame parses");
 
-    let (hf, ch, n) = blocked_kind(decode_core_frame(&frame, &header).unwrap_err());
+    // The default decoder now carries the built-in real books: the
+    // frame that used to hit the §D.10 wall decodes.
+    decode_core_frame(&frame, &header).expect("built-in books decode HF-VQ frames by default");
+
+    let mut bare = SubframePcmDecoder::new(2);
+    bare.set_vq_codebooks(VqCodebooks::none());
+    let (hf, ch, n) = blocked_kind(bare.decode_core_frame_into(&frame, &header).unwrap_err());
     assert!(hf, "the missing book is the §D.10.2 HF-VQ one");
     assert_eq!((ch, n), (1, 28), "first HF-VQ subband of channel 1");
 
@@ -290,8 +297,9 @@ fn adpcm_frame_decode_matches_analytic_reconstruction() {
     assert_ne!(ours, plain_pcm, "the §C.2.2 prediction must be audible");
 }
 
-/// Without the §D.10.1 book an ADPCM frame surfaces the exact typed
-/// blocker (also when only the HF-VQ book is attached).
+/// A book-stripped decoder surfaces the exact typed ADPCM blocker
+/// (also when only the HF-VQ book is attached) — while the default
+/// decoder (built-in real books) decodes the same frame outright.
 #[test]
 fn adpcm_frame_without_book_stays_blocked() {
     let template = template_header();
@@ -302,7 +310,11 @@ fn adpcm_frame_without_book_stays_blocked() {
     let frame = build_frame_from_spec(&template, &spec);
     let header = parse_frame_header(&frame).expect("synthetic frame parses");
 
-    let (hf, ch, n) = blocked_kind(decode_core_frame(&frame, &header).unwrap_err());
+    decode_core_frame(&frame, &header).expect("built-in books decode ADPCM frames by default");
+
+    let mut bare = SubframePcmDecoder::new(2);
+    bare.set_vq_codebooks(VqCodebooks::none());
+    let (hf, ch, n) = blocked_kind(bare.decode_core_frame_into(&frame, &header).unwrap_err());
     assert!(!hf, "the missing book is the §D.10.1 ADPCM one");
     assert_eq!((ch, n), (1, 0), "first PMODE subband of channel 1");
 
@@ -518,9 +530,9 @@ fn truncated_hf_vq_region_is_typed_eof() {
     );
 }
 
-/// The registry-facing default (no books) is unchanged: a plain
-/// common-Core frame decodes identically whether or not books are
-/// attached (the books only *add* reachable frames).
+/// A plain common-Core frame decodes identically whichever books are
+/// attached — built-in (the default), synthetic, or none: the books
+/// only *add* reachable frames.
 #[test]
 fn books_do_not_perturb_common_core_decode() {
     let template = template_header();

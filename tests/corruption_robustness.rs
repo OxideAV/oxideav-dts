@@ -44,10 +44,13 @@ const D10: &[u8] = include_bytes!("fixtures/dts_d10_5_frames.bin");
 /// Drive the full decode surface over one (possibly damaged) buffer:
 /// resync-tolerant framing, header parse, PCM decode, LFE plane, and
 /// the §5.7 chunk parsers. Errors are fine; panics are the failure.
+/// `books == None` explicitly strips the (now default, round 439)
+/// built-in books so the bookless typed-blocker path stays swept.
 fn drive(bytes: &[u8], channels: usize, books: Option<&VqCodebooks>) {
     let mut dec = CoreStreamDecoder::new(channels);
-    if let Some(books) = books {
-        dec.set_vq_codebooks(books.clone());
+    match books {
+        Some(books) => dec.set_vq_codebooks(books.clone()),
+        None => dec.set_vq_codebooks(VqCodebooks::none()),
     }
     for fv in iter_frames_resync(bytes) {
         let Ok(fv) = fv else { continue };
@@ -68,7 +71,7 @@ fn drive(bytes: &[u8], channels: usize, books: Option<&VqCodebooks>) {
 /// what bounds the stride).
 #[test]
 fn single_byte_corruption_never_panics() {
-    let books = common::synthetic_vq_codebooks();
+    let books = VqCodebooks::builtin();
     for (fixture, channels) in [(STEREO, 2usize), (FIVE_ONE, 5), (JOINT, 2), (TERM, 2)] {
         for offset in (0..fixture.len()).step_by(37) {
             for mask in [0x80u8, 0xFF] {
@@ -79,7 +82,7 @@ fn single_byte_corruption_never_panics() {
         }
     }
     // The §D.10-bearing stream: both the bookless (typed-blocker) and
-    // the recovered-book decode paths must survive every damage case.
+    // the built-in-book decode paths must survive every damage case.
     for offset in (0..D10.len()).step_by(37) {
         for mask in [0x80u8, 0xFF] {
             let mut damaged = D10.to_vec();
@@ -102,7 +105,7 @@ fn multi_byte_corruption_and_truncation_never_panic() {
         state ^= state << 5;
         state
     };
-    let books = common::synthetic_vq_codebooks();
+    let books = VqCodebooks::builtin();
     for (fixture, channels) in [
         (STEREO, 2usize),
         (FIVE_ONE, 5),

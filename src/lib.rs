@@ -493,9 +493,10 @@
 //! - [`make_decoder`] — factory that builds a boxed
 //!   [`oxideav_core::Decoder`] (the [`DtsDecoderHandle`]).
 //! - [`DtsDecoderHandle`] — the decoder handle. `send_packet` eagerly
-//!   parses the frame header; `receive_frame` returns
-//!   `Error::Unsupported` because PCM output is still blocked on
-//!   docs gaps.
+//!   parses the frame header (unpacking 14-bit container frames);
+//!   `receive_frame` runs the full §5.3/§5.4/§5.5 + §C.2.5
+//!   reconstruction — including §D.10 VQ/ADPCM frames via the
+//!   built-in code books — to a planar S32 `AudioFrame`.
 //! - [`probe_dts`] — standalone confidence helper (1.0 / 0.5 / 0.0).
 //! - [`CODEC_ID_STR`] — canonical codec id `"dts"`.
 //!

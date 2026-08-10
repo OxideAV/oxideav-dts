@@ -56,18 +56,17 @@
 //!
 //! The walker's §D.10.1 ADPCM-coefficient-VQ (`PMODE != 0`) and §D.10.2
 //! high-frequency-VQ (`nVQSUB < nSUBS`) sub-paths are fully implemented
-//! behind the recovered-book drop-in
-//! ([`SubframePcmDecoder::set_vq_codebooks`], round 434): with books
-//! attached those frames reconstruct to PCM end-to-end (phase-1 HF-VQ
-//! fill, §C.2.2 prediction with the persistent
-//! [`AdpcmHistory`] and the §5.3.1 `HFLAG` frame gate). Without books —
-//! the shipped state, since the books' numeric contents are the
-//! recorded `docs/audio/dts/dts-d10-vq-tables-GAP.md` gap — such
-//! frames surface the typed
+//! (round 434) and — since round 439 — **enabled by default**: every
+//! decoder starts with the real §D.10 books
+//! ([`VqCodebooks::builtin`], transcribed from the staged clean-room
+//! tables `docs/audio/dts/tables/dts-d10-*.csv`), so those frames
+//! reconstruct to PCM end-to-end out of the box (phase-1 HF-VQ fill,
+//! §C.2.2 prediction with the persistent [`AdpcmHistory`] and the
+//! §5.3.1 `HFLAG` frame gate). A caller may still swap or strip the
+//! books ([`SubframePcmDecoder::set_vq_codebooks`]); with
+//! [`VqCodebooks::none`] such frames surface the typed
 //! [`AudioArrayError::VqCodebookUnavailable`] error before any §5.5
-//! bit is read. A subframe whose primary channels are all linearly /
-//! Huffman / block coded with `PMODE == 0` and `nVQSUB == nSUBS` — the
-//! common Core case — reconstructs to PCM end-to-end with no books.
+//! bit is read, exactly as in the pre-round-439 bookless state.
 //!
 //! Joint-intensity subband coding (`JOINX[ch] > 0`) is not applied here:
 //! the §C.2.3 joint-subband decode is landed
@@ -239,10 +238,9 @@ pub struct SubframePcmDecoder {
     /// [`Self::take_last_lfe_pcm`] so the primary-channel return tuple is
     /// unchanged.
     last_lfe_pcm: Vec<i32>,
-    /// Recovered §D.10 VQ code books, when the caller supplied any
-    /// ([`Self::set_vq_codebooks`]). Default: none — the recorded
-    /// docs-gap state, under which HF-VQ / ADPCM frames surface the
-    /// typed blocker.
+    /// The §D.10 VQ code books. Default: the built-in real books
+    /// ([`VqCodebooks::builtin`]); a caller may swap or strip them
+    /// ([`Self::set_vq_codebooks`]).
     vq_codebooks: VqCodebooks,
     /// The persistent §C.2.2 per-subband reconstruction history that
     /// primes the inverse-ADPCM predictor across subframe (and, per
@@ -260,24 +258,24 @@ impl SubframePcmDecoder {
             qmf: MultiChannelQmf::new(channels),
             lfe: crate::LfeChannel::new(),
             last_lfe_pcm: Vec::new(),
-            vq_codebooks: VqCodebooks::none(),
+            vq_codebooks: VqCodebooks::builtin(),
             adpcm_history: AdpcmHistory::new(channels),
         }
     }
 
-    /// Supply recovered §D.10 VQ code books ([`VqCodebooks`]),
-    /// enabling the high-frequency-VQ (`nVQSUB < nSUBS`) and
-    /// inverse-ADPCM (`PMODE != 0`) §5.5 sub-paths that otherwise
-    /// surface the typed
-    /// [`AudioArrayError::VqCodebookUnavailable`] blocker (the
-    /// books' numeric contents are the recorded
-    /// `docs/audio/dts/dts-d10-vq-tables-GAP.md` gap — this is the
-    /// drop-in point for an observer-derived recovery).
+    /// Replace the §D.10 VQ code books ([`VqCodebooks`]). The decoder
+    /// starts with the built-in real books ([`VqCodebooks::builtin`]),
+    /// so the high-frequency-VQ (`nVQSUB < nSUBS`) and inverse-ADPCM
+    /// (`PMODE != 0`) §5.5 sub-paths decode by default; supplying
+    /// [`VqCodebooks::none`] strips them, restoring the typed
+    /// [`AudioArrayError::VqCodebookUnavailable`] blocker on those
+    /// sub-paths.
     pub fn set_vq_codebooks(&mut self, books: VqCodebooks) {
         self.vq_codebooks = books;
     }
 
-    /// The currently attached §D.10 books (default: none).
+    /// The currently attached §D.10 books (default: the built-in real
+    /// books).
     #[must_use]
     pub fn vq_codebooks(&self) -> &VqCodebooks {
         &self.vq_codebooks
@@ -509,11 +507,11 @@ impl SubframePcmDecoder {
             n_ssc * 8
         };
 
-        // (0a) §D.10 blocker gates, checked BEFORE any bit is read so
-        // a blocked frame fails cleanly without disturbing the
-        // persistent LFE / filter / history state. Each gate lifts
-        // when the matching recovered book was supplied
-        // ([`Self::set_vq_codebooks`]).
+        // (0a) §D.10 book-availability gates, checked BEFORE any bit
+        // is read so a blocked frame fails cleanly without disturbing
+        // the persistent LFE / filter / history state. Both books are
+        // present by default (`VqCodebooks::builtin`); the gates fire
+        // only when a caller stripped them (`VqCodebooks::none`).
         let has_hf_vq = (0..channels).any(|ch| n_vqsub[ch] < n_subs[ch]);
         if has_hf_vq && self.vq_codebooks.hfreq.is_none() {
             let ch = (0..channels)
@@ -870,8 +868,10 @@ impl From<crate::Error> for CoreFrameDecodeError {
 /// [`crate::dts_dynrng_to_linear`] gain is applied to that subframe's
 /// reconstructed PCM after QMF synthesis (per §5.4.1).
 ///
-/// The §D.10 VQ / ADPCM blockers (from the §5.5 walk) surface as
-/// [`CoreFrameDecodeError::Decode`].
+/// §D.10 frames (`nVQSUB < nSUBS` / `PMODE != 0`) decode through the
+/// built-in code books; the typed VQ-book blocker surfaces (as
+/// [`CoreFrameDecodeError::Decode`]) only for a caller-stripped
+/// decoder ([`VqCodebooks::none`]).
 ///
 /// Returns planar PCM (one `Vec<i32>` per channel, `Σ nSSC · 256`
 /// samples each; a termination frame's trailing partial subsubframe
@@ -982,16 +982,18 @@ impl CoreStreamDecoder {
         &self.decoder
     }
 
-    /// Supply recovered §D.10 VQ code books for the whole stream —
-    /// see [`SubframePcmDecoder::set_vq_codebooks`]. The §C.2.2
-    /// reconstruction history then carries across frames per each
-    /// frame header's `HFLAG` gate (§5.3.1: history used when
-    /// `HFLAG = 1`, ignored — zeroed — otherwise).
+    /// Replace the §D.10 VQ code books for the whole stream — see
+    /// [`SubframePcmDecoder::set_vq_codebooks`] (the built-in real
+    /// books are the default). The §C.2.2 reconstruction history
+    /// carries across frames per each frame header's `HFLAG` gate
+    /// (§5.3.1: history used when `HFLAG = 1`, ignored — zeroed —
+    /// otherwise).
     pub fn set_vq_codebooks(&mut self, books: VqCodebooks) {
         self.decoder.set_vq_codebooks(books);
     }
 
-    /// The currently attached §D.10 books (default: none).
+    /// The currently attached §D.10 books (default: the built-in real
+    /// books).
     #[must_use]
     pub fn vq_codebooks(&self) -> &VqCodebooks {
         self.decoder.vq_codebooks()

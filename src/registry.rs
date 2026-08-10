@@ -164,11 +164,11 @@ oxideav_core::register!("dts", register);
 /// [`AudioFrame`] for the common Core case. **14-bit container frames**
 /// (both byte orders) are unpacked to the raw-16-bit-word domain in
 /// [`Decoder::send_packet`] and decode through the identical chain.
-/// Only a §D.10 VQ/ADPCM blocker still surfaces [`CoreError::Unsupported`]
-/// (the two large Annex D VQ code books are not printed in the staged
-/// ETSI spec; the decode paths themselves are implemented behind
-/// [`crate::SubframePcmDecoder::set_vq_codebooks`] — the registry
-/// decoder ships bookless until a recovered book is staged).
+/// §D.10 VQ/ADPCM frames (`nVQSUB < nSUBS` / `PMODE != 0`) decode
+/// through the built-in Annex D code books
+/// ([`crate::VqCodebooks::builtin`] — the decoder default since round
+/// 439), so no Core frame class maps to
+/// [`CoreError::Unsupported`] for missing book data anymore.
 pub fn make_decoder(params: &CodecParameters) -> CoreResult<Box<dyn Decoder>> {
     Ok(Box::new(DtsDecoderHandle {
         codec_id: params.codec_id.clone(),
@@ -295,11 +295,11 @@ impl Decoder for DtsDecoderHandle {
         // packet injects a warmup transient at every frame boundary).
         // The frame's channel count (§5.3.2 nPCHS) sizes the filter; a
         // mismatch with the running stream restarts it for the new
-        // layout. Joint-intensity frames (Table 5-28 JOINX > 0) now
-        // decode through the §D.3 JScaleTbl + §C.2.3 sub-band copy; only
-        // a §D.10 VQ/ADPCM blocker still surfaces as Unsupported so
-        // callers can distinguish "needs another packet" from "this
-        // frame's feature isn't decoded yet".
+        // layout. Joint-intensity frames (Table 5-28 JOINX > 0) decode
+        // through the §D.3 JScaleTbl + §C.2.3 sub-band copy, and §D.10
+        // VQ/ADPCM frames through the built-in Annex D code books (the
+        // stream-decoder default), so decode errors here are structural
+        // (bad bitstream / reserved fields), not missing-feature.
         let channels = frame_channel_count(&bytes, &header)
             .map_err(|e| CoreError::unsupported(format!("oxideav-dts: {e}")))?;
         let stream = match self.stream.take() {
