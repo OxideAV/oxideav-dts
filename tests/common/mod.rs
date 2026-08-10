@@ -675,6 +675,58 @@ pub fn build_d10_stream() -> Vec<u8> {
     stream
 }
 
+/// Build the synthetic **§D.10 interaction-stress** elementary stream
+/// committed as `tests/fixtures/dts_d10_stress_6_frames.bin`: six
+/// normal stereo frames exercising the §D.10 VQ/ADPCM sub-paths across
+/// widths and the §C.2.2 cross-frame `HFLAG` history chain, in one
+/// continuous stream (so the §C.2.5 filter tail carries across the
+/// VQ-bearing frames). Every frame is reference-decodable and shares
+/// the plain frame size, so the black-box comparison sees all six:
+///
+/// 1. plain (books-independent anchor + filter warm-up);
+/// 2. **wide** HF-VQ (`hf_subbands = [12, 8]` — 20 VQ subbands);
+/// 3. HF-VQ + ADPCM together (`[4, 4]` + `[6, 4]`, `HFLAG = 0`);
+/// 4. the same HF-VQ + ADPCM shape with `HFLAG = 1` — §C.2.2
+///    prediction primed by frame 3's reconstruction history;
+/// 5. **ADPCM-heavy** (`adpcm_subbands = [8, 6]`, `HFLAG = 0`);
+/// 6. HF-VQ + ADPCM with `HFLAG = 1` continuing frame 5's history.
+pub fn build_d10_stress_stream() -> Vec<u8> {
+    let template = template_header();
+    let specs = [
+        JointFrameSpec::default_plain(0xD10_57E0),
+        JointFrameSpec {
+            hf_subbands: [12, 8],
+            ..JointFrameSpec::default_plain(0xD10_57E1)
+        },
+        JointFrameSpec {
+            hf_subbands: [4, 4],
+            adpcm_subbands: [6, 4],
+            ..JointFrameSpec::default_plain(0xD10_57E2)
+        },
+        JointFrameSpec {
+            hf_subbands: [4, 4],
+            adpcm_subbands: [6, 4],
+            predictor_history: true,
+            ..JointFrameSpec::default_plain(0xD10_57E3)
+        },
+        JointFrameSpec {
+            adpcm_subbands: [8, 6],
+            ..JointFrameSpec::default_plain(0xD10_57E4)
+        },
+        JointFrameSpec {
+            hf_subbands: [4, 2],
+            adpcm_subbands: [8, 6],
+            predictor_history: true,
+            ..JointFrameSpec::default_plain(0xD10_57E5)
+        },
+    ];
+    let mut stream = Vec::new();
+    for spec in &specs {
+        stream.extend_from_slice(&build_frame_from_spec(&template, spec));
+    }
+    stream
+}
+
 /// The §5.3.1 header template shared by every synthetic frame: the
 /// first frame of the committed real stereo fixture (so AMODE/SFREQ/
 /// RATE/PCMR are values a real encoder emits).

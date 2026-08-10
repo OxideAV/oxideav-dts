@@ -702,6 +702,63 @@ mod tests {
         assert_eq!(distinct.len(), 4096, "all §D.10.1 vectors are distinct");
     }
 
+    /// Whether every root of the degree-4 predictor polynomial
+    /// `A(z) = 1 − Σ cₖ z^(−k−1)` lies strictly inside radius `m`,
+    /// via the Schur–Cohn (step-down) recursion on `A(m·z)` — all
+    /// reflection coefficients strictly inside the unit disc.
+    fn predictor_roots_inside(coeffs: &[f64; 4], m: f64) -> bool {
+        // A(m·z) in powers of z^{-1}: aᵢ = −c_{i−1} · m^{−i}, a₀ = 1.
+        let mut a = [1.0, 0.0, 0.0, 0.0, 0.0];
+        for (i, &c) in coeffs.iter().enumerate() {
+            a[i + 1] = -c / m.powi(i as i32 + 1);
+        }
+        let mut n = 4;
+        while n > 0 {
+            let k = a[n];
+            if k.abs() >= 1.0 {
+                return false;
+            }
+            let denom = 1.0 - k * k;
+            let prev = a;
+            for (i, slot) in a.iter_mut().enumerate().take(n).skip(1) {
+                *slot = (prev[i] - k * prev[n - i]) / denom;
+            }
+            n -= 1;
+        }
+        true
+    }
+
+    /// The staged `.meta.md` stability fact, re-proved on the
+    /// transcription: every one of the 4096 §D.10.1 vectors is a
+    /// strictly minimum-phase fourth-order predictor, with the
+    /// largest root modulus bracketed around the recorded `0.98702`
+    /// (all inside radius 0.988; not all inside 0.986). A mis-framed
+    /// transcription (wrong stride/order/signedness) does not produce
+    /// 4096 consecutive stable predictors with that exact margin.
+    #[test]
+    fn builtin_adpcm_predictors_all_minimum_phase_with_recorded_margin() {
+        let book = AdpcmVqCodebook::builtin();
+        let mut inside_0986 = 0usize;
+        for idx in 0..ADPCM_VQ_BOOK_SIZE {
+            let coeffs = book.coefficients(idx as u16);
+            assert!(
+                predictor_roots_inside(coeffs, 1.0),
+                "vector {idx} is not minimum-phase"
+            );
+            assert!(
+                predictor_roots_inside(coeffs, 0.988),
+                "vector {idx} has a root beyond the recorded 0.98702 margin"
+            );
+            if predictor_roots_inside(coeffs, 0.986) {
+                inside_0986 += 1;
+            }
+        }
+        assert!(
+            inside_0986 < ADPCM_VQ_BOOK_SIZE,
+            "some vector must reach past 0.986 (recorded max modulus 0.98702)"
+        );
+    }
+
     /// The built-in §D.10.2 book reproduces the staged table's pinned
     /// sample rows, with the ÷ 2⁴ scaling applied.
     #[test]

@@ -37,6 +37,17 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   The registry surface is pinned too: `make_decoder` →
   `receive_frame` decodes the §D.10 stream by default, bit-identical
   to the direct path.
+- Round 439 — **§D.10 interaction-stress fixture**
+  (`tests/black_box_d10_stress.rs` + committed
+  `tests/fixtures/dts_d10_stress_6_frames.bin`): a six-frame
+  continuous stream exercising the built-in books across widths and
+  the §C.2.2 cross-frame `HFLAG` history chain — a wide HF-VQ frame
+  (20 VQ subbands), HF-VQ + ADPCM together, both `HFLAG` gates primed
+  from a preceding ADPCM frame, and an ADPCM-heavy frame — all under
+  the persistent §C.2.5 filter tail. Decoded with the **default**
+  decoder, every frame is shape-identical to the black-box reference
+  (Pearson > 0.9999) and matches above 90 dB SNR after the √2
+  output-scale constant.
 
 ### Changed
 
