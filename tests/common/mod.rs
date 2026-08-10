@@ -570,10 +570,10 @@ pub fn pvq_index(subframe: usize, ch: usize, n: usize) -> u32 {
 }
 
 /// Element `m` of §D.10.2 vector `v` of the **synthetic** test book —
-/// the two-int8-÷ 24 §D.10.2 entry decoding applied to a deterministic
-/// int8 ramp covering the full ±1 element range.
+/// the two-int8-÷ 2⁴ §D.10.2 entry decoding applied to a deterministic
+/// int8 ramp spanning ±24 raw (±1.5 scaled).
 pub fn synthetic_hf_element(v: usize, m: usize) -> f64 {
-    f64::from(synthetic_hf_int8(v, m)) / 24.0
+    f64::from(synthetic_hf_int8(v, m)) / 16.0
 }
 
 fn synthetic_hf_int8(v: usize, m: usize) -> i8 {
@@ -582,14 +582,14 @@ fn synthetic_hf_int8(v: usize, m: usize) -> i8 {
 
 /// The synthetic §D.10.2 `HFreqVQ` book (1024 × 32), built through the
 /// packed-entry constructor so the spec's 16-bit two-element packing
-/// is exercised end-to-end.
+/// (element `2k` = entry `k`'s low byte) is exercised end-to-end.
 pub fn synthetic_hf_book() -> oxideav_dts::HfVqCodebook {
     let entries: Vec<[u16; 16]> = (0..1024)
         .map(|v| {
             let mut packed = [0u16; 16];
             for (k, e) in packed.iter_mut().enumerate() {
-                let hi = synthetic_hf_int8(v, 2 * k) as u8;
-                let lo = synthetic_hf_int8(v, 2 * k + 1) as u8;
+                let lo = synthetic_hf_int8(v, 2 * k) as u8;
+                let hi = synthetic_hf_int8(v, 2 * k + 1) as u8;
                 *e = (u16::from(hi) << 8) | u16::from(lo);
             }
             packed

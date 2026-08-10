@@ -1,71 +1,63 @@
-//! §D.10 Vector-Quantization code books — everything the spec *does*
-//! define about them (dimensions, index widths, entry packing, and
-//! element scaling), plus a structural scanner for the §5.5 phase-1
-//! high-frequency VQ indices.
+//! §D.10 Vector-Quantization code books — the wire facts (dimensions,
+//! index widths, entry packing, element scaling), the structural
+//! scanner for the §5.5 phase-1 high-frequency VQ indices, and — since
+//! round 439 — the **books themselves**, built in
+//! ([`VqCodebooks::builtin`]).
 //!
-//! The two books' **numeric contents are a recorded gap**: ETSI
-//! TS 102 114 states, once for each of §D.10.1 and §D.10.2, "Due to
+//! ETSI TS 102 114 defines both books normatively but omits their
+//! numeric contents, once for each of §D.10.1 and §D.10.2: "Due to
 //! its extensive size, this table is not included here" (PDF p.255).
-//! `docs/audio/dts/dts-d10-vq-tables-GAP.md` records the full gap
-//! analysis and the legitimate recovery path (an observer-derived
-//! black-box trace sweeping each index in isolation — the values are
-//! data, not implementation). Until such a trace is staged, decode of
-//! a `nVQSUB < nSUBS` (HF-VQ) or `PMODE != 0` (ADPCM) subband
-//! surfaces the typed
-//! [`crate::AudioArrayError::VqCodebookUnavailable`] refusal.
+//! For a long time that was this crate's recorded docs gap
+//! (`docs/audio/dts/dts-d10-vq-tables-GAP.md`, now **CLOSED**): the
+//! GAP doc's container-level forensics proved the values were never in
+//! the PDF in any form. The books are now staged as clean-room *data*
+//! under `docs/audio/dts/tables/` — `dts-d10-1-adpcm-coeff-vq.csv`
+//! (4096 × 4) and `dts-d10-2-hfreq-vq.csv` (1024 × 32), each with a
+//! `.meta.md` sidecar; chain of custody in
+//! `docs/audio/dts/provenance/11-extractor-d10-vq.md`, with two
+//! independent sources agreeing on every value in both books. This
+//! crate transcribes them in [`crate::d10_tables`] and exposes them as
+//! ready-to-use books via [`HfVqCodebook::builtin`] /
+//! [`AdpcmVqCodebook::builtin`] / [`VqCodebooks::builtin`] — the
+//! default state of every decoder
+//! ([`crate::SubframePcmDecoder::new`]), so `nVQSUB < nSUBS` (HF-VQ)
+//! and `PMODE != 0` (ADPCM) subbands decode out of the box. The typed
+//! [`crate::AudioArrayError::VqCodebookUnavailable`] refusal now fires
+//! only when a caller explicitly strips the books
+//! ([`VqCodebooks::none`]).
 //!
-//! ## The gap is final for the staged PDF (round-9 forensics)
-//!
-//! The round-9 extraction pass
-//! (`docs/audio/dts/provenance/09-dts-d10-pdf-forensics.md`, folded
-//! into the GAP doc) audited the staged spec PDF as a **container**,
-//! not just as rendered pages, and ruled out every place the numeric
-//! books could still hide: no embedded-file attachments, no object
-//! streams (so a raw name scan is exhaustive), exactly one document
-//! revision (the two `%%EOF` markers are the linearization pair and no
-//! object number is ever superseded), all streams accounted for by
-//! reference key, no optional-content layers, no images anywhere near
-//! p.255, no invisible / off-page / clipped text on p.255, and no font
-//! whose glyph inventory implies undrawn content. The document's own
-//! TOC allocates both §D.10 subclauses one shared page. **The books
-//! were never in the file**; no further work on this PDF can produce
-//! them. The same pass also recorded that no lawfully-usable DTS
-//! decoder oracle is currently staged anywhere in `docs/` (the GAP doc
-//! names the permitted class: a vendor-proprietary, independently
-//! implemented DTS decoder staged with the usual acquisition record).
-//! The remaining §D.10 blocker is therefore **data acquisition only**
-//! — every structural fact around the missing numbers is pinned and
-//! implemented here, and [`HfVqCodebook`] / [`AdpcmVqCodebook`] accept
-//! a recovered book at runtime without further code changes.
-//!
-//! What this module ships **now** is the spec-defined shell around the
-//! missing data, so a recovered book drops straight in:
+//! What this module defines around the data:
 //!
 //! * the wire facts (index widths, book sizes, vector lengths) as
 //!   constants, from the §5.4/§5.5 walkers and the §D.10 definitions;
 //! * the §D.10 entry-decoding primitives —
 //!   [`unpack_hfreq_vq_entry`] (16-bit entry → two 8-bit signed
-//!   elements, **each ÷ 24**) and [`adpcm_vq_coeff`] (stored integer
-//!   ÷ 2¹³, spec anchor: entry `9928` → `1.2119140625`);
+//!   elements, low byte first, **each ÷ 2⁴**) and [`adpcm_vq_coeff`]
+//!   (stored integer ÷ 2¹³, spec anchor: entry `9928` →
+//!   `1.2119140625`);
 //! * [`scan_hf_vq_indices_at`], the purely structural §5.5 phase-1
 //!   walk (`nVQIndex = ExtractBits(10)` per HF subband) that captures
-//!   the indices a future lookup will consume — and that an
-//!   observer-derived recovery harness needs for cross-checking.
+//!   the indices the lookup consumes;
+//! * the caller-supplied-book containers ([`HfVqCodebook`] /
+//!   [`AdpcmVqCodebook`], rounds 408/434) that the built-in books now
+//!   flow through unchanged.
 //!
-//! ## The `/24` correction (round 408, re-verified round 9)
+//! ## The §D.10.2 divisor is `2^4 = 16` — a spec typo, corrected
 //!
-//! An earlier trace revision left the §D.10.2 element scaling
-//! ambiguous (`24` vs `2⁴`). The corrected
-//! `docs/audio/dts/dts-lfe-interpolation-and-audio-walker.md` §2.1 and
-//! `dts-d10-vq-tables-GAP.md` settle it: the divisor is the **literal
-//! number 24** (verified against a 400-dpi render of the spec page:
-//! the `24` sits on the text baseline at normal glyph size, unlike
-//! §D.10.1's `2^13` whose exponent is a raised superscript). The
-//! round-9 forensics pass re-verified both scalings independently via
-//! the extracted p.255 text ("each divided by 24" on the baseline;
-//! `9928 / 2¹³ = 1.2119140625` with the raised exponent), so the two
-//! entry-decoding primitives below rest on two independent reads of
-//! the same staged page.
+//! The spec's p.255 text renders the §D.10.2 element divisor as `24`,
+//! and rounds 408/9 pinned the *rendering* carefully (the `24` sits on
+//! the text baseline, unlike §D.10.1's `2^13` whose exponent is a
+//! raised superscript) and carried the literal reading. The staged
+//! recovery record (`tables/dts-d10-2-hfreq-vq.meta.md`) contradicts
+//! the literal reading three independent ways and settles the divisor
+//! as **`2^4 = 16`** — a `2^4` whose superscript was lost in
+//! typesetting, giving §D.10.2 exactly the same form as §D.10.1's
+//! `2^13`. Using the literal 24 costs a constant `16/24 = 2/3` gain
+//! error on every VQ-coded HF subband. The same record settles the
+//! intra-entry element order the spec never pinned: element `2k` is
+//! entry `k`'s **low** byte. Both corrections are confirmed end to end
+//! by the black-box reference decode of the §D.10-bearing fixture
+//! (`tests/black_box_d10.rs`).
 
 use crate::bitreader::BitReader;
 use crate::Result;
@@ -90,30 +82,31 @@ pub const HFREQ_VQ_VECTOR_LEN: usize = 32;
 pub const HFREQ_VQ_ENTRIES_PER_VECTOR: usize = HFREQ_VQ_VECTOR_LEN / 2;
 
 /// The §D.10.2 element divisor: each 8-bit signed integer unpacked
-/// from a 16-bit entry is divided by the **literal number 24** (not
-/// `2^4`) to give a vector element. See the module docs for the
-/// round-408 trace correction that pinned this value.
-pub const HFREQ_VQ_ELEMENT_DIVISOR: f64 = 24.0;
+/// from a 16-bit entry is divided by `2^4 = 16` to give a vector
+/// element. The spec's p.255 text renders this as `24` — a `2^4` with
+/// a lost superscript; see the module docs and
+/// `docs/audio/dts/tables/dts-d10-2-hfreq-vq.meta.md` for the
+/// three-way evidence that corrected the earlier literal-24 reading.
+pub const HFREQ_VQ_ELEMENT_DIVISOR: f64 = 16.0;
 
 /// Decode one 16-bit §D.10.2 `HFreqVQ` table entry into its two
 /// vector elements: split into two 8-bit signed integers, each
-/// divided by [`HFREQ_VQ_ELEMENT_DIVISOR`] (= the literal 24).
+/// divided by [`HFREQ_VQ_ELEMENT_DIVISOR`] (= `2^4`).
 ///
-/// Returned as `[high-byte element, low-byte element]` in that fixed
-/// order. The spec defines the packing ("each table entry is 16 bits
-/// = two packed vector elements") but — with the book's numeric
-/// contents omitted — publishes no anchor pinning which byte is the
-/// earlier vector element; a staged observer-derived book will settle
-/// the intra-entry order end-to-end (see
-/// `docs/audio/dts/dts-d10-vq-tables-GAP.md`, "What a usable source
-/// must provide").
+/// Returned as `[low-byte element, high-byte element]`: element `2k`
+/// of a vector is entry `k`'s **low** byte, element `2k+1` its high
+/// byte. The spec defines the packing ("each table entry is 16 bits =
+/// two packed vector elements") but publishes no anchor pinning which
+/// byte is the earlier vector element; the staged recovery record
+/// settles it (see `docs/audio/dts/tables/dts-d10-2-hfreq-vq.meta.md`,
+/// "Intra-entry byte order" — two independent sources agree).
 #[must_use]
 pub fn unpack_hfreq_vq_entry(entry: u16) -> [f64; 2] {
-    let hi = (entry >> 8) as u8 as i8;
     let lo = entry as u8 as i8;
+    let hi = (entry >> 8) as u8 as i8;
     [
-        f64::from(hi) / HFREQ_VQ_ELEMENT_DIVISOR,
         f64::from(lo) / HFREQ_VQ_ELEMENT_DIVISOR,
+        f64::from(hi) / HFREQ_VQ_ELEMENT_DIVISOR,
     ]
 }
 
@@ -180,14 +173,13 @@ impl std::error::Error for VqCodebookShapeError {}
 /// elements, ready for the §5.5 phase-1
 /// `HFreqVQ.LookUp(nVQIndex, HFREQ[ch][n])`.
 ///
-/// The book's **numeric contents are not in the staged spec** (the
-/// recorded §D.10 gap — see the module docs); this container exists so
-/// an observer-derived recovery, once staged under `docs/audio/dts/`,
-/// drops straight into the decode chain
-/// ([`crate::SubframePcmDecoder::set_vq_codebooks`]) with no code
-/// changes. Everything *around* the numbers — the 10-bit index, the
-/// 1024 × 32 dimensions, the two-int8-per-entry packing, the ÷ 24
-/// element scaling — is spec-pinned and enforced here.
+/// [`HfVqCodebook::builtin`] returns the real book, transcribed from
+/// the staged clean-room table
+/// (`docs/audio/dts/tables/dts-d10-2-hfreq-vq.csv`); the caller-
+/// supplied constructors remain for tests and experimentation.
+/// Everything *around* the numbers — the 10-bit index, the 1024 × 32
+/// dimensions, the two-int8-per-entry packing, the ÷ 2⁴ element
+/// scaling — is spec-pinned and enforced here.
 #[derive(Clone)]
 pub struct HfVqCodebook {
     vectors: Vec<[f64; HFREQ_VQ_VECTOR_LEN]>,
@@ -203,13 +195,30 @@ impl core::fmt::Debug for HfVqCodebook {
 }
 
 impl HfVqCodebook {
+    /// The real §D.10.2 `HFreqVQ` book, built once (and shared) from
+    /// the in-crate transcription of the staged clean-room table
+    /// `docs/audio/dts/tables/dts-d10-2-hfreq-vq.csv` (see
+    /// [`crate::d10_tables`] for the provenance chain): 1024 × 32
+    /// int8 elements, each ÷ 2⁴ ([`HFREQ_VQ_ELEMENT_DIVISOR`]).
+    #[must_use]
+    pub fn builtin() -> std::sync::Arc<Self> {
+        static BOOK: std::sync::OnceLock<std::sync::Arc<HfVqCodebook>> = std::sync::OnceLock::new();
+        BOOK.get_or_init(|| {
+            let vectors = crate::d10_tables::HFREQ_VQ_TABLE
+                .iter()
+                .map(|row| row.map(|e| f64::from(e) / HFREQ_VQ_ELEMENT_DIVISOR))
+                .collect();
+            std::sync::Arc::new(Self { vectors })
+        })
+        .clone()
+    }
+
     /// Build the book from its raw 16-bit table entries —
     /// [`HFREQ_VQ_ENTRIES_PER_VECTOR`] (= 16) entries per vector, each
     /// unpacked to two elements via [`unpack_hfreq_vq_entry`]
-    /// (high-byte element first, then low-byte element; the spec
-    /// publishes no anchor pinning the intra-entry order, so a
-    /// recovered book whose trace settles the order the other way
-    /// should use [`HfVqCodebook::from_elements`] instead).
+    /// (low-byte element first, then high-byte element — the recovered
+    /// intra-entry order; a caller holding elements in vector order
+    /// can use [`HfVqCodebook::from_elements`] instead).
     ///
     /// # Errors
     ///
@@ -273,8 +282,10 @@ impl HfVqCodebook {
 /// `ADPCMCoeffVQ.LookUp(nVQIndex, PVQ[ch][n])` that feeds the §C.2.2
 /// inverse-ADPCM predictor.
 ///
-/// Like [`HfVqCodebook`], the numeric contents are the recorded §D.10
-/// gap; the container makes a recovered book a pure data drop-in.
+/// Like [`HfVqCodebook`], the real book is built in
+/// ([`AdpcmVqCodebook::builtin`], from
+/// `docs/audio/dts/tables/dts-d10-1-adpcm-coeff-vq.csv`); the
+/// caller-supplied constructors remain for tests.
 #[derive(Clone)]
 pub struct AdpcmVqCodebook {
     coeffs: Vec<[f64; ADPCM_VQ_VECTOR_LEN]>,
@@ -290,6 +301,26 @@ impl core::fmt::Debug for AdpcmVqCodebook {
 }
 
 impl AdpcmVqCodebook {
+    /// The real §D.10.1 `ADPCMCoeffVQ` book, built once (and shared)
+    /// from the in-crate transcription of the staged clean-room table
+    /// `docs/audio/dts/tables/dts-d10-1-adpcm-coeff-vq.csv` (see
+    /// [`crate::d10_tables`]): 4096 × 4 signed Q13 integers, each
+    /// ÷ 2¹³ ([`adpcm_vq_coeff`]; spec anchor `9928` →
+    /// `1.2119140625` at index 0 element 0).
+    #[must_use]
+    pub fn builtin() -> std::sync::Arc<Self> {
+        static BOOK: std::sync::OnceLock<std::sync::Arc<AdpcmVqCodebook>> =
+            std::sync::OnceLock::new();
+        BOOK.get_or_init(|| {
+            let coeffs = crate::d10_tables::ADPCM_VQ_TABLE
+                .iter()
+                .map(|row| row.map(|e| adpcm_vq_coeff(i32::from(e))))
+                .collect();
+            std::sync::Arc::new(Self { coeffs })
+        })
+        .clone()
+    }
+
     /// Build the book from its raw stored-integer entries, applying
     /// the §D.10.1 ÷ 2¹³ scaling ([`adpcm_vq_coeff`]) to each element.
     ///
@@ -342,26 +373,41 @@ impl AdpcmVqCodebook {
     }
 }
 
-/// The (optional) pair of recovered §D.10 code books a decoder may
-/// carry. `Default` is the shipped state — **both absent** (the
-/// recorded docs gap) — under which the affected sub-paths keep
-/// surfacing the typed
-/// [`crate::AudioArrayError::VqCodebookUnavailable`] refusal exactly
-/// as before. The books are held behind [`std::sync::Arc`] so a
-/// stream decoder clone (the all-or-nothing decode pattern) does not
-/// copy the table data.
+/// The (optional) pair of §D.10 code books a decoder carries.
+///
+/// [`VqCodebooks::builtin`] — **both real books** — is what every
+/// decoder now starts with ([`crate::SubframePcmDecoder::new`]).
+/// [`VqCodebooks::none`] (also `Default`, kept for source
+/// compatibility with the drop-in era) strips them, restoring the
+/// typed [`crate::AudioArrayError::VqCodebookUnavailable`] refusal on
+/// the affected sub-paths. The books are held behind
+/// [`std::sync::Arc`] so a stream decoder clone (the all-or-nothing
+/// decode pattern) does not copy the table data — and the built-in
+/// books are additionally process-wide singletons.
 #[derive(Debug, Clone, Default)]
 pub struct VqCodebooks {
-    /// The §D.10.2 high-frequency-subband book (`HFreqVQ`), when
-    /// recovered.
+    /// The §D.10.2 high-frequency-subband book (`HFreqVQ`).
     pub hfreq: Option<std::sync::Arc<HfVqCodebook>>,
     /// The §D.10.1 ADPCM prediction-coefficient book
-    /// (`ADPCMCoeffVQ`), when recovered.
+    /// (`ADPCMCoeffVQ`).
     pub adpcm: Option<std::sync::Arc<AdpcmVqCodebook>>,
 }
 
 impl VqCodebooks {
-    /// No books — the shipped docs-gap state.
+    /// Both real §D.10 books ([`HfVqCodebook::builtin`] +
+    /// [`AdpcmVqCodebook::builtin`]) — the default state of every
+    /// decoder.
+    #[must_use]
+    pub fn builtin() -> Self {
+        Self {
+            hfreq: Some(HfVqCodebook::builtin()),
+            adpcm: Some(AdpcmVqCodebook::builtin()),
+        }
+    }
+
+    /// No books: `nVQSUB < nSUBS` / `PMODE != 0` subbands surface the
+    /// typed [`crate::AudioArrayError::VqCodebookUnavailable`]
+    /// refusal (the pre-round-439 shipped state).
     #[must_use]
     pub fn none() -> Self {
         Self::default()
@@ -420,9 +466,9 @@ impl VqCodebooks {
 /// `10 · Σ (nSUBS[ch] − nVQSUB[ch])`, letting a caller advance its
 /// cursor to the §5.5 LFE phase.
 ///
-/// The captured indices become decodable subband samples once an
-/// observer-derived §D.10.2 book is staged; until then they serve
-/// stream inspection and the recovery harness itself.
+/// The full decode ([`crate::SubframePcmDecoder`]) looks the captured
+/// indices up in the built-in §D.10.2 book; this structural scan
+/// remains useful for stream inspection.
 ///
 /// # Errors
 ///
@@ -482,18 +528,18 @@ mod tests {
         assert_eq!(adpcm_vq_coeff(-8192), -1.0);
     }
 
-    /// §D.10.2 entry unpacking: two 8-bit signed halves, each divided
-    /// by the literal 24.
+    /// §D.10.2 entry unpacking: two 8-bit signed halves, low byte
+    /// first, each divided by 2⁴ = 16.
     #[test]
-    fn hfreq_entry_unpacks_two_signed_bytes_over_24() {
-        // hi = 0x18 = +24 -> 1.0; lo = 0xE8 = -24 -> -1.0.
-        assert_eq!(unpack_hfreq_vq_entry(0x18E8), [1.0, -1.0]);
+    fn hfreq_entry_unpacks_two_signed_bytes_low_first_over_16() {
+        // lo = 0x10 = +16 -> 1.0; hi = 0xF0 = -16 -> -1.0.
+        assert_eq!(unpack_hfreq_vq_entry(0xF010), [1.0, -1.0]);
         // Zero entry -> two zero elements.
         assert_eq!(unpack_hfreq_vq_entry(0), [0.0, 0.0]);
-        // hi = 0x7F = +127 -> 127/24; lo = 0x80 = -128 -> -128/24.
+        // lo = 0x80 = -128 -> -8.0; hi = 0x7F = +127 -> 127/16.
         let [a, b] = unpack_hfreq_vq_entry(0x7F80);
-        assert!((a - 127.0 / 24.0).abs() < 1e-15);
-        assert!((b - (-128.0 / 24.0)).abs() < 1e-15);
+        assert_eq!(a, -8.0);
+        assert!((b - 127.0 / 16.0).abs() < 1e-15);
     }
 
     /// The book/vector dimensional facts hold together: 16 two-element
@@ -541,15 +587,15 @@ mod tests {
     }
 
     /// [`HfVqCodebook::from_packed_entries`] applies the §D.10.2
-    /// two-int8 ÷ 24 unpacking to every entry, high byte first, and
+    /// two-int8 ÷ 2⁴ unpacking to every entry, low byte first, and
     /// the 10-bit lookup returns the decoded vector.
     #[test]
     fn hf_book_from_packed_entries_decodes_all_elements() {
         let mut entries = vec![[0u16; HFREQ_VQ_ENTRIES_PER_VECTOR]; HFREQ_VQ_BOOK_SIZE];
-        // Vector 5: entry k packs (hi = k+1, lo = -(k+1)).
+        // Vector 5: entry k packs (lo = k+1, hi = -(k+1)).
         for (k, e) in entries[5].iter_mut().enumerate() {
-            let hi = (k as i8 + 1) as u8;
-            let lo = (-(k as i8 + 1)) as u8;
+            let lo = (k as i8 + 1) as u8;
+            let hi = (-(k as i8 + 1)) as u8;
             *e = (u16::from(hi) << 8) | u16::from(lo);
         }
         let book = HfVqCodebook::from_packed_entries(&entries).unwrap();
@@ -619,6 +665,94 @@ mod tests {
         let with_hf = VqCodebooks::none().with_hfreq(hf);
         assert!(!with_hf.is_empty());
         assert!(with_hf.hfreq.is_some() && with_hf.adpcm.is_none());
+    }
+
+    /// The built-in §D.10.1 book reproduces the spec's only printed
+    /// anchor (index 0 element 0: entry `9928` → `1.2119140625`) and
+    /// the staged table's pinned sample rows (`.meta.md` "Sample
+    /// values").
+    #[test]
+    fn builtin_adpcm_book_matches_staged_table_anchors() {
+        let book = AdpcmVqCodebook::builtin();
+        assert_eq!(
+            book.coefficients(0),
+            &[9928, -2618, -1093, -1263].map(|e| f64::from(e) / 8192.0)
+        );
+        assert_eq!(book.coefficients(0)[0], 1.2119140625);
+        assert_eq!(
+            book.coefficients(1),
+            &[11077, -2876, -1747, -308].map(|e| f64::from(e) / 8192.0)
+        );
+        assert_eq!(
+            book.coefficients(4095),
+            &[8538, -6997, 5309, 453].map(|e| f64::from(e) / 8192.0)
+        );
+    }
+
+    /// The transcribed §D.10.1 table reproduces the staged `.meta.md`
+    /// verification facts: stored range `-21806 … 21657`, and all
+    /// 4096 vectors distinct.
+    #[test]
+    fn builtin_adpcm_table_range_and_distinctness() {
+        let table = &crate::d10_tables::ADPCM_VQ_TABLE;
+        let min = table.iter().flatten().min().unwrap();
+        let max = table.iter().flatten().max().unwrap();
+        assert_eq!((*min, *max), (-21806, 21657));
+        let distinct: std::collections::HashSet<[i16; 4]> = table.iter().copied().collect();
+        assert_eq!(distinct.len(), 4096, "all §D.10.1 vectors are distinct");
+    }
+
+    /// The built-in §D.10.2 book reproduces the staged table's pinned
+    /// sample rows, with the ÷ 2⁴ scaling applied.
+    #[test]
+    fn builtin_hf_book_matches_staged_table_anchors() {
+        let book = HfVqCodebook::builtin();
+        assert!(
+            book.vector(0).iter().all(|&e| e == 0.0),
+            "index 0 is the zero vector"
+        );
+        let v1 = book.vector(1);
+        let want1 = [-4, -2, 2, 1, -16, -10, 1, 3].map(|e| f64::from(e) / 16.0);
+        assert_eq!(&v1[..8], &want1);
+        let v1023 = book.vector(1023);
+        let want1023 = [5, 0, -6, 5, 6, 3, 3, -10].map(|e| f64::from(e) / 16.0);
+        assert_eq!(&v1023[..8], &want1023);
+    }
+
+    /// The transcribed §D.10.2 table reproduces the staged `.meta.md`
+    /// verification facts: element range `-87 … 89`, exactly one zero
+    /// vector, and 996 distinct patterns (28 genuine duplicate code
+    /// words, clustered in the recovered book).
+    #[test]
+    fn builtin_hf_table_range_zero_vector_and_duplicates() {
+        let table = &crate::d10_tables::HFREQ_VQ_TABLE;
+        let min = table.iter().flatten().min().unwrap();
+        let max = table.iter().flatten().max().unwrap();
+        assert_eq!((*min, *max), (-87, 89));
+        let zero_vectors = table
+            .iter()
+            .filter(|row| row.iter().all(|&e| e == 0))
+            .count();
+        assert_eq!(zero_vectors, 1, "index 0 is the only zero vector");
+        let distinct: std::collections::HashSet<[i8; 32]> = table.iter().copied().collect();
+        assert_eq!(distinct.len(), 996, "996 distinct patterns / 28 duplicates");
+    }
+
+    /// The built-in books are process-wide singletons (one build, one
+    /// allocation, shared by every decoder).
+    #[test]
+    fn builtin_books_are_shared_singletons() {
+        assert!(std::sync::Arc::ptr_eq(
+            &HfVqCodebook::builtin(),
+            &HfVqCodebook::builtin()
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &AdpcmVqCodebook::builtin(),
+            &AdpcmVqCodebook::builtin()
+        ));
+        let books = VqCodebooks::builtin();
+        assert!(!books.is_empty());
+        assert!(books.hfreq.is_some() && books.adpcm.is_some());
     }
 
     /// A truncated region reports EOF rather than fabricating indices.

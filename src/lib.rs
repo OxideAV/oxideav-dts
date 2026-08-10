@@ -435,21 +435,25 @@
 //!   forms. Per `docs/audio/dts/dts-crc16.md`. Added in round 408.
 //! - [`scan_hf_vq_indices_at`] / [`unpack_hfreq_vq_entry`] /
 //!   [`adpcm_vq_coeff`] + the `HFREQ_VQ_*` / `ADPCM_VQ_*` constants —
-//!   everything the spec *does* define about the §D.10 VQ code books
-//!   (index widths, book sizes, vector lengths, and the §D.10.2
-//!   two-signed-bytes-**÷ 24** / §D.10.1 ÷ 2¹³ entry scalings), plus
-//!   the structural §5.5 phase-1 index scanner. The books' numeric
-//!   contents are a recorded gap
-//!   (`docs/audio/dts/dts-d10-vq-tables-GAP.md`) pending an
-//!   observer-derived trace. Added in round 408.
+//!   the §D.10 VQ code books' wire facts (index widths, book sizes,
+//!   vector lengths, the §D.10.2 two-signed-bytes ÷ 2⁴ / §D.10.1
+//!   ÷ 2¹³ entry scalings), plus the structural §5.5 phase-1 index
+//!   scanner. Added in round 408; the §D.10.2 divisor and intra-entry
+//!   order corrected in round 439 per the staged recovery record
+//!   (`docs/audio/dts/tables/dts-d10-2-hfreq-vq.meta.md`).
 //! - [`HfVqCodebook`] / [`AdpcmVqCodebook`] / [`VqCodebooks`] +
-//!   [`SubframePcmDecoder::set_vq_codebooks`] — the **drop-in
-//!   containers and decode paths for recovered §D.10 books** (round
-//!   434): with books attached, `nVQSUB < nSUBS` (phase-1 HF-VQ) and
-//!   `PMODE != 0` (§C.2.2 inverse-ADPCM, [`AdpcmHistory`], §5.3.1
-//!   `HFLAG` frame gate) frames decode end to end; without them the
-//!   typed blocker is unchanged, so the remaining gap is data
-//!   acquisition only.
+//!   [`SubframePcmDecoder::set_vq_codebooks`] — the §D.10 code books
+//!   and their decode paths. Rounds 408/434 landed the full HF-VQ
+//!   (`nVQSUB < nSUBS`) and inverse-ADPCM (`PMODE != 0`, §C.2.2,
+//!   [`AdpcmHistory`], §5.3.1 `HFLAG` frame gate) machinery behind a
+//!   drop-in container while the books' numeric contents were the
+//!   long-standing `docs/audio/dts/dts-d10-vq-tables-GAP.md` gap;
+//!   round 439 ships the **real books built in**
+//!   ([`VqCodebooks::builtin`], transcribed from the staged
+//!   clean-room tables `docs/audio/dts/tables/dts-d10-*.csv`), the
+//!   default of every decoder — §D.10 frames now decode out of the
+//!   box, black-box-validated against a reference decode of the
+//!   §D.10-bearing fixture.
 //! - [`dts_dynrng_to_db`] / [`dts_dynrng_to_linear`] — the §5.4.1 /
 //!   §5.7.2 DRC code resolution: the 8-bit `RANGE` /
 //!   `subsubFrameDRC_Rev2AUX[]` byte is **signed Q2 two's-complement**
@@ -510,6 +514,8 @@ mod bitreader;
 mod block_code;
 mod cos_mod;
 mod crc16;
+#[doc(hidden)]
+pub mod d10_tables;
 mod d10_vq;
 mod d6_block_book;
 mod dmix_coeff;
@@ -592,9 +598,9 @@ pub use crate::d10_vq::{
     HFREQ_VQ_ELEMENT_DIVISOR, HFREQ_VQ_ENTRIES_PER_VECTOR, HFREQ_VQ_INDEX_BITS,
     HFREQ_VQ_VECTOR_LEN,
 };
-// Stable drop-in containers for recovered §D.10 VQ code books (the
-// recorded docs gap): a caller holding an observer-derived book feeds
-// it to the decode chain through these.
+// Stable: the §D.10 VQ code books. `VqCodebooks::builtin()` (the
+// decoder default) carries the real books, transcribed from the
+// staged clean-room tables; the caller-supplied constructors remain.
 pub use crate::d10_vq::{AdpcmVqCodebook, HfVqCodebook, VqCodebookShapeError, VqCodebooks};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
