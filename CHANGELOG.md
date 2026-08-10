@@ -8,6 +8,61 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 439 (2026-08-11) — **the §D.10 VQ code books, built in**: the
+  long-standing docs gap (`docs/audio/dts/dts-d10-vq-tables-GAP.md`,
+  now CLOSED) is resolved — both spec-omitted Annex D code books are
+  staged as clean-room data tables
+  (`docs/audio/dts/tables/dts-d10-1-adpcm-coeff-vq.csv`, 4096 × 4
+  signed Q13; `dts-d10-2-hfreq-vq.csv`, 1024 × 32 int8; provenance
+  record `provenance/11-extractor-d10-vq.md`, two independent sources
+  agreeing on every value) and transcribed into the crate
+  (`d10_tables`, SHA-256-pinned). New stable surface:
+  `HfVqCodebook::builtin()` / `AdpcmVqCodebook::builtin()` /
+  `VqCodebooks::builtin()` — process-wide shared singletons feeding
+  the existing round-434 decode paths unchanged. Unit tests pin the
+  transcription against the staged verification facts (the §D.10.1
+  spec anchor `9928 → 1.2119140625` at index 0, stored ranges, all
+  4096 ADPCM vectors distinct, exactly one zero HF vector, 996
+  distinct HF patterns).
+- Round 439 — **black-box numeric §D.10 validation**
+  (`tests/black_box_d10.rs`): with the built-in books, our decode of
+  the §D.10-bearing fixture is shape-identical to the reference
+  decode on **all five frames** — the HF-VQ frame, the ADPCM frame,
+  and the combined `HFLAG = 1` frame included — at Pearson 1.000000
+  per frame per channel and 95-98 dB SNR after the single known
+  constant (the implementation-defined output `rScale` ratio, √2 for
+  this fixture), confirming the recovered book values, the §D.10.2
+  ÷ 2⁴ divisor, the low-byte-first intra-entry order, and the §C.2.2
+  predictor-history chain end to end against an independent decoder.
+  The registry surface is pinned too: `make_decoder` →
+  `receive_frame` decodes the §D.10 stream by default, bit-identical
+  to the direct path.
+
+### Changed
+
+- Round 439 — **decoders now carry the built-in §D.10 books by
+  default**: `SubframePcmDecoder::new` (and with it
+  `CoreStreamDecoder`, `decode_core_frame`, and the registry
+  `Decoder`) starts with `VqCodebooks::builtin()`, so
+  `nVQSUB < nSUBS` / `PMODE != 0` frames decode to PCM out of the box
+  instead of surfacing the typed `VqCodebookUnavailable` blocker (or
+  `CoreError::Unsupported` at the registry surface).
+  `VqCodebooks::none()` remains the explicit opt-out and restores the
+  typed blocker exactly as before.
+- Round 439 — **§D.10.2 element scaling corrected**:
+  `HFREQ_VQ_ELEMENT_DIVISOR` is now `16.0` (= 2⁴), not `24.0`. The
+  spec's p.255 text renders the divisor as `24`; the staged recovery
+  record (`docs/audio/dts/tables/dts-d10-2-hfreq-vq.meta.md`)
+  establishes three independent ways that this is a `2^4` whose
+  superscript was lost in typesetting (the literal reading costs a
+  constant 2/3 gain on every VQ-coded HF subband), and the black-box
+  reference comparison confirms the corrected value end to end.
+- Round 439 — **§D.10.2 intra-entry element order settled**:
+  `unpack_hfreq_vq_entry` now returns `[low-byte, high-byte]` —
+  element `2k` of a vector is entry `k`'s **low** byte — per the
+  staged recovery record (the spec never pinned the order;
+  `HfVqCodebook::from_packed_entries` follows).
+
 - Round 434 (2026-07-31) — **§D.10 recovered-book decode paths**: the
   two §5.5 sub-paths blocked on the omitted §D.10 VQ code books are
   now fully implemented behind a caller-supplied data drop-in, so the

@@ -246,8 +246,8 @@ impl HfVqCodebook {
         Ok(Self { vectors })
     }
 
-    /// Build the book from already-decoded vector elements (the ÷ 24
-    /// scaling already applied, intra-entry order already settled).
+    /// Build the book from already-decoded vector elements (the ÷ 2⁴
+    /// scaling already applied, in vector-element order).
     ///
     /// # Errors
     ///

@@ -1,17 +1,15 @@
-//! End-to-end validation of the **recovered-§D.10-book decode paths**
-//! — the §5.5 phase-1 high-frequency VQ subbands (`nVQSUB < nSUBS`)
-//! and the §C.2.2 inverse-ADPCM prediction (`PMODE != 0`) — on
-//! spec-built streams with **synthetic** stand-in books.
-//!
-//! The real §D.10 books' numeric contents are the recorded docs gap
-//! (`docs/audio/dts/dts-d10-vq-tables-GAP.md`; the round-9 container
-//! forensics settled that they were never in the staged PDF), so no
-//! numeric ground truth exists to decode real streams against. What
-//! *is* fully specified — and what these tests pin bit-exactly — is
+//! End-to-end validation of the **§D.10-book decode paths** — the
+//! §5.5 phase-1 high-frequency VQ subbands (`nVQSUB < nSUBS`) and the
+//! §C.2.2 inverse-ADPCM prediction (`PMODE != 0`) — on spec-built
+//! streams with **synthetic** stand-in books, so the analytic ground
+//! truth is a pure function independent of the real book data (the
+//! real built-in books are validated separately: against the staged
+//! tables' pinned facts in-crate and against a black-box reference
+//! decode in `tests/black_box_d10.rs`). These tests pin bit-exactly
 //! everything **around** the numbers:
 //!
 //! * the §5.5 phase-1 walk (10-bit `nVQIndex` per HF subband, ahead
-//!   of the LFE phase), the §D.10.2 two-int8-÷ 24 entry decoding, and
+//!   of the LFE phase), the §D.10.2 two-int8-÷ 2⁴ entry decoding, and
 //!   the `SCALES[ch][n][0] · HFREQ[m]` fill over exactly the
 //!   subframe's rows (the p.33 pick rule, including the
 //!   termination-frame valid prefix);
