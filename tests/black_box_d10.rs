@@ -239,6 +239,70 @@ fn real_books_match_reference_at_90db_after_constant_gain() {
     }
 }
 
+/// The registry surface (`make_decoder` → `send_packet` /
+/// `receive_frame`) decodes the §D.10 stream **by default** — no
+/// `set_vq_codebooks` call anywhere — bit-identically to the direct
+/// default-book `CoreStreamDecoder` path, which the tests above pin
+/// against the reference. This is the round-439 flip made visible at
+/// the public framework surface: a stream that used to map to
+/// `Unsupported` at frames 3-5 now emits five audio frames.
+#[test]
+fn registry_default_decodes_d10_stream() {
+    use oxideav_core::{CodecId, CodecParameters, Decoder, Frame, Packet, TimeBase};
+
+    let params = CodecParameters::audio(CodecId::new(oxideav_dts::CODEC_ID_STR));
+    let mut dec: Box<dyn Decoder> = oxideav_dts::make_decoder(&params).expect("factory builds");
+    let mut via_registry: Vec<Vec<i32>> = vec![Vec::new(); 2];
+    for fv in iter_frames(FIXTURE) {
+        let fv = fv.expect("fixture frames iterate cleanly");
+        let pkt = Packet::new(0, TimeBase::new(1, 48_000), fv.data.to_vec());
+        dec.send_packet(&pkt)
+            .expect("send_packet accepts the frame");
+        let frame = dec.receive_frame().expect("§D.10 frame decodes by default");
+        let Frame::Audio(audio) = frame else {
+            panic!("expected an audio frame");
+        };
+        assert_eq!(audio.data.len(), 2, "stereo planar output");
+        assert_eq!(audio.samples as usize, SAMPLES_PER_FRAME);
+        for (ch, plane) in audio.data.iter().enumerate() {
+            for c in plane.chunks_exact(4) {
+                via_registry[ch].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+            }
+        }
+    }
+
+    // Bit-identical to the direct default-book stream decode (which
+    // real_books_shape_identical_on_all_frames pins to the reference,
+    // since the built-in books ARE the default).
+    let mut direct = CoreStreamDecoder::new(2);
+    let mut direct_pcm: Vec<Vec<i32>> = vec![Vec::new(); 2];
+    for fv in iter_frames(FIXTURE) {
+        let fv = fv.expect("frames iterate");
+        let pcm = direct.decode_frame(fv.data, &fv.header).expect("decodes");
+        for ch in 0..2 {
+            direct_pcm[ch].extend(&pcm[ch]);
+        }
+    }
+    assert_eq!(via_registry, direct_pcm, "registry and direct paths agree");
+}
+
+/// The default decoder path IS the built-in-book path: the direct
+/// default `CoreStreamDecoder` (no `set_vq_codebooks` call) produces
+/// exactly the PCM of the explicit-builtin decode used above.
+#[test]
+fn default_decoder_equals_explicit_builtin_books() {
+    let mut dec = CoreStreamDecoder::new(2);
+    let mut pcm: Vec<Vec<i32>> = vec![Vec::new(); 2];
+    for fv in iter_frames(FIXTURE) {
+        let fv = fv.expect("frames iterate");
+        let block = dec.decode_frame(fv.data, &fv.header).expect("decodes");
+        for (ch, samples) in block.into_iter().enumerate() {
+            pcm[ch].extend(samples);
+        }
+    }
+    assert_eq!(pcm, ours_real_books());
+}
+
 /// Every fixture frame parses with the intended §D.10 shape: frames
 /// 1-2 plain, frame 3 HF-VQ, frame 4 PMODE, frame 5 both.
 #[test]
