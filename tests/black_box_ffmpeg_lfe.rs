@@ -3,8 +3,8 @@
 //! the `ffmpeg` binary — the multichannel + LFE companion to
 //! `black_box_ffmpeg_pcm.rs`.
 //!
-//! Clean-room note: `ffmpeg` is used ONLY as an opaque black-box
-//! encoder/decoder — its source is never consulted. The fixture pair
+//! Clean-room note: `ffmpeg` is invoked as an opaque black-box
+//! encoder/decoder; its output is opaque reference data. The fixture pair
 //! was produced once, out of band:
 //!
 //! ```text

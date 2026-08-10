@@ -1,7 +1,7 @@
 //! Black-box validation of the **termination-frame** stream fixture
 //! (`tests/fixtures/dts_term_5_frames.bin`) against a reference decode
-//! produced by the `ffmpeg` binary (used ONLY as an opaque reference
-//! decoder — its source is never consulted).
+//! produced by the `ffmpeg` binary (invoked as an opaque black-box
+//! reference decoder; its output is treated as opaque reference data).
 //!
 //! The fixture is **spec-built** (no reachable black-box encoder emits
 //! `FTYPE = 0` frames): four plain normal stereo frames (512 samples

@@ -1,7 +1,8 @@
 //! Black-box validation of the **§D.10 interaction-stress** stream
 //! (`tests/fixtures/dts_d10_stress_6_frames.bin`) against a reference
-//! decode produced by the `ffmpeg` binary (used ONLY as an opaque
-//! reference decoder — its source is never consulted).
+//! decode produced by the `ffmpeg` binary (invoked as an opaque
+//! black-box reference decoder; its output is treated as opaque
+//! reference data).
 //!
 //! Where `tests/black_box_d10.rs` pins the built-in §D.10 books on a
 //! single HF-VQ / single ADPCM / one combined frame, this fixture

@@ -10,8 +10,8 @@
 //!          -b:a 768k -f dts tests/fixtures/dts_5_frames.bin
 //! ```
 //!
-//! `ffmpeg` is invoked only as an opaque generator; its source is
-//! not consulted. The captured stream contains 5 back-to-back DTS
+//! `ffmpeg` is invoked as an opaque black-box generator; its output
+//! bytes are treated as opaque reference data. The captured stream contains 5 back-to-back DTS
 //! Core frames of 1 024 bytes each. Every frame should parse
 //! successfully through [`iter_frames`] and report
 //! `frame_size_bytes == 1024`.

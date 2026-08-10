@@ -1,7 +1,7 @@
 //! Black-box PCM validation of the **joint-intensity (`JOINX != 0`)
 //! reconstruction** against a reference decode produced by the
-//! `ffmpeg` binary (used ONLY as an opaque reference decoder — its
-//! source is never consulted).
+//! `ffmpeg` binary (invoked as an opaque black-box reference
+//! decoder; its output is treated as opaque reference data).
 //!
 //! The stream fixture (`tests/fixtures/dts_joint_5_frames.bin`) is
 //! **spec-built**, not encoder-produced: no reachable black-box

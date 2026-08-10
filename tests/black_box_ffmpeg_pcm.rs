@@ -1,8 +1,8 @@
 //! Black-box PCM validation of the full DTS Core reconstruction chain
 //! against a reference decode produced by the `ffmpeg` binary.
 //!
-//! Clean-room note: `ffmpeg` is used here ONLY as an opaque reference
-//! decoder — its source is never consulted. The reference PCM
+//! Clean-room note: `ffmpeg` is invoked here as an opaque black-box
+//! reference decoder; its output is opaque reference data. The reference PCM
 //! (`tests/fixtures/dts_5_frames_ffmpeg_ref.s32`) was produced once,
 //! out of band, by running the `ffmpeg` binary as a black box over the
 //! same `dts_5_frames.bin` Core fixture:

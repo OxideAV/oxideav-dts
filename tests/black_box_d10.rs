@@ -1,7 +1,7 @@
 //! Black-box validation of the **§D.10-bearing** stream fixture
 //! (`tests/fixtures/dts_d10_5_frames.bin`) against a reference decode
-//! produced by the `ffmpeg` binary (used ONLY as an opaque reference
-//! decoder — its source is never consulted).
+//! produced by the `ffmpeg` binary (invoked as an opaque black-box
+//! reference decoder; its output is treated as opaque reference data).
 //!
 //! The fixture is spec-built (`tests/common/mod.rs`,
 //! [`common::build_d10_stream`]): two plain normal stereo frames, an
