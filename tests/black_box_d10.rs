@@ -15,28 +15,36 @@
 //!          -acodec pcm_s32le dts_d10_5_frames_ffmpeg_ref.s32
 //! ```
 //!
-//! **What this pins — and what it cannot.** The reference decoder
-//! carries the *real* §D.10 books, whose numeric contents are the
-//! recorded docs gap; our decode of the §D.10 frames uses synthetic
-//! stand-in books, so their PCM is **not comparable numerically**.
-//! What the reference run *does* pin, black-box:
+//! **What this pins.** The reference decoder carries the *real*
+//! §D.10 books. Since round 439 so do we
+//! ([`oxideav_dts::VqCodebooks::builtin`], transcribed from the
+//! staged clean-room tables), so the §D.10 frames are compared
+//! **numerically**, not just structurally:
 //!
 //! * **acceptance + exact framing** — the reference reads the whole
 //!   10 000-byte stream, reports zero decode errors, and emits
-//!   exactly `5 × 512` samples per channel. Our spec-built VQSUB
-//!   plane, PMODE/PVQ planes, phase-1 index region, and HF-tail
-//!   SCALES loop are therefore bit-compatible with a real decoder's
-//!   §5.3.2/§5.4.1/§5.5 walk (any mis-sized field would desync the
-//!   DSYNC checks or the frame framing);
-//! * **the §D.10 frames really engage the books** — the reference's
-//!   decode of frames 3-5 is non-silent and differs from its decode
-//!   of the plain frames;
-//! * **the books-independent prefix matches** — frames 1-2 contain no
-//!   §D.10 material, so our PCM is shape-identical to the reference
-//!   there (Pearson correlation ≈ 1.0, as for the other fixtures).
+//!   exactly `5 × 512` samples per channel;
+//! * **all five frames are shape-identical** — with the built-in
+//!   books our decode of the HF-VQ frame (3), the ADPCM frame (4)
+//!   and the combined `HFLAG = 1` frame (5) matches the reference at
+//!   Pearson ≈ 1.0 and > 90 dB SNR after the one known constant: the
+//!   implementation-defined output `rScale` ratio (√2 for this
+//!   fixture's `PCMR`, exactly as pinned for the plain fixtures —
+//!   see [`oxideav_dts::DtsFrameHeader::output_r_scale`] and the
+//!   round-356 record). This end-to-end confirms the recovered book
+//!   values, the §D.10.2 ÷ 2⁴ element divisor (the spec's printed
+//!   "24" is a typo — a per-subband 2/3 gain error would break the
+//!   mixed VQ/non-VQ frame correlation), the low-byte-first
+//!   intra-entry order, and the §C.2.2 predictor-history chain
+//!   across the `HFLAG` gate;
+//! * **the drop-in API still works** — the synthetic stand-in books
+//!   ([`common::synthetic_vq_codebooks`]) decode the same stream to
+//!   the same lengths, with the books-independent prefix (frames
+//!   1-2) shape-identical to the reference.
 //!
-//! The §D.10 frames' numeric decode is validated in-crate against
-//! analytic reconstructions in `tests/d10_vq_decode.rs`.
+//! The §D.10 frames' bit-exact numeric decode is additionally
+//! validated in-crate against analytic reconstructions in
+//! `tests/d10_vq_decode.rs`.
 
 mod common;
 
@@ -150,6 +158,84 @@ fn plain_prefix_is_shape_identical_to_reference() {
             r > 0.999,
             "channel {ch} prefix correlation {r} — expected shape-identical"
         );
+    }
+}
+
+/// Decode the whole stream with the **built-in real books** (the
+/// round-439 default), returning planar PCM.
+fn ours_real_books() -> Vec<Vec<i32>> {
+    let mut dec = CoreStreamDecoder::new(2);
+    dec.set_vq_codebooks(oxideav_dts::VqCodebooks::builtin());
+    let mut pcm: Vec<Vec<i32>> = vec![Vec::new(); 2];
+    for fv in iter_frames(FIXTURE) {
+        let fv = fv.expect("fixture frames iterate cleanly");
+        let block = dec
+            .decode_frame(fv.data, &fv.header)
+            .expect("every fixture frame decodes with the built-in books");
+        for (ch, samples) in block.into_iter().enumerate() {
+            pcm[ch].extend(samples);
+        }
+    }
+    pcm
+}
+
+/// Per-slice least-squares gain of `ours` onto `reference`, plus the
+/// SNR of the gain-aligned residual (dB re the reference energy).
+fn gain_and_snr(ours: &[i32], reference: &[i32]) -> (f64, f64) {
+    let x: Vec<f64> = ours.iter().map(|&v| f64::from(v)).collect();
+    let y: Vec<f64> = reference.iter().map(|&v| f64::from(v)).collect();
+    let g = x.iter().zip(&y).map(|(a, b)| a * b).sum::<f64>()
+        / x.iter().map(|a| a * a).sum::<f64>().max(1e-30);
+    let err: f64 = x.iter().zip(&y).map(|(a, b)| (g * a - b).powi(2)).sum();
+    let sig: f64 = y.iter().map(|b| b * b).sum();
+    (g, 10.0 * (sig / err.max(1e-30)).log10())
+}
+
+/// **The round-439 headline**: with the built-in real books, every
+/// frame — including the HF-VQ frame (3), the ADPCM frame (4), and
+/// the combined `HFLAG = 1` frame (5) — is shape-identical to the
+/// reference decode (Pearson > 0.9999 per frame, per channel).
+/// Before the books landed, frames 3-5 were only structurally
+/// checkable; a wrong §D.10.2 divisor or intra-entry order would
+/// break this on the mixed VQ/non-VQ frames.
+#[test]
+fn real_books_shape_identical_on_all_frames() {
+    let reference = reference();
+    let ours = ours_real_books();
+    for frame in 0..FRAMES {
+        let a = frame * SAMPLES_PER_FRAME;
+        let b = a + SAMPLES_PER_FRAME;
+        for ch in 0..2 {
+            let r = pearson(&ours[ch][a..b], &reference[ch][a..b]);
+            assert!(
+                r > 0.9999,
+                "frame {frame} ch {ch}: Pearson {r} — expected shape-identical"
+            );
+        }
+    }
+}
+
+/// The only difference from the reference is the one known constant:
+/// the implementation-defined output `rScale` ratio, √2 for this
+/// fixture. After that single gain, every frame reconstructs above
+/// 90 dB SNR (measured ≈ 95-98 dB), on the §D.10 frames as much as
+/// on the plain ones.
+#[test]
+fn real_books_match_reference_at_90db_after_constant_gain() {
+    let reference = reference();
+    let ours = ours_real_books();
+    let sqrt2 = 2f64.sqrt();
+    for frame in 0..FRAMES {
+        let a = frame * SAMPLES_PER_FRAME;
+        let b = a + SAMPLES_PER_FRAME;
+        for ch in 0..2 {
+            let (g, snr) = gain_and_snr(&ours[ch][a..b], &reference[ch][a..b]);
+            assert!(
+                (g / sqrt2 - 1.0).abs() < 1e-4,
+                "frame {frame} ch {ch}: gain {g} — expected the √2 rScale ratio"
+            );
+            assert!(snr > 90.0, "frame {frame} ch {ch}: SNR {snr} dB");
+        }
     }
 }
 
