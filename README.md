@@ -195,8 +195,9 @@ gone.
   persistent `CoreStreamDecoder` so multi-packet streams carry the
   filter tail across packets, and emits a planar S32 `AudioFrame`;
   joint-intensity frames decode (see above) and §D.10 VQ/ADPCM frames
-  decode through the built-in code books (round 439) — no Core frame
-  class maps to `Unsupported` for missing book data. Carrying the
+  decode through the built-in code books (round 439; round 446 sweeps
+  **every index of both books** through this path bit-exactly) — no
+  Core frame class maps to `Unsupported` for missing book data. Carrying the
   inter-frame tail is what makes the decode match the `ffmpeg` reference
   (correlation 1.0 vs 0.73 with a per-frame reset — see
   `tests/black_box_ffmpeg_pcm.rs`).
@@ -342,7 +343,18 @@ gone.
   decode is **shape-identical to the reference on all five frames**
   (Pearson 1.000000 per frame per channel; 95-98 dB SNR after the √2
   output-scale constant), and the registry surface decodes the same
-  stream by default, bit-identical to the direct path.
+  stream by default, bit-identical to the direct path. Round 446
+  closes the index space: the **full-book sweeps** drive all 1024
+  §D.10.2 and all 4096 §D.10.1 vectors through the real bitstream
+  decode path, each frame bit-exact against an analytic
+  reconstruction recomputed from the built-in books
+  (`tests/d10_vq_decode.rs`), and the committed 12-frame
+  **book-coverage stream** (`tests/black_box_d10_coverage.rs`)
+  black-box-confirms 480 swept vectors — the §D.10.2
+  duplicate-codeword cluster, both book heads and tails, four frames
+  predicting all 32 subbands of both channels, and two `HFLAG = 1`
+  history-chained frames — shape-identical to the reference decode
+  (Pearson 1.000000; 90.5-95.9 dB SNR after the same √2 constant).
 - **Annex B CRC-16** — `dts_crc16` / `dts_crc16_update` /
   `DTS_CRC16_TABLE`: the single normative DTS CRC (CRC-CCITT,
   polynomial `0x1021`, init `0xFFFF`, MSB-first, no reflection, no

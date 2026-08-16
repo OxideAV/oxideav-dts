@@ -8,6 +8,36 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 446 (2026-08-17) — **full §D.10 index-space sweeps**: every
+  one of the 1024 §D.10.2 `HFreqVQ` vectors and the 4096 §D.10.1
+  `ADPCMCoeffVQ` vectors now travels through the *real bitstream
+  decode path* and is pinned **bit-exactly** against an analytic
+  reconstruction recomputed from the built-in books
+  (`tests/d10_vq_decode.rs`): 32 spec-built frames with stepped
+  consecutive 10-bit `nVQIndex` bases cover §D.10.2 indices 0..=1023
+  exactly once each (the all-zero vector 0 and the staged `.meta.md`'s
+  duplicate-codeword cluster included), and 64 frames with `PMODE = 1`
+  on all 32 subbands of both channels cover §D.10.1 indices 0..=4095 —
+  every vector running as an actual §C.2.2 predictor over real
+  residuals. The test-side frame builder gained `hf_index_base` /
+  `pvq_index_base` sweep knobs (`None` keeps the historical index
+  scatter, so every committed fixture still re-derives byte-for-byte).
+- Round 446 — **black-box book-coverage fixture**
+  (`tests/black_box_d10_coverage.rs` + committed
+  `tests/fixtures/dts_d10_coverage_12_frames.bin`): a 12-frame
+  spec-built stream sweeping **480 distinct book vectors** (160
+  §D.10.2 — head, duplicate cluster 342..=373, middle, tail; 320
+  §D.10.1 — including the spec-anchored index 0 and the tail
+  4032..=4095, four frames predicting all 32 subbands of both
+  channels at once, plus two `HFLAG = 1` frames chaining the §C.2.2
+  history across a frame boundary), roughly ten times the
+  black-box-confirmed index sample of the earlier §D.10 fixtures —
+  answering the staged provenance record's outstanding ask for
+  behavioural confirmation of the extracted data. Decoded with the
+  **default** decoder, every frame is shape-identical to the
+  black-box reference decode (Pearson 1.000000 per frame per channel)
+  and reconstructs at 90.5-95.9 dB SNR after the √2 output-scale
+  constant.
 - Round 439 (2026-08-11) — **the §D.10 VQ code books, built in**: the
   long-standing docs gap (`docs/audio/dts/dts-d10-vq-tables-GAP.md`,
   now CLOSED) is resolved — both spec-omitted Annex D code books are
