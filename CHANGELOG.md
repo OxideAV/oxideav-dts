@@ -38,6 +38,13 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   black-box reference decode (Pearson 1.000000 per frame per channel)
   and reconstructs at 90.5-95.9 dB SNR after the √2 output-scale
   constant.
+- Round 446 — **byte-exact table-integrity pin**
+  (`tests/d10_table_integrity.rs`): each in-crate §D.10 transcription
+  is re-serialized to its staged CSV's exact byte format and its
+  SHA-256 must equal the digest pinned in the table's `.meta.md`
+  sidecar (via a test-local FIPS 180-4 SHA-256, no new dependency) —
+  so a silent edit to any of the 16 384 + 32 768 transcribed values,
+  including middle rows no anchor or invariant touches, fails CI.
 - Round 439 (2026-08-11) — **the §D.10 VQ code books, built in**: the
   long-standing docs gap (`docs/audio/dts/dts-d10-vq-tables-GAP.md`,
   now CLOSED) is resolved — both spec-omitted Annex D code books are
