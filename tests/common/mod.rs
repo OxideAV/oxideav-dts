@@ -780,6 +780,69 @@ pub fn build_d10_stress_stream() -> Vec<u8> {
 /// The §5.3.1 header template shared by every synthetic frame: the
 /// first frame of the committed real stereo fixture (so AMODE/SFREQ/
 /// RATE/PCMR are values a real encoder emits).
+/// The per-frame specs of the §D.10 **book-coverage** stream
+/// (committed as `tests/fixtures/dts_d10_coverage_12_frames.bin`) —
+/// 12 continuous stereo frames whose swept index bases push **160
+/// distinct §D.10.2 vectors and 320 distinct §D.10.1 vectors**
+/// through the decode, roughly ten times the sampled coverage of the
+/// earlier §D.10 fixtures:
+///
+/// * frames 1-2: plain lead-in (no §D.10 material);
+/// * frames 3-6: HF-VQ frames (16 + 16 VQ subbands) at §D.10.2 index
+///   bases 0, 342 (the staged `.meta.md`'s duplicate-codeword
+///   cluster), 512, and 992 (the book tail) — indices 0..=31,
+///   342..=373, 512..=543, 992..=1023;
+/// * frames 7-10: ADPCM frames (`PMODE = 1` on all 32 subbands of
+///   both channels) at §D.10.1 PVQ bases 0, 1024, 2048, and 4032 —
+///   indices 0..=63, 1024..=1087, 2048..=2111, 4032..=4095;
+/// * frames 11-12: combined HF-VQ + ADPCM frames with `HFLAG = 1`
+///   (the §C.2.2 history primed by the preceding ADPCM run) at bases
+///   (640, 3000) and (800, 3500).
+pub fn d10_coverage_specs() -> Vec<JointFrameSpec> {
+    let mut specs = vec![
+        JointFrameSpec::default_plain(0xD10C_0000),
+        JointFrameSpec::default_plain(0xD10C_0001),
+    ];
+    for (i, hf_base) in [0, 342, 512, 992].into_iter().enumerate() {
+        specs.push(JointFrameSpec {
+            hf_subbands: [16, 16],
+            hf_index_base: Some(hf_base),
+            ..JointFrameSpec::default_plain(0xD10C_0010 + i as u32)
+        });
+    }
+    for (i, pvq_base) in [0, 1024, 2048, 4032].into_iter().enumerate() {
+        specs.push(JointFrameSpec {
+            adpcm_subbands: [32, 32],
+            pvq_index_base: Some(pvq_base),
+            ..JointFrameSpec::default_plain(0xD10C_0020 + i as u32)
+        });
+    }
+    for (i, (hf_base, pvq_base)) in [(640, 3000), (800, 3500)].into_iter().enumerate() {
+        specs.push(JointFrameSpec {
+            hf_subbands: [8, 8],
+            hf_index_base: Some(hf_base),
+            adpcm_subbands: [16, 16],
+            pvq_index_base: Some(pvq_base),
+            predictor_history: true,
+            ..JointFrameSpec::default_plain(0xD10C_0030 + i as u32)
+        });
+    }
+    specs
+}
+
+/// Build the 12-frame §D.10 book-coverage elementary stream —
+/// byte-identical to the committed
+/// `tests/fixtures/dts_d10_coverage_12_frames.bin` (asserted in
+/// `tests/black_box_d10_coverage.rs`).
+pub fn build_d10_coverage_stream() -> Vec<u8> {
+    let template = template_header();
+    let mut stream = Vec::new();
+    for spec in &d10_coverage_specs() {
+        stream.extend_from_slice(&build_frame_from_spec(&template, spec));
+    }
+    stream
+}
+
 pub fn template_header() -> DtsFrameHeader {
     let template_bytes = include_bytes!("../fixtures/dts_5_frames.bin");
     parse_frame_header(template_bytes).expect("fixture header parses")
