@@ -148,6 +148,19 @@ pub struct JointFrameSpec {
     /// history; when `false` the history is ignored (entry-point
     /// frame).
     pub predictor_history: bool,
+    /// When `Some(base)`, the frame's HF-VQ subbands take
+    /// **consecutive** §D.10.2 indices `(base + slot) mod 1024` in the
+    /// builder's walk order (subframe-major, channel-major,
+    /// subband-minor) instead of the [`hf_vq_index`] scatter — the
+    /// full-book coverage sweeps drive every §D.10.2 vector through
+    /// the real bitstream this way. Default `None`.
+    pub hf_index_base: Option<u32>,
+    /// The §D.10.1 counterpart of [`Self::hf_index_base`]: when
+    /// `Some(base)`, the `PMODE = 1` subbands take consecutive 12-bit
+    /// `PVQ` indices `(base + slot) mod 4096` in the §5.4.1 PVQ-plane
+    /// walk order instead of the [`pvq_index`] scatter. Default
+    /// `None`.
+    pub pvq_index_base: Option<u32>,
     /// Per-channel `JOINX` (0 = no joint coding; `k` = source channel
     /// `k - 1`).
     pub joinx: [u8; 2],
@@ -221,6 +234,8 @@ impl JointFrameSpec {
             hf_subbands: [0, 0],
             adpcm_subbands: [0, 0],
             predictor_history: false,
+            hf_index_base: None,
+            pvq_index_base: None,
             joinx: [0, 1],
             join_shuff: 5,
             join_symbols: JOINT_SCALE_RAW.iter().map(|&r| r as i32).collect(),
@@ -435,7 +450,7 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
         // PVQ plane: one 12-bit §D.10.1 index per PMODE-set subband.
         for ch in 0..2 {
             for n in 0..spec.adpcm_subbands[ch] {
-                b.push(pvq_index(subframe, ch, n), 12);
+                b.push(spec_pvq_index(spec, subframe, ch, n), 12);
             }
         }
         // ABITS plane over the audio-coded subbands only (`n <
@@ -500,7 +515,7 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
         // high-frequency-VQ subband, ahead of the LFE phase.
         for (ch, &nv) in n_vqsub.iter().enumerate() {
             for n in nv..spec.n_subs[ch] {
-                b.push(hf_vq_index(subframe, ch, n), 10);
+                b.push(spec_hf_vq_index(spec, subframe, ch, n), 10);
             }
         }
 
@@ -567,6 +582,41 @@ pub fn hf_vq_index(subframe: usize, ch: usize, n: usize) -> u32 {
 /// [`hf_vq_index`].
 pub fn pvq_index(subframe: usize, ch: usize, n: usize) -> u32 {
     ((subframe * 257 + ch * 89 + n * 11 + 5) % 4096) as u32
+}
+
+/// The §D.10.2 `nVQIndex` the builder writes under `spec` for HF-VQ
+/// subband `n` (`n ∈ [nVQSUB[ch], nSUBS[ch])`) of channel `ch` in
+/// subframe `subframe`: the [`hf_vq_index`] scatter by default, or —
+/// when [`JointFrameSpec::hf_index_base`] pins a sweep base —
+/// `(base + slot) mod 1024` with `slot` the subband's position in the
+/// frame's phase-1 walk order (subframes outer, channels next, HF
+/// subbands inner), so a run of frames with stepped bases covers the
+/// whole 1024-vector book with consecutive indices.
+pub fn spec_hf_vq_index(spec: &JointFrameSpec, subframe: usize, ch: usize, n: usize) -> u32 {
+    let Some(base) = spec.hf_index_base else {
+        return hf_vq_index(subframe, ch, n);
+    };
+    let per_subframe: usize = spec.hf_subbands.iter().sum();
+    let slot = subframe * per_subframe
+        + spec.hf_subbands[..ch].iter().sum::<usize>()
+        + (n - spec.n_vqsub()[ch]);
+    ((base as usize + slot) % 1024) as u32
+}
+
+/// The §D.10.1 `PVQ` index the builder writes under `spec` for
+/// `PMODE = 1` subband `n` of channel `ch` in subframe `subframe`:
+/// the [`pvq_index`] scatter by default, or — when
+/// [`JointFrameSpec::pvq_index_base`] pins a sweep base —
+/// `(base + slot) mod 4096` with `slot` the subband's position in the
+/// §5.4.1 PVQ-plane walk order (subframes outer, channels next,
+/// leading `PMODE` subbands inner).
+pub fn spec_pvq_index(spec: &JointFrameSpec, subframe: usize, ch: usize, n: usize) -> u32 {
+    let Some(base) = spec.pvq_index_base else {
+        return pvq_index(subframe, ch, n);
+    };
+    let per_subframe: usize = spec.adpcm_subbands.iter().sum();
+    let slot = subframe * per_subframe + spec.adpcm_subbands[..ch].iter().sum::<usize>() + n;
+    ((base as usize + slot) % 4096) as u32
 }
 
 /// Element `m` of §D.10.2 vector `v` of the **synthetic** test book —

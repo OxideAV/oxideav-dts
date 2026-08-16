@@ -28,15 +28,14 @@
 mod common;
 
 use common::{
-    build_frame_from_spec, hf_vq_index, pvq_index, scales_index, synthetic_adpcm_book,
-    synthetic_adpcm_coeff, synthetic_hf_book, synthetic_hf_element, synthetic_vq_codebooks,
-    template_header, JointFrameSpec, Lcg,
+    build_frame_from_spec, scales_index, spec_hf_vq_index, spec_pvq_index, synthetic_adpcm_book,
+    synthetic_hf_book, synthetic_vq_codebooks, template_header, JointFrameSpec, Lcg,
 };
 use oxideav_dts::{
-    decode_core_frame, join_scale, parse_frame_header, AudioArrayDecodeError, AudioArrayError,
-    CoreFrameDecodeError, CoreStreamDecoder, DtsFrameHeader, FilterBankSelection, FrameType,
-    MultiChannelQmf, StepSizeTable, SubframePcmDecoder, SubframePcmError, VqCodebooks, NUM_SUBBAND,
-    RMS_6BIT,
+    decode_core_frame, join_scale, parse_frame_header, AdpcmVqCodebook, AudioArrayDecodeError,
+    AudioArrayError, CoreFrameDecodeError, CoreStreamDecoder, DtsFrameHeader, FilterBankSelection,
+    FrameType, HfVqCodebook, MultiChannelQmf, StepSizeTable, SubframePcmDecoder, SubframePcmError,
+    VqCodebooks, NUM_SUBBAND, RMS_6BIT,
 };
 
 /// The §C.2.2 4-tap predictor, run over one subband column with the
@@ -68,6 +67,26 @@ fn analytic_matrices(
     rate_index: u8,
     history: &mut [[[f64; 4]; NUM_SUBBAND]; 2],
 ) -> Vec<Vec<[f64; NUM_SUBBAND]>> {
+    analytic_matrices_with_books(
+        spec,
+        rate_index,
+        history,
+        &synthetic_hf_book(),
+        &synthetic_adpcm_book(),
+    )
+}
+
+/// [`analytic_matrices`] with the §D.10 books explicit, so the
+/// full-index-space sweeps can recompute the ground truth from the
+/// **built-in real books** ([`HfVqCodebook::builtin`] /
+/// [`AdpcmVqCodebook::builtin`]) instead of the synthetic stand-ins.
+fn analytic_matrices_with_books(
+    spec: &JointFrameSpec,
+    rate_index: u8,
+    history: &mut [[[f64; 4]; NUM_SUBBAND]; 2],
+    hf_book: &HfVqCodebook,
+    adpcm_book: &AdpcmVqCodebook,
+) -> Vec<Vec<[f64; NUM_SUBBAND]>> {
     let table = StepSizeTable::for_rate(rate_index);
     let step = table.step_size(8).expect("ABITS=8 step size");
     let mut lcg = Lcg(spec.seed);
@@ -92,9 +111,10 @@ fn analytic_matrices(
         for ch in 0..2 {
             for n in n_vqsub[ch]..spec.n_subs[ch] {
                 let scale = f64::from(RMS_6BIT[scales_index(n) as usize]);
-                let v = hf_vq_index(subframe, ch, n) as usize;
+                let v = spec_hf_vq_index(spec, subframe, ch, n) as u16;
+                let vector = hf_book.vector(v);
                 for (m, row) in sf[ch].iter_mut().enumerate() {
-                    row[n] = scale * synthetic_hf_element(v, m);
+                    row[n] = scale * vector[m];
                 }
             }
         }
@@ -130,8 +150,8 @@ fn analytic_matrices(
         // history over the subframe's final rows.
         for ch in 0..2 {
             for n in 0..spec.adpcm_subbands[ch] {
-                let i = pvq_index(subframe, ch, n) as usize;
-                let coeffs = [0, 1, 2, 3].map(|j| synthetic_adpcm_coeff(i, j));
+                let i = spec_pvq_index(spec, subframe, ch, n) as u16;
+                let coeffs = *adpcm_book.coefficients(i);
                 let mut col: Vec<f64> = sf[ch].iter().map(|row| row[n]).collect();
                 predict_column(&mut col, &coeffs, &history[ch][n]);
                 for (row, &value) in sf[ch].iter_mut().zip(&col) {
@@ -616,4 +636,138 @@ fn books_do_not_perturb_real_fixture_streams() {
             assert_eq!(a, b, "books must be strictly additive");
         }
     }
+}
+
+/// **Full §D.10.2 index-space sweep** — every one of the book's 1024
+/// vectors travels through the *real bitstream decode path* (10-bit
+/// phase-1 `nVQIndex` → built-in-book lookup → `SCALES · HFREQ` fill →
+/// §C.2.5 QMF) and lands bit-exactly on the analytic reconstruction
+/// recomputed from [`HfVqCodebook::builtin`]. 32 frames × 32 HF-VQ
+/// subbands with stepped consecutive index bases cover indices
+/// 0 … 1023 exactly once each — including the staged `.meta.md`'s
+/// duplicate-codeword cluster (~342 … 376) and the all-zero vector 0.
+#[test]
+fn builtin_hf_book_full_index_space_decodes_bit_exact() {
+    let template = template_header();
+    let hf_book = HfVqCodebook::builtin();
+    let adpcm_book = AdpcmVqCodebook::builtin();
+    let mut covered = [false; 1024];
+
+    for step in 0..32u32 {
+        let spec = JointFrameSpec {
+            hf_subbands: [16, 16],
+            hf_index_base: Some(step * 32),
+            ..JointFrameSpec::default_plain(0xD10_2000 ^ step)
+        };
+        let n_vqsub = spec.n_vqsub();
+        for ch in 0..2 {
+            for n in n_vqsub[ch]..spec.n_subs[ch] {
+                covered[spec_hf_vq_index(&spec, 0, ch, n) as usize] = true;
+            }
+        }
+
+        let frame = build_frame_from_spec(&template, &spec);
+        let header = parse_frame_header(&frame).expect("sweep frame parses");
+        // The DEFAULT decoder — the built-in books are the ground the
+        // analytic side recomputes from.
+        let ours = decode_core_frame(&frame, &header).expect("built-in books decode every index");
+
+        let mut history = [[[0.0; 4]; NUM_SUBBAND]; 2];
+        let matrices = analytic_matrices_with_books(
+            &spec,
+            header.rate_index,
+            &mut history,
+            &hf_book,
+            &adpcm_book,
+        );
+        let expect = synthesize(&mut MultiChannelQmf::new(2), &matrices, [32, 32], &header);
+        assert_eq!(
+            ours,
+            expect,
+            "HF sweep frame {step} (indices {}..{}): decode must match the analytic fill",
+            step * 32,
+            step * 32 + 31
+        );
+    }
+    assert!(
+        covered.iter().all(|&c| c),
+        "the sweep must cover all 1024 §D.10.2 indices"
+    );
+}
+
+/// **Full §D.10.1 index-space sweep** — every one of the book's 4096
+/// prediction-coefficient vectors travels through the real decode
+/// path (12-bit §5.4.1 `PVQ` capture → built-in-book ÷ 2¹³ lookup →
+/// §C.2.2 4-tap prediction → QMF) and lands bit-exactly on the
+/// analytic reconstruction recomputed from
+/// [`AdpcmVqCodebook::builtin`]. 64 frames × 64 `PMODE = 1` subbands
+/// (all 32 subbands of both channels) with stepped consecutive index
+/// bases cover indices 0 … 4095 exactly once each — every vector runs
+/// as an actual predictor over real residuals, so an unstable or
+/// mistranscribed row cannot hide.
+#[test]
+fn builtin_adpcm_book_full_index_space_decodes_bit_exact() {
+    let template = template_header();
+    let hf_book = HfVqCodebook::builtin();
+    let adpcm_book = AdpcmVqCodebook::builtin();
+    let mut covered = vec![false; 4096];
+
+    for step in 0..64u32 {
+        let spec = JointFrameSpec {
+            adpcm_subbands: [32, 32],
+            pvq_index_base: Some(step * 64),
+            ..JointFrameSpec::default_plain(0xD10_4000 ^ step)
+        };
+        for ch in 0..2 {
+            for n in 0..spec.adpcm_subbands[ch] {
+                covered[spec_pvq_index(&spec, 0, ch, n) as usize] = true;
+            }
+        }
+
+        let frame = build_frame_from_spec(&template, &spec);
+        let header = parse_frame_header(&frame).expect("sweep frame parses");
+        let ours = decode_core_frame(&frame, &header).expect("built-in books decode every index");
+
+        let mut history = [[[0.0; 4]; NUM_SUBBAND]; 2];
+        let matrices = analytic_matrices_with_books(
+            &spec,
+            header.rate_index,
+            &mut history,
+            &hf_book,
+            &adpcm_book,
+        );
+        let expect = synthesize(&mut MultiChannelQmf::new(2), &matrices, [32, 32], &header);
+        assert_eq!(
+            ours,
+            expect,
+            "ADPCM sweep frame {step} (indices {}..{}): decode must match the analytic chain",
+            step * 64,
+            step * 64 + 63
+        );
+
+        // Non-vacuity, pinned once: the prediction is audible — the
+        // same residuals without the §C.2.2 pass synthesize different
+        // PCM.
+        if step == 0 {
+            let no_adpcm = JointFrameSpec {
+                adpcm_subbands: [0, 0],
+                pvq_index_base: None,
+                ..JointFrameSpec::default_plain(0xD10_4000)
+            };
+            let mut h2 = [[[0.0; 4]; NUM_SUBBAND]; 2];
+            let plain = analytic_matrices_with_books(
+                &no_adpcm,
+                header.rate_index,
+                &mut h2,
+                &hf_book,
+                &adpcm_book,
+            );
+            let plain_pcm = synthesize(&mut MultiChannelQmf::new(2), &plain, [32, 32], &header);
+            assert_ne!(ours, plain_pcm, "the swept prediction must be audible");
+        }
+    }
+    assert!(
+        covered.iter().all(|&c| c),
+        "the sweep must cover all 4096 §D.10.1 indices"
+    );
 }
