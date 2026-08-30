@@ -8,6 +8,20 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 — **transients, high-frequency VQ and band trimming**:
+  bands whose two subsubframe halves differ by > 12 dB in peak are
+  flagged `TMODE = 1` and carry two scale factors (no pre-echo: the
+  quiet quarter before a burst decodes at −53 dBFS rms for a 0.6 FS
+  burst), `THUFF` picks the cheapest §D.5.2 book; `nSUBS` trims to
+  the last non-silent band and `nVQSUB` to the last quantized one,
+  with the bands in between coded as §D.10.2 high-frequency VQ (the
+  book vector with the largest normalized correlation, gain snapped
+  to the §D.1 grid; shed from the top when the frame cannot afford
+  them). Two new black-box fixtures pin both paths through the
+  reference decoder: the mono burst stream reconstructs at 71.9 dB
+  and the 128 kbit/s stream with a −40 dBFS 20 kHz tone (carried by
+  VQ above `nVQSUB`) at 17.9 / 17.8 dB, both with no decoder
+  diagnostics.
 - Round 453 — **registry `Encoder` + wire-format variants** (the
   framework half of the dual API): `make_encoder` /
   `DtsEncoderHandle` accept any Table 5-5 core rate, the mono / stereo

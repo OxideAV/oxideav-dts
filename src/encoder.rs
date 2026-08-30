@@ -152,11 +152,6 @@ fn band_sample_bits(abits: u8) -> usize {
     }
 }
 
-/// Worst-case side-information bits a band pays when it first becomes
-/// active (`TMODE` 1 bit through the A4 zero code + 7-bit linear scale
-/// factor). The 5-bit linear `ABITS` field is planned for every band.
-const ACTIVE_BAND_SIDE_BITS: usize = 1 + 7;
-
 /// `(code, length)` of `symbol` in a `(symbol, length, code)` book.
 fn huff_code(table: &[(i16, u8, u16)], symbol: i16) -> Option<(u32, u32)> {
     table
@@ -595,35 +590,58 @@ impl CoreEncoder {
 /// Per-band planning record.
 #[derive(Debug, Clone, Copy)]
 struct BandPlan {
-    /// Chosen `ABITS`.
+    /// Chosen `ABITS` (0 = not quantized; VQ bands are also 0).
     abits: u8,
-    /// Chosen §D.1 scale index (in the table the channel's `SHUFF`
-    /// implies) — valid when `abits > 0`.
-    scale_index: u8,
+    /// `TMODE`: 0 = one scale factor, 1 = a transient — the second
+    /// subsubframe uses the second scale factor.
+    tmode: u8,
+    /// Chosen §D.1 scale indices (in the table the channel's `SHUFF`
+    /// implies) for the two subsubframe halves; `[1]` is only
+    /// transmitted when `tmode > 0`. For a VQ band `[0]` is the
+    /// §5.5 `HFREQ` scale.
+    scale_index: [u8; 2],
     /// Quantization indices for the frame — valid when `abits > 0`.
     idx: [i32; SAMPLES_PER_BAND],
+    /// §D.10.2 vector index for a high-frequency-VQ band.
+    vq_index: u16,
 }
 
 impl Default for BandPlan {
     fn default() -> Self {
         Self {
             abits: 0,
-            scale_index: 0,
+            tmode: 0,
+            scale_index: [0; 2],
             idx: [0; SAMPLES_PER_BAND],
+            vq_index: 0,
         }
     }
 }
 
-/// Per-channel entropy selection.
+/// Per-channel structure + entropy selection.
 #[derive(Debug, Clone)]
 struct ChannelCoding {
+    /// `nSUBS`: active subbands (2..=32).
+    n_subs: usize,
+    /// `nVQSUB`: first high-frequency-VQ subband (1..=`n_subs`).
+    n_vqsub: usize,
     /// `BHUFF` selector.
     bhuff: u8,
     /// `SHUFF` selector.
     shuff: u8,
+    /// `THUFF` selector.
+    thuff: u8,
     /// `SEL[ch][ABITS-1]` for `ABITS 1..=10`.
     sel: [u8; 10],
 }
+
+/// Band peaks below this (in the §C.2.5 domain, ≈ −120 dBFS) are
+/// treated as silent for `nSUBS` trimming.
+const SILENCE_FLOOR: f64 = 8.0;
+
+/// Peak ratio between the two subsubframe halves above which a band
+/// is flagged `TMODE = 1` (two scale factors): 12 dB.
+const TRANSIENT_RATIO: f64 = 4.0;
 
 /// Smallest §D.1 level in `table` (a valid-prefix slice) whose
 /// quantizer span covers `peak` at `abits`, i.e. `qmax·step·RMS ≥
@@ -632,7 +650,11 @@ fn scale_index_in(abits: u8, peak: f64, step_table: StepSizeTable, table: &[u32]
     let step = step_table
         .step_size(abits)
         .expect("allocator only uses valid ABITS");
-    let need = peak / (f64::from(qmax(abits)) * step);
+    rms_index_covering(peak / (f64::from(qmax(abits)) * step), table)
+}
+
+/// Smallest level of `table` at or above `need` (top level if none).
+fn rms_index_covering(need: f64, table: &[u32]) -> u8 {
     for (idx, &v) in table.iter().enumerate() {
         if f64::from(v) >= need {
             return idx as u8;
@@ -651,13 +673,24 @@ fn valid_rms(table: &[u32]) -> &[u32] {
     }
 }
 
-/// Quantization-noise power estimate (per sample) at `abits` with the
-/// overload-free scale rule above, on the 7-bit grid.
+/// Quantization-noise power estimate (per sample) at `abits` for one
+/// scale-factor span covering `peak`, on the 7-bit grid.
 fn noise_power(abits: u8, peak: f64, step_table: StepSizeTable) -> f64 {
     let idx = scale_index_in(abits, peak, step_table, valid_rms(&RMS_7BIT));
     let step = step_table.step_size(abits).expect("valid ABITS");
     let q = step * f64::from(RMS_7BIT[idx as usize]);
     q * q / 12.0
+}
+
+/// Side-information bits a band pays when it first becomes active:
+/// `TMODE` (1 bit for the A4 zero code, 2 for a transient) plus one
+/// or two 7-bit scale factors.
+fn activation_side_bits(tmode: u8) -> usize {
+    if tmode > 0 {
+        2 + 14
+    } else {
+        1 + 7
+    }
 }
 
 /// One allocator step (for rollback): `(channel, band, previous
@@ -688,7 +721,11 @@ fn allocate(
                 let l = &ladder[ch * NUM_SUBBAND + n];
                 for next in (cur + 1)..=MAX_ABITS {
                     let extra = band_sample_bits(next) - band_sample_bits(cur)
-                        + if cur == 0 { ACTIVE_BAND_SIDE_BITS } else { 0 };
+                        + if cur == 0 {
+                            activation_side_bits(plan[ch][n].tmode)
+                        } else {
+                            0
+                        };
                     if extra > budget {
                         break;
                     }
@@ -716,11 +753,11 @@ fn allocate(
 
 /// Quantize every active band of one channel against its chosen
 /// scale grid (`table` = the valid prefix of the §D.1 table its
-/// `SHUFF` implies).
+/// `SHUFF` implies), honouring the per-half scale of transient bands.
 fn quantize_channel(
     plan: &mut [BandPlan; NUM_SUBBAND],
     rows: &[[f64; NUM_SUBBAND]],
-    peak: &[f64; NUM_SUBBAND],
+    peak: &[[f64; NUM_SUBBAND]; 2],
     step_table: StepSizeTable,
     table: &[u32],
 ) {
@@ -728,16 +765,73 @@ fn quantize_channel(
         if band.abits == 0 {
             continue;
         }
-        band.scale_index = scale_index_in(band.abits, peak[n], step_table, table);
         let step = step_table.step_size(band.abits).expect("valid ABITS");
-        let recon = step * f64::from(table[band.scale_index as usize]);
         let q = qmax(band.abits);
+        if band.tmode > 0 {
+            band.scale_index[0] = scale_index_in(band.abits, peak[0][n], step_table, table);
+            band.scale_index[1] = scale_index_in(band.abits, peak[1][n], step_table, table);
+        } else {
+            let p = peak[0][n].max(peak[1][n]);
+            band.scale_index[0] = scale_index_in(band.abits, p, step_table, table);
+            band.scale_index[1] = band.scale_index[0];
+        }
         for (m, slot) in band.idx.iter_mut().enumerate() {
+            let half = if band.tmode > 0 && m >= SAMPLES_PER_SUBSUBFRAME {
+                1
+            } else {
+                0
+            };
+            let recon = step * f64::from(table[band.scale_index[half] as usize]);
             *slot = (rows[m][n] / recon)
                 .round()
                 .clamp(f64::from(-q), f64::from(q)) as i32;
         }
     }
+}
+
+/// Pick the §D.10.2 vector + §D.1 scale for a high-frequency-VQ band
+/// from its 16 subframe samples: the book vector with the largest
+/// normalized correlation, then the table level nearest its
+/// least-squares gain. Returns `(vq_index, scale_index)`.
+fn choose_hf_vq(
+    rows: &[[f64; NUM_SUBBAND]],
+    n: usize,
+    book: &crate::HfVqCodebook,
+    table: &[u32],
+) -> (u16, u8) {
+    let x: Vec<f64> = rows.iter().map(|r| r[n]).collect();
+    let xx: f64 = x.iter().map(|v| v * v).sum();
+    if xx <= 0.0 {
+        return (0, 0);
+    }
+    let mut best = (0u16, 0.0_f64, 0.0_f64);
+    for index in 0..crate::HFREQ_VQ_BOOK_SIZE as u16 {
+        let e = book.vector(index);
+        let (mut xe, mut ee) = (0.0_f64, 0.0_f64);
+        for (a, b) in x.iter().zip(e.iter()) {
+            xe += a * b;
+            ee += b * b;
+        }
+        if ee <= 0.0 || xe <= 0.0 {
+            continue;
+        }
+        let score = xe * xe / ee;
+        if score > best.1 {
+            best = (index, score, xe / ee);
+        }
+    }
+    let gain = best.2;
+    // Nearest table level in the log domain.
+    let mut scale = 0usize;
+    let mut err = f64::INFINITY;
+    for (idx, &v) in table.iter().enumerate() {
+        let d = (f64::from(v).ln() - gain.ln()).abs();
+        if d < err {
+            err = d;
+            scale = idx;
+        }
+    }
+    (best.0, scale as u8)
 }
 
 /// Audio bits of one band under a given `SEL` for its family.
@@ -761,7 +855,7 @@ fn band_audio_bits(band: &BandPlan, sel: u8) -> usize {
 /// (a §D.5 Huffman book with its 2-bit `ADJ`, or the terminal
 /// block-code / NFE form). Returns the selection and the audio bits
 /// of the whole channel (including the `ABITS > 10` NFE bands).
-fn choose_sel(plan: &[BandPlan; NUM_SUBBAND]) -> ([u8; 10], usize) {
+fn choose_sel(plan: &[BandPlan]) -> ([u8; 10], usize) {
     let mut sel = [0u8; 10];
     let mut total = 0usize;
     for a in 1..=10u8 {
@@ -796,13 +890,13 @@ fn choose_sel(plan: &[BandPlan; NUM_SUBBAND]) -> ([u8; 10], usize) {
     (sel, total)
 }
 
-/// Choose the cheapest `BHUFF` for a channel's `ABITS` vector and
-/// return `(bhuff, bits)`.
-fn choose_bhuff(plan: &[BandPlan; NUM_SUBBAND], n_vqsub: usize) -> (u8, usize) {
-    let abits = &plan[..n_vqsub];
-    let mut best = (6u8, 5 * n_vqsub);
-    if abits.iter().all(|b| b.abits <= 15) && 4 * n_vqsub < best.1 {
-        best = (5, 4 * n_vqsub);
+/// Choose the cheapest `BHUFF` for a channel's `ABITS` vector
+/// (`plan[..n_vqsub]`) and return `(bhuff, bits)`.
+fn choose_bhuff(abits: &[BandPlan]) -> (u8, usize) {
+    let n = abits.len();
+    let mut best = (6u8, 5 * n);
+    if abits.iter().all(|b| b.abits <= 15) && 4 * n < best.1 {
+        best = (5, 4 * n);
     }
     if abits.iter().all(|b| (1..=12).contains(&b.abits)) {
         for (code, cb) in [
@@ -828,8 +922,51 @@ fn choose_bhuff(plan: &[BandPlan; NUM_SUBBAND], n_vqsub: usize) -> (u8, usize) {
     best
 }
 
+/// Choose the cheapest `THUFF` for the transmitted `TMODE` symbols of
+/// a channel (`plan[..n_vqsub]`, bands with `ABITS > 0`); returns
+/// `(thuff, bits)`.
+fn choose_thuff(abits: &[BandPlan]) -> (u8, usize) {
+    let mut best = (0u8, usize::MAX);
+    for (code, cb) in [
+        (0u8, TmodeCodebook::A4),
+        (1, TmodeCodebook::B4),
+        (2, TmodeCodebook::C4),
+        (3, TmodeCodebook::D4),
+    ] {
+        let table = tmode_table(cb);
+        let bits: usize = abits
+            .iter()
+            .filter(|b| b.abits > 0)
+            .map(|b| huff_code(table, i16::from(b.tmode)).expect("TMODE 0..=3").1 as usize)
+            .sum();
+        if bits < best.1 {
+            best = (code, bits);
+        }
+    }
+    best
+}
+
+/// Scale-factor indices a channel transmits, in §5.4.1 order: for
+/// every quantized band its first (and, on a transient, second)
+/// index, then one per high-frequency-VQ band.
+fn scale_sequence(plan: &[BandPlan], n_vqsub: usize, n_subs: usize) -> Vec<u8> {
+    let mut seq = Vec::new();
+    for band in &plan[..n_vqsub] {
+        if band.abits > 0 {
+            seq.push(band.scale_index[0]);
+            if band.tmode > 0 {
+                seq.push(band.scale_index[1]);
+            }
+        }
+    }
+    for band in &plan[n_vqsub..n_subs] {
+        seq.push(band.scale_index[0]);
+    }
+    seq
+}
+
 /// Bits of a channel's SCALES field under a Huffman `SHUFF` book,
-/// given the 6-bit indices of its active bands in band order.
+/// given the 6-bit indices in transmission order.
 fn scales_huffman_bits(indices: &[u8], cb: ScalesCodebook) -> Option<usize> {
     let table = scales_table(cb)?;
     let mut sum = 0i32;
@@ -843,8 +980,8 @@ fn scales_huffman_bits(indices: &[u8], cb: ScalesCodebook) -> Option<usize> {
     Some(bits)
 }
 
-/// The greedy allocator + entropy selection + bitstream emission for
-/// one frame.
+/// The greedy allocator + structure/entropy selection + bitstream
+/// emission for one frame.
 fn encode_frame_bits(
     config: &EncoderConfig,
     frame_bytes: usize,
@@ -853,20 +990,43 @@ fn encode_frame_bits(
 ) -> Vec<u8> {
     let channels = config.channels;
     let step_table = StepSizeTable::for_rate(config.rate_index);
-    let n_vqsub = NUM_SUBBAND;
+    let hf_book = crate::HfVqCodebook::builtin();
 
     // --- Statistics -------------------------------------------------
-    let mut peak = vec![[0.0_f64; NUM_SUBBAND]; channels];
+    // Band peak per subsubframe half, and mean-square over the frame.
+    let mut peak = vec![[[0.0_f64; NUM_SUBBAND]; 2]; channels];
     let mut power = vec![[0.0_f64; NUM_SUBBAND]; channels];
     for ch in 0..channels {
-        for row in &rows[ch] {
+        for (m, row) in rows[ch].iter().enumerate() {
+            let half = m / SAMPLES_PER_SUBSUBFRAME;
             for (n, &v) in row.iter().enumerate() {
-                peak[ch][n] = peak[ch][n].max(v.abs());
+                peak[ch][half][n] = peak[ch][half][n].max(v.abs());
                 power[ch][n] += v * v;
             }
         }
         for p in power[ch].iter_mut() {
             *p /= rows[ch].len() as f64;
+        }
+    }
+    let band_peak: Vec<[f64; NUM_SUBBAND]> = (0..channels)
+        .map(|ch| {
+            let mut p = [0.0_f64; NUM_SUBBAND];
+            for n in 0..NUM_SUBBAND {
+                p[n] = peak[ch][0][n].max(peak[ch][1][n]);
+            }
+            p
+        })
+        .collect();
+
+    // --- Transients --------------------------------------------------
+    let mut plan = vec![[BandPlan::default(); NUM_SUBBAND]; channels];
+    for ch in 0..channels {
+        for n in 0..NUM_SUBBAND {
+            let (a, b) = (peak[ch][0][n], peak[ch][1][n]);
+            let (lo, hi) = (a.min(b), a.max(b));
+            if lo > 0.0 && hi > TRANSIENT_RATIO * lo {
+                plan[ch][n].tmode = 1;
+            }
         }
     }
 
@@ -875,8 +1035,6 @@ fn encode_frame_bits(
                                 // Coding header: 4 + 3 + per channel (5+5+3+2+3+3) + SEL planes
                                 // (1 + 4·2 + 5·3 = 24) + ADJ (2 per Huffman family, ≤ 10).
     let coding_header_bits = 7 + (21 + 24 + 20) * channels;
-    let abits_worst = 5 * n_vqsub * channels; // linear 5-bit ABITS
-    let side_fixed_bits = 5 /* SSC + PSC */ + NUM_SUBBAND * channels /* PMODE */ + abits_worst;
     let lfe_bits = if lfe_decimated.is_some() {
         8 * ENCODER_FRAME_SAMPLES / 64 + 8
     } else {
@@ -884,7 +1042,10 @@ fn encode_frame_bits(
     };
     let dsync_bits = 16usize;
     let budget_total = frame_bytes * 8;
-    let fixed = header_bits + coding_header_bits + side_fixed_bits + lfe_bits + dsync_bits;
+    // Worst-case side info: SSC/PSC, one PMODE bit and a 5-bit ABITS
+    // field for all 32 bands of every channel.
+    let side_worst = 5 + (1 + 5) * NUM_SUBBAND * channels;
+    let fixed = header_bits + coding_header_bits + side_worst + lfe_bits + dsync_bits;
     let budget = budget_total.saturating_sub(fixed);
 
     // --- Pass 1: allocation on worst-case widths ---------------------
@@ -894,84 +1055,154 @@ fn encode_frame_bits(
             let mut l = [0.0_f64; 27];
             l[0] = power[ch][n];
             for a in 1..=MAX_ABITS {
-                l[a as usize] = noise_power(a, peak[ch][n], step_table).min(power[ch][n]);
+                let q = if plan[ch][n].tmode > 0 {
+                    0.5 * (noise_power(a, peak[ch][0][n], step_table)
+                        + noise_power(a, peak[ch][1][n], step_table))
+                } else {
+                    noise_power(a, band_peak[ch][n], step_table)
+                };
+                l[a as usize] = q.min(power[ch][n]);
             }
             l
         })
         .collect();
-    let mut plan = vec![[BandPlan::default(); NUM_SUBBAND]; channels];
     let mut noise: Vec<[f64; NUM_SUBBAND]> = power.clone();
-    let _ = allocate(&mut plan, &mut noise, &ladder, &peak, budget);
+    let _ = allocate(&mut plan, &mut noise, &ladder, &band_peak, budget);
 
-    // --- Entropy selection (exact costs) -----------------------------
-    // Quantize every channel on its chosen scale grid and pick the
-    // cheapest SHUFF / SEL / BHUFF books; returns the per-channel
-    // selections and the exact bits the frame uses (the worst-case
-    // fixed part with the real side-info costs swapped in).
-    let select_all = |plan: &mut Vec<[BandPlan; NUM_SUBBAND]>| -> (Vec<ChannelCoding>, usize) {
+    // --- Structure + entropy selection (exact costs) -----------------
+    // Per channel: nVQSUB just above the last quantized band, nSUBS
+    // just above the last non-silent band (VQ in between, subject to
+    // `vq_cap[ch]` — lowered when the frame cannot afford every VQ
+    // band), quantize on the chosen scale grid, pick the cheapest
+    // SHUFF / SEL / BHUFF / THUFF, and return the exact bits used.
+    let mut vq_cap = vec![NUM_SUBBAND; channels];
+    let select_all = |plan: &mut Vec<[BandPlan; NUM_SUBBAND]>,
+                      vq_cap: &[usize]|
+     -> (Vec<ChannelCoding>, usize) {
         let mut coding = Vec::with_capacity(channels);
-        let mut actual = 0usize;
+        let mut used = header_bits + coding_header_bits + lfe_bits + dsync_bits + 5;
         for ch in 0..channels {
+            let n_vqsub = plan[ch]
+                .iter()
+                .rposition(|b| b.abits > 0)
+                .map_or(1, |n| n + 1);
+            let last_live = band_peak[ch]
+                .iter()
+                .rposition(|&p| p > SILENCE_FLOOR)
+                .map_or(0, |n| n + 1);
+            let n_subs = n_vqsub.max(last_live).min(vq_cap[ch]).max(n_vqsub).max(2);
+            // VQ bands: vector + gain on the 7-bit grid first; the
+            // SHUFF choice below may move them to the 6-bit grid.
+            // Scale grid + SHUFF.
             let mut shuff = 6u8;
-            let mut scale_bits = 7 * plan[ch].iter().filter(|b| b.abits > 0).count();
-            if config.huffman_scales_allowed() {
-                let idx6: Vec<u8> = plan[ch]
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, b)| b.abits > 0)
-                    .map(|(n, b)| {
-                        scale_index_in(b.abits, peak[ch][n], step_table, valid_rms(&RMS_6BIT))
-                    })
-                    .collect();
-                for (code, cb) in [
-                    (0u8, ScalesCodebook::Sa129),
-                    (1, ScalesCodebook::Sb129),
-                    (2, ScalesCodebook::Sc129),
-                    (3, ScalesCodebook::Sd129),
-                    (4, ScalesCodebook::Se129),
-                ] {
-                    if let Some(bits) = scales_huffman_bits(&idx6, cb) {
-                        if bits < scale_bits {
-                            shuff = code;
-                            scale_bits = bits;
+            let table7 = valid_rms(&RMS_7BIT);
+            let mut best_bits = usize::MAX;
+            let mut chosen_table: &[u32] = table7;
+            let candidates: Vec<(u8, &[u32])> = if config.huffman_scales_allowed() {
+                vec![(6, table7), (0, valid_rms(&RMS_6BIT))]
+            } else {
+                vec![(6, table7)]
+            };
+            for (code, table) in candidates {
+                quantize_channel(&mut plan[ch], &rows[ch], &peak[ch], step_table, table);
+                for (n, band) in plan[ch].iter_mut().enumerate().take(n_subs).skip(n_vqsub) {
+                    let (vq, sc) = choose_hf_vq(&rows[ch], n, &hf_book, table);
+                    band.vq_index = vq;
+                    band.scale_index = [sc, sc];
+                }
+                let seq = scale_sequence(&plan[ch], n_vqsub, n_subs);
+                if code == 6 {
+                    let bits = 7 * seq.len();
+                    if bits < best_bits {
+                        best_bits = bits;
+                        shuff = 6;
+                        chosen_table = table;
+                    }
+                } else {
+                    for (hcode, cb) in [
+                        (0u8, ScalesCodebook::Sa129),
+                        (1, ScalesCodebook::Sb129),
+                        (2, ScalesCodebook::Sc129),
+                        (3, ScalesCodebook::Sd129),
+                        (4, ScalesCodebook::Se129),
+                    ] {
+                        if let Some(bits) = scales_huffman_bits(&seq, cb) {
+                            if bits < best_bits {
+                                best_bits = bits;
+                                shuff = hcode;
+                                chosen_table = table;
+                            }
                         }
                     }
                 }
             }
-            let table: &[u32] = if shuff == 6 {
-                valid_rms(&RMS_7BIT)
-            } else {
-                valid_rms(&RMS_6BIT)
-            };
-            quantize_channel(&mut plan[ch], &rows[ch], &peak[ch], step_table, table);
-            let (sel, audio_bits) = choose_sel(&plan[ch]);
-            let (bhuff, abits_bits) = choose_bhuff(&plan[ch], n_vqsub);
-            let tmode_bits = plan[ch].iter().filter(|b| b.abits > 0).count();
-            actual += audio_bits + abits_bits + scale_bits + tmode_bits;
-            coding.push(ChannelCoding { bhuff, shuff, sel });
+            // Re-quantize on the winning grid (the last candidate
+            // tried may not be the winner).
+            quantize_channel(
+                &mut plan[ch],
+                &rows[ch],
+                &peak[ch],
+                step_table,
+                chosen_table,
+            );
+            for (n, band) in plan[ch].iter_mut().enumerate().take(n_subs).skip(n_vqsub) {
+                let (vq, sc) = choose_hf_vq(&rows[ch], n, &hf_book, chosen_table);
+                band.vq_index = vq;
+                band.scale_index = [sc, sc];
+            }
+            let scale_bits = best_bits;
+            let (sel, audio_bits) = choose_sel(&plan[ch][..n_vqsub]);
+            let (bhuff, abits_bits) = choose_bhuff(&plan[ch][..n_vqsub]);
+            let (thuff, tmode_bits) = choose_thuff(&plan[ch][..n_vqsub]);
+            let pmode_bits = n_subs;
+            let vq_bits = 10 * (n_subs - n_vqsub);
+            used += pmode_bits + abits_bits + tmode_bits + scale_bits + vq_bits + audio_bits;
+            coding.push(ChannelCoding {
+                n_subs,
+                n_vqsub,
+                bhuff,
+                shuff,
+                thuff,
+                sel,
+            });
         }
-        (coding, fixed - abits_worst + actual)
+        (coding, used)
     };
 
-    let (mut coding, mut used) = select_all(&mut plan);
+    let (mut coding, mut used) = select_all(&mut plan, &vq_cap);
+    // The VQ bands are extra over the worst-case plan; shed them from
+    // the top until the frame fits (the quantized plan itself always
+    // fits, so this terminates).
+    while used > budget_total {
+        let Some(ch) = (0..channels)
+            .filter(|&ch| coding[ch].n_subs > coding[ch].n_vqsub)
+            .max_by_key(|&ch| coding[ch].n_subs)
+        else {
+            break;
+        };
+        vq_cap[ch] = coding[ch].n_subs - 1;
+        let (c, u) = select_all(&mut plan, &vq_cap);
+        coding = c;
+        used = u;
+    }
     debug_assert!(
         used <= budget_total,
         "pass-1 plan overflow: {used} > {budget_total}"
     );
 
     // --- Pass 2: re-spend the entropy saving --------------------------
-    // The second pass adds worst-case-priced steps up to the frame's
-    // remaining bits, then re-selects the books. A step can still
-    // invalidate a cheaper earlier choice (a band pushed past ABITS 12
-    // forfeits the Huffman BHUFF, a new band can flip a whole SEL
-    // family back to block codes), so the newest steps are rolled
-    // back until the exact total fits.
+    // Add worst-case-priced steps up to the remaining bits, re-select,
+    // and roll the newest steps back until the exact total fits (a
+    // step can invalidate a cheaper earlier choice: a band pushed past
+    // ABITS 12 forfeits the Huffman BHUFF, a new band can flip a whole
+    // SEL family back to block codes, a newly quantized top band moves
+    // nVQSUB).
     let slack = budget_total.saturating_sub(used);
     if slack > 0 {
-        let mut steps = allocate(&mut plan, &mut noise, &ladder, &peak, slack);
+        let mut steps = allocate(&mut plan, &mut noise, &ladder, &band_peak, slack);
         if !steps.is_empty() {
             loop {
-                let (c, u) = select_all(&mut plan);
+                let (c, u) = select_all(&mut plan, &vq_cap);
                 coding = c;
                 used = u;
                 if used <= budget_total {
@@ -995,17 +1226,17 @@ fn encode_frame_bits(
     // §5.3.2 primary audio coding header (Table 5-21).
     w.push(0, 4); // SUBFS = 0 -> 1 subframe
     w.push(channels as u32 - 1, 3); // PCHS
-    for _ in 0..channels {
-        w.push(NUM_SUBBAND as u32 - 2, 5); // SUBS -> nSUBS = 32
+    for c in &coding {
+        w.push(c.n_subs as u32 - 2, 5); // SUBS
     }
-    for _ in 0..channels {
-        w.push(n_vqsub as u32 - 1, 5); // VQSUB
+    for c in &coding {
+        w.push(c.n_vqsub as u32 - 1, 5); // VQSUB
     }
     for _ in 0..channels {
         w.push(0, 3); // JOINX = 0
     }
-    for _ in 0..channels {
-        w.push(0, 2); // THUFF = 0 (A4)
+    for c in &coding {
+        w.push(u32::from(c.thuff), 2);
     }
     for c in &coding {
         w.push(u32::from(c.shuff), 3);
@@ -1052,15 +1283,15 @@ fn encode_frame_bits(
     // §5.4.1 side information (Table 5-28).
     w.push(N_SSC as u32 - 1, 2); // SSC
     w.push(0, 3); // PSC
-    for _ in 0..channels {
-        for _ in 0..NUM_SUBBAND {
+    for c in &coding {
+        for _ in 0..c.n_subs {
             w.push(0, 1); // PMODE = 0
         }
     }
     // ABITS.
     for (ch, c) in coding.iter().enumerate() {
         let book = AbitsCodebook::from_bhuff(c.bhuff).expect("chosen from valid codes");
-        for band in plan[ch].iter().take(n_vqsub) {
+        for band in &plan[ch][..c.n_vqsub] {
             match abits_table(book) {
                 Some(table) => {
                     let (code, len) =
@@ -1071,43 +1302,47 @@ fn encode_frame_bits(
             }
         }
     }
-    // TMODE (two subsubframes): transmitted for allocated bands.
-    let a4_zero = huff_code(tmode_table(TmodeCodebook::A4), 0).expect("A4 has symbol 0");
-    for ch_plan in plan.iter() {
-        for band in ch_plan.iter().take(n_vqsub) {
+    // TMODE (two subsubframes): transmitted for quantized bands.
+    for (ch, c) in coding.iter().enumerate() {
+        let table = tmode_table(TmodeCodebook::from_thuff(c.thuff));
+        for band in &plan[ch][..c.n_vqsub] {
             if band.abits > 0 {
-                w.push(a4_zero.0, a4_zero.1);
+                let (code, len) = huff_code(table, i16::from(band.tmode)).expect("TMODE 0..=3");
+                w.push(code, len);
             }
         }
     }
-    // SCALES.
+    // SCALES: quantized bands (one or two), then the VQ bands.
     for (ch, c) in coding.iter().enumerate() {
         let cb = ScalesCodebook::from_shuff(c.shuff).expect("chosen from valid codes");
+        let seq = scale_sequence(&plan[ch], c.n_vqsub, c.n_subs);
         let mut sum = 0i32;
-        for band in plan[ch].iter().take(n_vqsub) {
-            if band.abits == 0 {
-                continue;
-            }
+        for idx in seq {
             match scales_table(cb) {
                 Some(table) => {
-                    let diff = i32::from(band.scale_index) - sum;
+                    let diff = i32::from(idx) - sum;
                     let (code, len) = huff_code(table, diff as i16).expect("cost-checked");
                     w.push(code, len);
-                    sum = i32::from(band.scale_index);
+                    sum = i32::from(idx);
                 }
-                None => w.push(u32::from(band.scale_index), 7),
+                None => w.push(u32::from(idx), 7),
             }
         }
     }
     // Tail: JOINX = 0, DYNF = 0, CPF = 0 -> nothing.
 
-    // §5.5 audio data. nVQSUB == nSUBS -> no HFREQ phase. LFE next.
+    // §5.5 audio data: HFREQ VQ indices, LFE, subsubframes.
+    for (ch, c) in coding.iter().enumerate() {
+        for band in &plan[ch][c.n_vqsub..c.n_subs] {
+            w.push(u32::from(band.vq_index), crate::HFREQ_VQ_INDEX_BITS);
+        }
+    }
     if let Some(lfe) = lfe_decimated {
         emit_lfe(&mut w, lfe);
     }
     for ssf in 0..N_SSC {
         for (ch, c) in coding.iter().enumerate() {
-            for band in plan[ch].iter().take(n_vqsub) {
+            for band in &plan[ch][..c.n_vqsub] {
                 emit_band_subsubframe(&mut w, band, c, ssf);
             }
         }

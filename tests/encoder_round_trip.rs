@@ -174,3 +174,99 @@ fn silence_encodes_and_decodes_to_silence() {
         assert!(plane.iter().all(|&v| v == 0.0), "ch {ch} must stay silent");
     }
 }
+
+/// Per-frame structure the encoder chose, read back through the
+/// crate's own §5.3.2 / §5.4.1 parsers.
+fn frame_structure(frame: &[u8]) -> (Vec<(usize, usize)>, Vec<Vec<u8>>) {
+    let hdr = parse_frame_header(frame).unwrap();
+    let hb = hdr.header_bit_length() as usize;
+    let (coding, bits) =
+        oxideav_dts::decode_audio_coding_header_at(frame, hb, hdr.crc_present).unwrap();
+    let (side, _) =
+        oxideav_dts::decode_primary_side_info_at(frame, hb + bits, &coding.channel_params).unwrap();
+    let subs = coding
+        .channel_params
+        .iter()
+        .map(|p| (p.n_subs, p.n_vqsub))
+        .collect();
+    let tmodes = side.channels.iter().map(|c| c.tmode.to_vec()).collect();
+    (subs, tmodes)
+}
+
+#[test]
+fn transients_flag_tmode_and_still_reconstruct() {
+    // Quiet tone, then a burst starting exactly at the second
+    // subsubframe of frame 2 (sample 1024 + 256).
+    let n = ENCODER_FRAME_SAMPLES * 4;
+    let plane: Vec<f64> = (0..n)
+        .map(|i| {
+            let t = i as f64 / 48_000.0;
+            let quiet = 0.002 * (2.0 * std::f64::consts::PI * 700.0 * t).sin();
+            let burst = if (1280..1280 + 400).contains(&i) {
+                0.6 * (2.0 * std::f64::consts::PI * 2_900.0 * t).sin()
+            } else {
+                0.0
+            };
+            quiet + burst
+        })
+        .collect();
+    let config = EncoderConfig::new(48_000, 1).unwrap();
+    let bytes = encode_stream(config, std::slice::from_ref(&plane));
+    let frames: Vec<&[u8]> = iter_frames(&bytes).map(|f| f.unwrap().data).collect();
+    let (_, tmodes) = frame_structure(frames[2]);
+    assert!(
+        tmodes[0].iter().any(|&t| t > 0),
+        "the burst frame must carry TMODE transients: {:?}",
+        tmodes[0]
+    );
+    let (_, quiet_tmodes) = frame_structure(frames[0]);
+    assert!(
+        quiet_tmodes[0].iter().all(|&t| t == 0),
+        "steady frame has no transient"
+    );
+    let (pcm, _) = decode_stream(&bytes, 1);
+    let snr = snr_db(&plane, &pcm[0]);
+    assert!(snr > 40.0, "transient stream round trip {snr:.1} dB");
+    // The quiet pre-burst quarter of frame 2 stays quiet: no pre-echo
+    // above −40 dB relative to the burst.
+    let pre: f64 = pcm[0][1024..1280].iter().map(|v| v * v).sum::<f64>() / 256.0;
+    assert!(pre.sqrt() < 0.6 * 0.01, "pre-burst rms {}", pre.sqrt());
+}
+
+#[test]
+fn low_rate_uses_high_frequency_vq_above_nvqsub() {
+    // A −40 dBFS tone at 20 kHz (band 26) on top of the multitone: at
+    // 128 kbit/s the allocator cannot afford to quantize it, so the
+    // band goes out as a §D.10.2 vector above nVQSUB.
+    let n = ENCODER_FRAME_SAMPLES * 4;
+    let planes: Vec<Vec<f64>> = (0..2)
+        .map(|ch| {
+            multitone(n, ch as f64 * 0.6)
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    v + 0.01 * (2.0 * std::f64::consts::PI * 20_000.0 * i as f64 / 48_000.0).sin()
+                })
+                .collect()
+        })
+        .collect();
+    let config = EncoderConfig::new(48_000, 2)
+        .unwrap()
+        .with_bit_rate(128_000)
+        .unwrap();
+    let bytes = encode_stream(config, &planes);
+    let mut vq_bands = 0usize;
+    for fv in iter_frames(&bytes) {
+        let (subs, _) = frame_structure(fv.unwrap().data);
+        for (n_subs, n_vqsub) in subs {
+            assert!(n_vqsub <= n_subs && n_subs >= 2);
+            vq_bands += n_subs - n_vqsub;
+        }
+    }
+    assert!(vq_bands > 0, "no high-frequency VQ band was used");
+    let (pcm, _) = decode_stream(&bytes, 2);
+    for ch in 0..2 {
+        let snr = snr_db(&planes[ch], &pcm[ch]);
+        assert!(snr > 15.0, "ch {ch}: 128k+VQ round trip {snr:.1} dB");
+    }
+}
