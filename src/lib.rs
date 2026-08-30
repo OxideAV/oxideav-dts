@@ -512,6 +512,7 @@ mod audio_header;
 mod audio_huff;
 mod aux_data;
 mod bitreader;
+mod bitwriter;
 mod block_code;
 mod cos_mod;
 mod crc16;
@@ -522,6 +523,7 @@ mod d6_block_book;
 mod dmix_coeff;
 mod drc_range;
 mod dsync;
+mod encoder;
 mod filter_bank;
 mod fir_coeff;
 mod header;
@@ -675,8 +677,12 @@ pub use crate::lfe_synth::{
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use crate::optional_info::{decode_optional_info_at, OptionalInfo, MAX_AUX_BYTE_COUNT};
-// Stable: the encoder-side 32-band analysis QMF (adjoint of the
-// §C.2.5 synthesis driver) and LFE decimator (adjoint of §C.2.6).
+// Stable: the Core encoder and its DSP front end (the §C.2.5-inverse
+// analysis QMF and §C.2.6-adjoint LFE decimator).
+pub use crate::bitwriter::BitWriter;
+pub use crate::encoder::{
+    CoreEncoder, EncodeError, EncoderConfig, ENCODER_FRAME_SAMPLES, ENCODER_LOOKAHEAD,
+};
 pub use crate::lfe_analysis::{LfeAnalysis, LFE_ANALYSIS_SYNTHESIS_DELAY, LFE_EQ_HALF};
 pub use crate::qmf_analysis::{
     QmfAnalysis, QMF_ANALYSIS_LOOKAHEAD, QMF_ANALYSIS_SPAN_ROWS, QMF_ANALYSIS_SYNTHESIS_DELAY,

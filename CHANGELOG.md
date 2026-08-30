@@ -8,6 +8,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 — **Core encoder** (`CoreEncoder` / `EncoderConfig` /
+  `BitWriter`): §5.3.1 header + §5.3.2 coding header + §5.4.1 side
+  information + §5.5 audio arrays for normal frames (16 blocks, one
+  subframe, two subsubframes), 1–5 primary channels (Table 5-4
+  layouts) at every Table 5-5 core rate and every fixed Table 5-7
+  rate code, with an optional 64×-decimated LFE channel. Coding
+  tools this round: overload-free §D.1.2 scale factors, §D.2 mid-tread
+  quantization carried as §D.6 block codes (`ABITS 1..=7`) or NFE
+  two's-complement fields (`ABITS ≥ 8`), `TMODE` through the §D.5.2
+  A4 book, and a greedy noise-per-bit allocator with exact bit
+  accounting against the frame's `FSIZE` budget (multi-step lookahead
+  past the non-monotone scale-requantization steps). The chain is
+  zero-delay end to end; measured round trips through this crate's own
+  decoder (stereo multitone, steady state past the 512-sample stream
+  priming): 19 dB at 128 kbit/s, 34 dB at 192, 42 dB at 256, 54 dB at
+  512, 70 dB at 768, 117 dB at 1 536 (`tests/encoder_round_trip.rs`
+  pins the ladder's floor per rate, plus 5.1+LFE, header parse-back,
+  flush-tail padding and silence cases).
 - Round 453 — **output level calibrated to the black-box reference**:
   the decode chain now multiplies the §C.2.5 output `rScale` by
   `OUTPUT_LEVEL_CALIBRATION` (= √2) and the §C.2.6 LFE plane by

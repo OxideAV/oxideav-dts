@@ -416,6 +416,18 @@ pub fn decode_tmode_at(
     Ok((value, bits_consumed))
 }
 
+/// Encoder-side view of the §D.5.2 TMODE codebook (the same
+/// `(symbol, code_length, code)` entries the decoder walks), so the
+/// encoder emits exactly the codes [`decode_tmode_at`] consumes.
+pub(crate) fn tmode_table(codebook: TmodeCodebook) -> &'static [HuffmanEntry] {
+    match codebook {
+        TmodeCodebook::A4 => TABLE_A4,
+        TmodeCodebook::B4 => TABLE_B4,
+        TmodeCodebook::C4 => TABLE_C4,
+        TmodeCodebook::D4 => TABLE_D4,
+    }
+}
+
 pub(crate) fn decode_tmode(br: &mut BitReader<'_>, codebook: TmodeCodebook) -> Result<u8> {
     let (table, name) = match codebook {
         TmodeCodebook::A4 => (TABLE_A4, "A4"),
