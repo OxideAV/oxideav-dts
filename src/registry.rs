@@ -434,6 +434,7 @@ pub fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
             "oxideav-dts encoder: sample format {format:?} not supported"
         )));
     }
+    let bit_rate = config.bit_rate_bps().ok().map(u64::from);
     let encoder = crate::CoreEncoder::new(config)
         .map_err(|e| CoreError::unsupported(format!("oxideav-dts encoder: {e}")))?;
     let mut output = CodecParameters::audio(params.codec_id.clone());
@@ -441,7 +442,7 @@ pub fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
     output.channels = Some(layout.channel_count());
     output.channel_layout = Some(layout);
     output.sample_format = Some(SampleFormat::S32P);
-    output.bit_rate = config.bit_rate_bps().ok().map(u64::from);
+    output.bit_rate = bit_rate;
     Ok(Box::new(DtsEncoderHandle {
         codec_id: params.codec_id.clone(),
         output,

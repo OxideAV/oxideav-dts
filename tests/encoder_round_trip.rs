@@ -294,7 +294,7 @@ fn adpcm_predicts_tonal_bands_and_improves_the_round_trip() {
         .unwrap()
         .with_bit_rate(192_000)
         .unwrap();
-    let with = encode_stream(base, &planes);
+    let with = encode_stream(base.clone(), &planes);
     let without = encode_stream(base.with_adpcm(false), &planes);
 
     let predicted: usize = iter_frames(&with)

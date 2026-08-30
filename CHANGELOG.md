@@ -8,6 +8,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 — **optional tools**: embedded dynamic range
+  (`with_dynamic_range_db` → `DYNF = 1` + the §D.4 8-bit signed-Q2
+  `RANGE` per subframe; the decoder applies it, pinned at 55 dB
+  against the scaled input), joint intensity coding
+  (`with_joint_intensity_start` → `JOINX` for the (L, R) / (SL, SR)
+  pairs, the joint channel stops at the start band and the decoder
+  copies the source's bands above it scaled by linear 7-bit
+  `JOIN_SCALES` snapped to the §D.3 table — bounded below by unity
+  because the linear `JOIN_SHUFF` selectors only reach §D.3 indices
+  64..=128; attenuation would need the unverified `SA129..SE129`
+  books), and a §5.7.1 auxiliary chunk (`with_downmix` → `AUXF = 1`,
+  DWORD-aligned `0x9A1105A0` sync, Table 5-32 downmix type, 9-bit
+  §D.11 coefficient codes with sign bit, byte-aligned `nAUXCRC16`
+  over the chunk body; `parse_aux_data` verifies the CRC and recovers
+  the matrix to within the table grid). The reference decoder
+  reconstructs the joint + aux fixture (`JOINX = [0, 1]` from band 8,
+  1/0 downmix chunk) at 39.7 / 35.8 dB with no diagnostics, and agrees
+  with our decoder on it at ≥ 60 dB.
 - Round 453 — **ADPCM prediction (§5.4.1 `PMODE`/`PVQ`, §C.2.2,
   §D.10.1)**: per band a 4th-order least-squares predictor is fitted
   over the decoder-side reconstructed history, quantized to the

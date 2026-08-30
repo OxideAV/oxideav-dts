@@ -161,8 +161,21 @@ fn huff_code(table: &[(i16, u8, u16)], symbol: i16) -> Option<(u32, u32)> {
         .map(|&(_, len, code)| (u32::from(code), u32::from(len)))
 }
 
+/// A §5.7.1 dynamic-downmix specification: the Table 5-32 output
+/// group and the `out × in` coefficient matrix (out-major, inputs in
+/// the frame's channel order — Table 5-4 primaries then the LFE
+/// channel when present). Coefficients are snapped to the §D.11
+/// table on emission (`0.0` codes as "no contribution").
+#[derive(Debug, Clone, PartialEq)]
+pub struct DownmixSpec {
+    /// Table 5-32 downmix group.
+    pub downmix_type: crate::DownmixType,
+    /// `output_channel_count × input_channel_count` gains, out-major.
+    pub coefficients: Vec<f64>,
+}
+
 /// Encoder configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EncoderConfig {
     /// Core sample rate in Hz (must be a Table 5-5 rate).
     pub sample_rate: u32,
@@ -179,6 +192,23 @@ pub struct EncoderConfig {
     /// Policy for the §D.5.12 difference-coded 6-bit scale factors
     /// (`SHUFF 0..=4`) versus the 7-bit linear field.
     pub huffman_scales: HuffmanScales,
+    /// Embedded dynamic-range coefficient (`DYNF = 1`, §5.4.1 `RANGE`):
+    /// a constant gain in dB the decoder applies after reconstruction,
+    /// coded as the 8-bit signed Q2 value of §D.4 (±31.75 dB in
+    /// 0.25 dB steps). `None` emits `DYNF = 0`.
+    pub dynamic_range_db: Option<f64>,
+    /// Joint intensity coding (`JOINX`, §5.3.2 / §C.2.3): when set,
+    /// the second channel of each (L, R) / (SL, SR) pair carries no
+    /// subbands from this index up and the decoder copies them from
+    /// the first channel of the pair, scaled per band by `JOIN_SCALES`.
+    /// With the interoperable linear `JOIN_SHUFF` the §D.3 factor is
+    /// bounded below by unity (see [`CoreEncoder`] docs), so this is
+    /// an opt-in tool; `None` disables it.
+    pub joint_intensity_start: Option<usize>,
+    /// Auxiliary-data chunk (`AUXF = 1`, §5.7.1) carrying dynamic
+    /// downmix coefficients under a Table 5-32 type, protected by
+    /// `nAUXCRC16`. `None` emits `AUXF = 0`.
+    pub downmix: Option<DownmixSpec>,
     /// Enable §5.4.1 `PMODE` ADPCM prediction (§C.2.2, §D.10.1 book)
     /// on bands where a 4th-order predictor over the reconstructed
     /// history removes ≥ 3 dB of energy. Default on.
@@ -252,6 +282,13 @@ pub enum EncodeError {
     },
     /// Pushed planes have differing lengths.
     PlaneLengthMismatch,
+    /// The downmix coefficient matrix does not match the layout.
+    DownmixShapeMismatch {
+        /// `output_channel_count × input planes` expected.
+        expected: usize,
+        /// Coefficients supplied.
+        got: usize,
+    },
 }
 
 impl core::fmt::Display for EncodeError {
@@ -276,6 +313,9 @@ impl core::fmt::Display for EncodeError {
                 write!(f, "expected {expected} input planes, got {got}")
             }
             Self::PlaneLengthMismatch => write!(f, "input planes differ in length"),
+            Self::DownmixShapeMismatch { expected, got } => {
+                write!(f, "downmix matrix needs {expected} coefficients, got {got}")
+            }
         }
     }
 }
@@ -300,6 +340,9 @@ impl EncoderConfig {
             rate_index: 15,
             filter: FilterBankSelection::PerfectReconstruction,
             huffman_scales: HuffmanScales::Never,
+            dynamic_range_db: None,
+            joint_intensity_start: None,
+            downmix: None,
             adpcm: true,
             sync_word_encoding: SyncWordEncoding::RawBigEndian,
         })
@@ -337,6 +380,28 @@ impl EncoderConfig {
     #[must_use]
     pub fn with_huffman_scales(mut self, policy: HuffmanScales) -> Self {
         self.huffman_scales = policy;
+        self
+    }
+
+    /// Set the embedded dynamic-range gain (`None` = `DYNF = 0`).
+    #[must_use]
+    pub fn with_dynamic_range_db(mut self, db: Option<f64>) -> Self {
+        self.dynamic_range_db = db;
+        self
+    }
+
+    /// Enable joint intensity coding from subband `start` (2..=31) up,
+    /// or disable it with `None`.
+    #[must_use]
+    pub fn with_joint_intensity_start(mut self, start: Option<usize>) -> Self {
+        self.joint_intensity_start = start.map(|k| k.clamp(2, NUM_SUBBAND - 1));
+        self
+    }
+
+    /// Attach a §5.7.1 dynamic-downmix auxiliary chunk to every frame.
+    #[must_use]
+    pub fn with_downmix(mut self, downmix: Option<DownmixSpec>) -> Self {
+        self.downmix = downmix;
         self
     }
 
@@ -466,9 +531,16 @@ impl CoreEncoder {
     /// Build an encoder for `config`.
     pub fn new(config: EncoderConfig) -> Result<Self, EncodeError> {
         let frame_bytes = config.frame_bytes()?;
+        if let Some(d) = &config.downmix {
+            let expect = d.downmix_type.output_channel_count() * config.plane_count();
+            if d.coefficients.len() != expect || expect == 0 {
+                return Err(EncodeError::DownmixShapeMismatch {
+                    expected: expect,
+                    got: d.coefficients.len(),
+                });
+            }
+        }
         Ok(Self {
-            config,
-            frame_bytes,
             qmf: QmfAnalysis::new(config.filter),
             lfe: config
                 .lfe
@@ -476,6 +548,8 @@ impl CoreEncoder {
             buf: vec![Vec::new(); config.plane_count()],
             consumed: 0,
             history: vec![[[0.0; NUM_ADPCM_COEFF]; NUM_SUBBAND]; config.channels],
+            frame_bytes,
+            config,
         })
     }
 
@@ -664,6 +738,11 @@ struct ChannelCoding {
     thuff: u8,
     /// `SEL[ch][ABITS-1]` for `ABITS 1..=10`.
     sel: [u8; 10],
+    /// `JOINX` (0 = none, else source channel + 1).
+    joinx: u8,
+    /// Raw 7-bit `JOIN_SCALES` values (linear `JOIN_SHUFF = 6`; the
+    /// decoder adds 64 before the §D.3 lookup), one per joint band.
+    join_scales: Vec<u8>,
 }
 
 /// Band peaks below this (in the §C.2.5 domain, ≈ −120 dBFS) are
@@ -1257,10 +1336,28 @@ fn encode_frame_bits(
     };
     let dsync_bits = 16usize;
     let budget_total = frame_bytes * 8;
+    // Optional information: the aux chunk (AUXCT + byte/DWORD padding
+    // + the chunk) and the per-subframe RANGE coefficient.
+    let aux_chunk: Option<Vec<u8>> = config
+        .downmix
+        .as_ref()
+        .map(|d| build_aux_chunk(d, config.plane_count()));
+    let aux_bits = aux_chunk.as_ref().map_or(0, |c| 6 + 7 + 24 + 8 * c.len());
+    let range_bits = if config.dynamic_range_db.is_some() {
+        8
+    } else {
+        0
+    };
     // Worst-case side info: SSC/PSC, one PMODE bit and a 5-bit ABITS
     // field for all 32 bands of every channel.
     let side_worst = 5 + (1 + 5) * NUM_SUBBAND * channels;
-    let fixed = header_bits + coding_header_bits + side_worst + lfe_bits + dsync_bits;
+    let fixed = header_bits
+        + coding_header_bits
+        + side_worst
+        + lfe_bits
+        + dsync_bits
+        + aux_bits
+        + range_bits;
     let budget = budget_total.saturating_sub(fixed);
 
     // --- Pass 1: allocation on worst-case widths ---------------------
@@ -1284,6 +1381,17 @@ fn encode_frame_bits(
         })
         .collect();
     let mut noise: Vec<[f64; NUM_SUBBAND]> = power.clone();
+    // Joint channels are not allocated above the joint start band.
+    let joint_start = config.joint_intensity_start.unwrap_or(NUM_SUBBAND);
+    let mut alloc_peak = band_peak.clone();
+    if config.joint_intensity_start.is_some() {
+        for (ch, _) in joint_pairs(channels) {
+            for p in alloc_peak[ch][joint_start..].iter_mut() {
+                *p = 0.0;
+            }
+        }
+    }
+    let band_peak = alloc_peak;
     let _ = allocate(&mut plan, &mut noise, &ladder, &band_peak, budget);
 
     // --- Structure + entropy selection (exact costs) -----------------
@@ -1293,11 +1401,23 @@ fn encode_frame_bits(
     // band), quantize on the chosen scale grid, pick the cheapest
     // SHUFF / SEL / BHUFF / THUFF, and return the exact bits used.
     let mut vq_cap = vec![NUM_SUBBAND; channels];
+    // Joint intensity: (joint channel, source channel) pairs and the
+    // start band; joint channels carry nothing from there up.
+    let joint: Vec<Option<usize>> = {
+        let mut j = vec![None; channels];
+        if config.joint_intensity_start.is_some() {
+            for (ch, src) in joint_pairs(channels) {
+                j[ch] = Some(src);
+            }
+        }
+        j
+    };
     let select_all = |plan: &mut Vec<[BandPlan; NUM_SUBBAND]>,
                       vq_cap: &[usize]|
      -> (Vec<ChannelCoding>, usize) {
-        let mut coding = Vec::with_capacity(channels);
-        let mut used = header_bits + coding_header_bits + lfe_bits + dsync_bits + 5;
+        let mut coding: Vec<ChannelCoding> = Vec::with_capacity(channels);
+        let mut used =
+            header_bits + coding_header_bits + lfe_bits + dsync_bits + 5 + aux_bits + range_bits;
         for ch in 0..channels {
             let n_vqsub = plan[ch]
                 .iter()
@@ -1307,7 +1427,12 @@ fn encode_frame_bits(
                 .iter()
                 .rposition(|&p| p > SILENCE_FLOOR)
                 .map_or(0, |n| n + 1);
-            let n_subs = n_vqsub.max(last_live).min(vq_cap[ch]).max(n_vqsub).max(2);
+            let cap = if joint[ch].is_some() {
+                vq_cap[ch].min(joint_start)
+            } else {
+                vq_cap[ch]
+            };
+            let n_subs = n_vqsub.max(last_live).min(cap).max(n_vqsub).max(2);
             // VQ bands: vector + gain on the 7-bit grid first; the
             // SHUFF choice below may move them to the 6-bit grid.
             // Scale grid + SHUFF.
@@ -1386,7 +1511,25 @@ fn encode_frame_bits(
                     .filter(|b| b.abits > 0 && b.pvq.is_some())
                     .count();
             let vq_bits = 10 * (n_subs - n_vqsub);
-            used += pmode_bits + abits_bits + tmode_bits + scale_bits + vq_bits + audio_bits;
+            // Joint bands: JOIN_SHUFF (3) + one 7-bit factor per band
+            // of the source above this channel's nSUBS.
+            let (joinx, join_scales, join_bits) = match joint[ch] {
+                Some(src) if n_subs < coding[src].n_subs => {
+                    let scales: Vec<u8> = (n_subs..coding[src].n_subs)
+                        .map(|n| join_scale_code(power[ch][n], power[src][n]))
+                        .collect();
+                    let bits = 3 + 7 * scales.len();
+                    (src as u8 + 1, scales, bits)
+                }
+                _ => (0, Vec::new(), 0),
+            };
+            used += pmode_bits
+                + abits_bits
+                + tmode_bits
+                + scale_bits
+                + vq_bits
+                + audio_bits
+                + join_bits;
             coding.push(ChannelCoding {
                 n_subs,
                 n_vqsub,
@@ -1394,6 +1537,8 @@ fn encode_frame_bits(
                 shuff,
                 thuff,
                 sel,
+                joinx,
+                join_scales,
             });
         }
         (coding, used)
@@ -1462,8 +1607,8 @@ fn encode_frame_bits(
     for c in &coding {
         w.push(c.n_vqsub as u32 - 1, 5); // VQSUB
     }
-    for _ in 0..channels {
-        w.push(0, 3); // JOINX = 0
+    for c in &coding {
+        w.push(u32::from(c.joinx), 3); // JOINX
     }
     for c in &coding {
         w.push(u32::from(c.thuff), 2);
@@ -1567,7 +1712,21 @@ fn encode_frame_bits(
             }
         }
     }
-    // Tail: JOINX = 0, DYNF = 0, CPF = 0 -> nothing.
+    // Tail: JOIN_SHUFF (all joint channels), JOIN_SCALES, RANGE.
+    for c in &coding {
+        if c.joinx > 0 {
+            w.push(6, 3); // JOIN_SHUFF = 6 (7-bit linear)
+        }
+    }
+    for c in &coding {
+        for &raw in &c.join_scales {
+            w.push(u32::from(raw), 7);
+        }
+    }
+    if let Some(db) = config.dynamic_range_db {
+        w.push(u32::from(range_code(db)), 8);
+    }
+    // CPF = 0 -> no SICRC.
 
     // §5.5 audio data: HFREQ VQ indices, LFE, subsubframes.
     for (ch, c) in coding.iter().enumerate() {
@@ -1587,6 +1746,21 @@ fn encode_frame_bits(
     }
     // DSYNC at end of the (single) subframe.
     w.push(0xFFFF, 16);
+
+    // §5.6 optional information: AUXCT, then the DWORD-aligned §5.7.1
+    // chunk (the zero padding up to the boundary counts as AUXD).
+    if let Some(chunk) = &aux_chunk {
+        let after_count = w.bit_len() + 6;
+        let aligned = after_count.div_ceil(32) * 32;
+        let pad_bytes = (aligned - after_count) / 8;
+        w.push((pad_bytes + chunk.len()) as u32, 6);
+        for _ in 0..(aligned - after_count) {
+            w.push(0, 1);
+        }
+        for &b in chunk {
+            w.push(u32::from(b), 8);
+        }
+    }
 
     debug_assert!(
         w.bit_len() <= budget_total,
@@ -1656,6 +1830,88 @@ fn emit_band_subsubframe(w: &mut BitWriter, band: &BandPlan, coding: &ChannelCod
     }
 }
 
+/// Joint-intensity `(joint, source)` channel pairs for a Table 5-4
+/// layout: `(R, L)` and `(SR, SL)` where present.
+fn joint_pairs(channels: usize) -> Vec<(usize, usize)> {
+    match channels {
+        2 => vec![(1, 0)],         // L R
+        3 => vec![(2, 1)],         // C L R
+        4 => vec![(1, 0), (3, 2)], // L R SL SR
+        5 => vec![(2, 1), (4, 3)], // C L R SL SR
+        _ => Vec::new(),
+    }
+}
+
+/// Raw 7-bit linear `JOIN_SCALES` value for a joint band: the §D.3
+/// index nearest `sqrt(E_joint / E_source)` minus the decoder's +64
+/// bias, bounded to the indices the linear selector can reach
+/// (64..=128, i.e. factors ≥ 1.0).
+fn join_scale_code(e_joint: f64, e_source: f64) -> u8 {
+    if e_source <= 0.0 {
+        return 0;
+    }
+    let ratio = (e_joint / e_source).sqrt();
+    let mut best = (64usize, f64::INFINITY);
+    for idx in 64..crate::JOIN_SCALE_LEN {
+        let d = (crate::JOIN_SCALE_FACTOR[idx].ln() - ratio.max(1e-12).ln()).abs();
+        if d < best.1 {
+            best = (idx, d);
+        }
+    }
+    (best.0 - 64) as u8
+}
+
+/// §5.4.1 `RANGE` code for a gain in dB: 8-bit signed Q2 (§D.4).
+fn range_code(db: f64) -> u8 {
+    ((db * 4.0).round().clamp(-128.0, 127.0) as i8) as u8
+}
+
+/// §D.11 downmix code for a gain: sign bit + (table index + 1); `0`
+/// for a zero coefficient.
+fn dmix_code(gain: f64) -> u16 {
+    let mag = gain.abs();
+    if mag < f64::from(crate::DMIX_TABLE[0]) / 65_536.0 {
+        return 0;
+    }
+    let mut best = (0usize, f64::INFINITY);
+    for (idx, &v) in crate::DMIX_TABLE.iter().enumerate() {
+        let d = (f64::from(v) / 32_768.0 - mag).abs();
+        if d < best.1 {
+            best = (idx, d);
+        }
+    }
+    let sign = if gain >= 0.0 { 0x100 } else { 0 };
+    sign | (best.0 as u16 + 1)
+}
+
+/// Build the §5.7.1 auxiliary-data chunk (DWORD-aligned sync, no time
+/// stamp, dynamic downmix codes, byte-aligned `nAUXCRC16` over the
+/// bytes between the sync and the CRC).
+fn build_aux_chunk(spec: &DownmixSpec, input_channels: usize) -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.push(crate::AUX_SYNC_WORD, 32);
+    w.push(0, 1); // bAUXTimeStampFlag
+    w.push(1, 1); // bAUXDynamCoeffFlag
+    w.push(u32::from(spec.downmix_type.code()), 3);
+    let n_out = spec.downmix_type.output_channel_count();
+    for out in 0..n_out {
+        for inp in 0..input_channels {
+            w.push(
+                u32::from(dmix_code(spec.coefficients[out * input_channels + inp])),
+                9,
+            );
+        }
+    }
+    let aligned = w.bit_len().div_ceil(8) * 8;
+    for _ in w.bit_len()..aligned {
+        w.push(0, 1);
+    }
+    let mut bytes = w.into_bytes();
+    let crc = crate::dts_crc16(&bytes[4..]);
+    bytes.extend_from_slice(&crc.to_be_bytes());
+    bytes
+}
+
 /// Emit the §5.5 LFE phase: 8-bit two's-complement decimated samples
 /// plus the 7-bit-RMS scale index (8 bits on the wire).
 fn emit_lfe(w: &mut BitWriter, decimated: &[f64]) {
@@ -1708,9 +1964,9 @@ fn frame_header(config: &EncoderConfig, frame_bytes: usize) -> DtsFrameHeader {
         sfreq_index: sfreq_code(config.sample_rate).expect("validated at construction"),
         rate_index: config.rate_index,
         downmix: false,
-        dynamic_range: false,
+        dynamic_range: config.dynamic_range_db.is_some(),
         time_stamp: false,
-        aux_data: false,
+        aux_data: config.downmix.is_some(),
         hdcd: false,
         ext_descr: 0,
         ext_coding: false,

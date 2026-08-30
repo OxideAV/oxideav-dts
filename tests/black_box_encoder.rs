@@ -50,6 +50,8 @@ const MONO_TRANSIENT: &[u8] = include_bytes!("fixtures/enc_mono_transient_768k.d
 const MONO_TRANSIENT_REF: &[u8] = include_bytes!("fixtures/enc_mono_transient_768k_ffmpeg_ref.s32");
 const STEREO_128K_VQ: &[u8] = include_bytes!("fixtures/enc_stereo_128k_hfvq.dts");
 const STEREO_128K_VQ_REF: &[u8] = include_bytes!("fixtures/enc_stereo_128k_hfvq_ffmpeg_ref.s32");
+const STEREO_JOINT: &[u8] = include_bytes!("fixtures/enc_stereo_joint_aux_192k.dts");
+const STEREO_JOINT_REF: &[u8] = include_bytes!("fixtures/enc_stereo_joint_aux_192k_ffmpeg_ref.s32");
 
 /// The deterministic multitone every fixture was encoded from
 /// (identical to `encoder_round_trip.rs`).
@@ -71,6 +73,9 @@ fn multitone(n: usize, phase: f64) -> Vec<f64> {
 fn signal(name: &str) -> Vec<Vec<f64>> {
     match name {
         "stereo" => vec![multitone(SAMPLES, 0.0), multitone(SAMPLES, 0.7)],
+        // R is L phase-shifted: identical band energies, so the joint
+        // channel's unity-bounded linear factors are exact.
+        "stereo_joint" => vec![multitone(SAMPLES, 0.0), multitone(SAMPLES, 0.25)],
         "five_one" => {
             let mut p: Vec<Vec<f64>> = (0..5)
                 .map(|ch| multitone(SAMPLES, ch as f64 * 0.4))
@@ -279,6 +284,26 @@ fn frame_structure(frame: &[u8]) -> (Vec<(usize, usize)>, Vec<Vec<u8>>) {
     )
 }
 
+/// Joint intensity (`JOINX = [0, 1]` from band 8, unity `JOIN_SCALES`
+/// since the phase-shifted right channel has the same band energies)
+/// plus an auxiliary downmix chunk: the reference reconstructs both
+/// channels and ignores the aux chunk without complaint.
+#[test]
+fn reference_decoder_reconstructs_the_joint_intensity_stream() {
+    let input = signal("stereo_joint");
+    let ref_j = reference(STEREO_JOINT_REF, 2);
+    let hdr = parse_frame_header(STEREO_JOINT).unwrap();
+    assert!(hdr.aux_data);
+    for ch in 0..2 {
+        let (snr, gain) = snr_gain(&input[ch], &ref_j[ch]);
+        assert!(
+            snr > 25.0,
+            "joint ch {ch}: reference SNR vs input {snr:.1} dB"
+        );
+        assert!((gain - 1.0).abs() < 2e-2, "joint ch {ch}: gain {gain}");
+    }
+}
+
 #[test]
 fn our_decoder_agrees_with_the_reference_on_our_streams() {
     for (name, stream, refb, channels, lfe) in [
@@ -326,7 +351,7 @@ fn regenerate_fixture_streams_when_requested() {
         return;
     };
     use oxideav_dts::{CoreEncoder, EncoderConfig};
-    let jobs: [(&str, EncoderConfig, Vec<Vec<f64>>); 5] = [
+    let jobs: [(&str, EncoderConfig, Vec<Vec<f64>>); 6] = [
         (
             "enc_stereo_768k",
             EncoderConfig::new(48_000, 2).unwrap(),
@@ -357,6 +382,19 @@ fn regenerate_fixture_streams_when_requested() {
                 .with_bit_rate(128_000)
                 .unwrap(),
             signal("stereo_hfvq"),
+        ),
+        (
+            "enc_stereo_joint_aux_192k",
+            EncoderConfig::new(48_000, 2)
+                .unwrap()
+                .with_bit_rate(192_000)
+                .unwrap()
+                .with_joint_intensity_start(Some(8))
+                .with_downmix(Some(oxideav_dts::DownmixSpec {
+                    downmix_type: oxideav_dts::DownmixType::OneZero,
+                    coefficients: vec![0.7, 0.7],
+                })),
+            signal("stereo_joint"),
         ),
     ];
     for (name, config, planes) in jobs {
