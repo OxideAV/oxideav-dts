@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/OxideAV/oxideav-dts/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-dts/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-dts.svg)](https://crates.io/crates/oxideav-dts) [![docs.rs](https://docs.rs/oxideav-dts/badge.svg)](https://docs.rs/oxideav-dts) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A pure-Rust DTS (DTS Coherent Acoustics) decoder for the
-[oxideav](https://github.com/OxideAV/oxideav) framework, built clean-room
-from a locally-staged copy of ETSI TS 102 114 V1.3.1.
+A pure-Rust DTS (DTS Coherent Acoustics) decoder **and Core encoder**
+for the [oxideav](https://github.com/OxideAV/oxideav) framework, built
+clean-room from a locally-staged copy of ETSI TS 102 114 V1.3.1.
 
 ## Status
 
@@ -368,6 +368,10 @@ gone.
 
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the
   current Core-profile effort.
+- The `SA129..SE129` scale-factor Huffman books (`SHUFF 0..=4`) are
+  a docs gap — see "Encoder gaps" above; the decoder's 129-level
+  routing is the structural interpretation, unverified against the
+  reference.
 - `DtsFrameHeader::verify_header_crc` returns `None` **by design**,
   not because of a docs gap: the Annex B CRC algorithm is documented
   and implemented (`dts_crc16`), but §5.3.1 states "The CRC value
@@ -376,6 +380,102 @@ gone.
   `HCRC` coverage span. The raw 16-bit field stays surfaced for
   pass-through callers; the genuinely testable check words
   (`nAUXCRC16`, `nRev2AUXCRC16`) *are* verified.
+
+## Encoder
+
+Round 453 adds a **DTS Core encoder** (`CoreEncoder` / `EncoderConfig`,
+plus the registry `Encoder` via `make_encoder` — the dual-API
+convention). It writes §5.3.1 frame headers, §5.3.2 coding headers,
+§5.4.1 side information and §5.5 audio arrays for normal frames of
+512 samples (16 blocks, one subframe, two subsubframes), 1–5 primary
+channels in the Table 5-4 arrangements (A, L R, C L R, L R SL SR,
+C L R SL SR), every Table 5-5 core rate, every fixed Table 5-7 rate
+code (32 kbit/s – 1 536 kbit/s), an optional 64×-decimated LFE
+channel, and all four on-wire word formats (raw BE / LE, 14-bit BE /
+LE — the 14-bit forms keep frames on whole 28-bit container pairs).
+
+### Front end
+
+- **32-band analysis QMF** (`QmfAnalysis`): the exact inverse of this
+  crate's §C.2.5 synthesis driver — FIR half time-reversed (the §D.8
+  prototypes are paraunitary there up to one scalar, calibrated once
+  against `QmfSynthesis`), the §C.2.5 cosine-modulation matrix
+  inverted exactly (its Block-3/4 scalings are not orthogonal). The
+  pair is **zero-delay** and reconstructs noise at **142 dB** SNR with
+  the `FILTS = 1` prototype.
+- **LFE decimator** (`LfeAnalysis`): the adjoint of the §C.2.6
+  interpolator plus a 25-tap least-squares equalizer in the decimated
+  domain, because the §D.8 LFE prototype itself droops (≈ −2.5 dB at
+  80 Hz, −5.7 dB at 120 Hz); also zero-delay.
+
+### Coding tools
+
+| Tool | Spec | Encoder decision |
+|------|------|------------------|
+| Scale factors | §5.4.1 `SCALES`, §D.1.2 | smallest 7-bit RMS level whose quantizer span covers the band peak (overload-free); `SHUFF = 6` |
+| Quantization | §D.2.1 steps, §D.5 / §D.6 / NFE | mid-tread indices; per `(channel, ABITS)` family the cheapest `SEL` by exact bit count (Huffman book + unity `ADJ`, block code, or two's complement) |
+| `ABITS` / `TMODE` | §D.5.6, §D.5.2 | cheapest `BHUFF` (12-level books or linear 4/5-bit) and `THUFF` |
+| Bit allocation | Table 5-7 `RATE` → `FSIZE` | greedy noise-reduction-per-bit with exact accounting, in two passes (worst-case widths, then re-spending the entropy saving with rollback) |
+| Transients | `TMODE`, two `SCALES` | flagged when the two subsubframe halves differ by > 12 dB in peak |
+| ADPCM | `PMODE` / `PVQ`, §C.2.2, §D.10.1 | 4th-order LS predictor over the decoder-side reconstructed history, snapped to the staged book (24 nearest, exact residual-energy pick), used when it removes ≥ 3 dB; closed-loop residual quantization; history rolled across frames under `HFLAG = 1` |
+| High-frequency VQ | `VQSUB`, §D.10.2 | `nSUBS` trimmed to the last non-silent band, `nVQSUB` to the last quantized one, the bands between coded as the best-correlated book vector with a §D.1 gain |
+| LFE | §5.5 | 8-bit samples + 7-bit-RMS scale, 64× decimation |
+| Dynamic range | `DYNF` / `RANGE`, §D.4 | opt-in constant gain, 8-bit signed Q2 |
+| Joint intensity | `JOINX` / `JOIN_SCALES`, §C.2.3 | opt-in per (L, R) / (SL, SR) pair; linear `JOIN_SHUFF` (factors ≥ 1.0 only — see gaps) |
+| Aux downmix | §5.7.1, §D.11, Annex B | opt-in DWORD-aligned chunk with Table 5-32 type, 9-bit coefficient codes and `nAUXCRC16` |
+
+`CPF` is emitted as 0 per §5.3.1 ("should always be set to 0"), so no
+`HCRC` / `AHCRC` / `SICRC` / `OCRC` words are written.
+
+### Measured
+
+Steady state (past the 512-sample decoder priming), 48 kHz stereo,
+through this crate's own decoder, in dB SNR:
+
+| kbit/s | 96 | 128 | 192 | 256 | 384 | 512 | 768 | 1024 | 1536 |
+|-------:|---:|----:|----:|----:|----:|----:|----:|-----:|-----:|
+| multitone (five tones, −14 dBFS peak) | 12 | 22 | 38 | 45 | 51 | 62 | 75 | 87 | 117 |
+| white noise (−10 dBFS) | 1 | 2 | 4 | 6 | 16 | 24 | 40 | 55 | 87 |
+
+Black-box, the opaque reference decoder (`ffmpeg`) decodes every
+committed encoder fixture **without diagnostics** and reconstructs
+the original input at unity gain (`tests/black_box_encoder.rs`):
+
+| Fixture | Reference SNR vs input | Ours vs reference |
+|---------|-----------------------:|------------------:|
+| stereo 768k multitone | 67.9 / 67.7 dB | ≥ 60 dB |
+| stereo 192k multitone (ADPCM) | 37.9 / 34.3 dB | ≥ 60 dB |
+| 5.1 + LFE 768k | 45–48 dB primaries, 24.8 dB LFE | ≥ 60 dB (LFE 121 dB) |
+| mono burst 768k (`TMODE`) | 71.9 dB, no pre-echo | ≥ 60 dB |
+| stereo 128k with a −40 dBFS 20 kHz tone (HF VQ) | 21.1 / 20.6 dB | ≥ 60 dB |
+| stereo 192k joint intensity + aux downmix | 39.7 / 35.8 dB | ≥ 60 dB |
+
+The chain is zero-delay: frame `k` decodes to input samples
+`512k .. 512k+512`. The decoder's own output level was calibrated
+this round to the reference (`OUTPUT_LEVEL_CALIBRATION` = √2 on the
+§C.2.5 path, `LFE_OUTPUT_CALIBRATION` = 256 on the LFE plane), so the
+round trip is unity through both decoders.
+
+### Encoder gaps
+
+- **`SA129..SE129` scale-factor books (Table 5-24, `SHUFF 0..=4`)**:
+  the spec names them but prints no table under those names. This
+  crate routes them to the §D.5.12 129-level A129..E129 audio books
+  (structurally consistent: ±64 differences over the 64-entry §D.1.1
+  grid from a zeroed accumulator, and the `JOIN_SCALES` `+64` bias
+  into the 129-entry §D.3 table), but the reference decoder rejects
+  streams coded that way — so the real books are distinct, unprinted
+  tables. The encoder therefore defaults to linear 7-bit scales
+  (`HuffmanScales::Never`); `WhenCheaper` / `LowRatesOnly` round-trip
+  only through this crate's decoder. The same gap bounds joint
+  intensity to factors ≥ 1.0 (linear `JOIN_SHUFF` reaches §D.3
+  indices 64..=128 only).
+- **No perceptual model in the spec**: TS 102 114 specifies the
+  decoder; the allocator is noise-power-greedy (maximum SNR per bit),
+  not masking-driven.
+- Termination frames (`FTYPE = 0`, `SHORT`, partial subsubframes) and
+  multi-subframe / four-subsubframe framings are not emitted (the
+  decoder handles them).
 
 ## Usage
 
@@ -403,6 +503,27 @@ if let Ok(hdr) = parse_frame_header(bytes) {
     }
 }
 ```
+
+Encoding, direct API (normalized ±1.0 planar input, primaries in
+Table 5-4 order, LFE plane last):
+
+```rust
+use oxideav_dts::{CoreEncoder, EncoderConfig};
+
+let config = EncoderConfig::new(48_000, 2)
+    .unwrap()
+    .with_bit_rate(384_000)
+    .unwrap();
+let mut enc = CoreEncoder::new(config).unwrap();
+let left = vec![0.0_f64; 4096];
+let right = vec![0.0_f64; 4096];
+let mut frames = enc.push(&[&left, &right]).unwrap(); // whole 512-sample frames
+frames.extend(enc.flush());                            // zero-padded tail
+```
+
+The framework half is `make_encoder(&CodecParameters)` (any planar or
+interleaved S16 / S32 / F32 / F64 input, framework layouts mono …
+5.1), installed by `register` alongside the decoder.
 
 The DSP primitives are public crate-root re-exports
 (`decode_block_code`, `QmfSynthesis`, `fir_step`, `dequant_subsubframe`,
