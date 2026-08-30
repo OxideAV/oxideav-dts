@@ -529,10 +529,12 @@ mod inverse_adpcm;
 mod iter;
 mod join_scale;
 mod joint_subband;
+mod lfe_analysis;
 mod lfe_fir_coeff;
 mod lfe_interp;
 mod lfe_synth;
 mod optional_info;
+mod qmf_analysis;
 mod qmf_assemble;
 mod qmf_multichannel;
 mod qmf_synth;
@@ -672,6 +674,12 @@ pub use crate::lfe_synth::{
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use crate::optional_info::{decode_optional_info_at, OptionalInfo, MAX_AUX_BYTE_COUNT};
+// Stable: the encoder-side 32-band analysis QMF (adjoint of the
+// §C.2.5 synthesis driver) and LFE decimator (adjoint of §C.2.6).
+pub use crate::lfe_analysis::{LfeAnalysis, LFE_ANALYSIS_SYNTHESIS_DELAY, LFE_EQ_HALF};
+pub use crate::qmf_analysis::{
+    QmfAnalysis, QMF_ANALYSIS_LOOKAHEAD, QMF_ANALYSIS_SPAN_ROWS, QMF_ANALYSIS_SYNTHESIS_DELAY,
+};
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use crate::qmf_assemble::{

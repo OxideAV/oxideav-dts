@@ -8,6 +8,27 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 (2026-08-30) — **encoder front end: 32-band analysis QMF +
+  LFE decimator**. `QmfAnalysis` mirrors the §C.2.5
+  `QMFInterpolation()` synthesis driver as its exact inverse: the FIR
+  half is time-reversed (the §D.8 prototypes are paraunitary there up
+  to one scalar, calibrated once at construction against this crate's
+  own `QmfSynthesis`) and the §C.2.5 cosine-modulation matrix — which
+  carries the non-orthogonal `±0.25/(2·cos|sin)` Block-3/Block-4
+  scalings — is inverted exactly. The analysis→synthesis pair is
+  **zero-delay** (the 512-sample analysis lookahead cancels the
+  synthesis group delay) and reconstructs noise at **142 dB SNR** with
+  the `FILTS=1` Perfect prototype (> 40 dB with the Non-Perfect one),
+  pinned by tests together with the delay and unit gain. `LfeAnalysis`
+  is the adjoint of the §C.2.6 `InterpolationFIR()` driver (the same
+  §D.8 LFE prototype as anti-alias filter, unit-DC normalized) plus a
+  least-squares in-band equalizer in the decimated domain: the §D.8
+  LFE prototype itself droops (≈ −2.5 dB at 80 Hz, −5.7 dB at 120 Hz
+  at 48 kHz — measured from the staged `tables/raCoeffLfe*.csv`), so
+  a plain adjoint round trip would apply that twice; the equalizer
+  (25 taps, linear-phase, Wiener-capped at 16 dB) restores a flat
+  in-band decimate→interpolate chain, also zero-delay.
+
 - Round 446 (2026-08-17) — **full §D.10 index-space sweeps**: every
   one of the 1024 §D.10.2 `HFreqVQ` vectors and the 4096 §D.10.1
   `ADPCMCoeffVQ` vectors now travels through the *real bitstream
