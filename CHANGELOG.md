@@ -8,6 +8,23 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 — **registry `Encoder` + wire-format variants** (the
+  framework half of the dual API): `make_encoder` /
+  `DtsEncoderHandle` accept any Table 5-5 core rate, the mono / stereo
+  / 2.1 / 3.0 / quad / 5.0 / 5.1 framework layouts (mapped onto the
+  Table 5-4 arrangements, `LowFrequency` carried as the §5.5 LFE
+  channel), planar or interleaved S16 / S32 / F32 / F64 input and a
+  `bit_rate` rounded up to the next Table 5-7 code; packets are one
+  frame each, `pts`/`dts`/`duration` in samples, keyframes throughout.
+  `register` now installs both factories (`with_decode`,
+  `with_encode`). `EncoderConfig::with_sync_word_encoding` emits raw
+  big-/little-endian or 14-bit big-/little-endian container frames
+  (14-bit frames rounded to whole 28-bit container pairs so the
+  concatenated stream stays sync-aligned for `iter_frames_14bit`).
+  Found and fixed on the way: the registry **decoder** cached raw-LE
+  packets unswapped, so any raw-LE payload decoded as garbage past
+  the header (`VQSUB` reserved) — the frame is now word-swapped into
+  the raw-BE domain before the §5.3.2/§5.4/§5.5 walk.
 - Round 453 — **encoder entropy coding + two-pass allocation**: per
   `(channel, ABITS)` family the cheapest Table 5-26 `SEL` is chosen
   by exact bit count (a §D.5 Huffman book with the Table 5-27 `ADJ`

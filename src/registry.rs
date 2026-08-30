@@ -10,9 +10,9 @@
 //! type — none of which depend on `oxideav-core`.
 
 use oxideav_core::{
-    AudioFrame, CodecCapabilities, CodecId, CodecInfo, CodecParameters, CodecRegistry, CodecTag,
-    Confidence, Decoder, Error as CoreError, Frame, Packet, ProbeContext, Result as CoreResult,
-    RuntimeContext,
+    AudioFrame, ChannelLayout, ChannelPosition, CodecCapabilities, CodecId, CodecInfo,
+    CodecParameters, CodecRegistry, CodecTag, Confidence, Decoder, Encoder, Error as CoreError,
+    Frame, Packet, ProbeContext, Result as CoreResult, RuntimeContext, SampleFormat, TimeBase,
 };
 
 use crate::header::{detect_sync, parse_frame_header, parse_frame_header_14bit};
@@ -129,11 +129,15 @@ impl From<DtsError> for CoreError {
 /// frame-header failures surface (so demuxers can route packets
 /// without instantiating a decoder).
 pub fn register_codecs(reg: &mut CodecRegistry) {
-    let caps = CodecCapabilities::audio("dts_sw").with_lossy(true);
+    let caps = CodecCapabilities::audio("dts_sw")
+        .with_lossy(true)
+        .with_decode()
+        .with_encode();
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_STR))
             .capabilities(caps)
             .decoder(make_decoder)
+            .encoder(make_encoder)
             .probe(probe_dts_tag)
             .tags([
                 // `dts` — generic FourCC seen on some QuickTime sample
@@ -231,12 +235,27 @@ impl Decoder for DtsDecoderHandle {
         let bytes = packet.data.as_slice();
         let sync = detect_sync(bytes).map_err(CoreError::from)?;
         let hdr = match sync {
-            SyncWordEncoding::RawBigEndian | SyncWordEncoding::RawLittleEndian => {
+            SyncWordEncoding::RawBigEndian => {
                 let hdr = parse_frame_header(bytes).map_err(CoreError::from)?;
-                // Raw 16-bit frames are already in the domain
+                // Raw-BE frames are already in the domain
                 // `decode_core_frame` operates on; keep the bytes so
                 // receive_frame can reconstruct PCM.
                 self.last_frame_bytes = Some(bytes.to_vec());
+                hdr
+            }
+            SyncWordEncoding::RawLittleEndian => {
+                // Raw-LE frames are the same bit stream with every
+                // 16-bit word byte-swapped; the header parser
+                // normalises its own window, but the §5.3.2/§5.4/§5.5
+                // walk reads the whole frame, so swap the payload into
+                // the raw-BE domain before caching it (round 453 —
+                // found by the encoder's raw-LE output variant).
+                let mut swapped = bytes.to_vec();
+                for pair in swapped.chunks_exact_mut(2) {
+                    pair.swap(0, 1);
+                }
+                let hdr = parse_frame_header(&swapped).map_err(CoreError::from)?;
+                self.last_frame_bytes = Some(swapped);
                 hdr
             }
             SyncWordEncoding::FourteenBitBigEndian | SyncWordEncoding::FourteenBitLittleEndian => {
@@ -358,6 +377,258 @@ impl Decoder for DtsDecoderHandle {
         // tail must not bleed across the discontinuity.
         self.stream = None;
         self.eof = false;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------
+// Encoder
+// ---------------------------------------------------------------
+
+/// Encoder factory for the DTS Core profile (the framework half of
+/// the dual API; [`crate::CoreEncoder`] is the direct one).
+///
+/// Reads from `params`: `sample_rate` (a Table 5-5 core rate),
+/// `channel_layout` / `channels` (mono, stereo, 2.1, 3.0, quad, 5.0,
+/// 5.1 — mapped onto the Table 5-4 layouts, LFE carried as the §5.5
+/// LFE channel), `bit_rate` (rounded up to the next Table 5-7 code;
+/// 768 kbit/s when unset) and `sample_format` (any planar or
+/// interleaved S16 / S32 / F32 / F64; S32P when unset). Frames are
+/// 512 samples per channel; [`Encoder::receive_packet`] yields one
+/// packet per frame, `pts` in samples, keyframes throughout.
+pub fn make_encoder(params: &CodecParameters) -> CoreResult<Box<dyn Encoder>> {
+    let sample_rate = params
+        .sample_rate
+        .ok_or_else(|| CoreError::unsupported("oxideav-dts encoder: sample_rate is required"))?;
+    let layout = params
+        .resolved_layout()
+        .ok_or_else(|| CoreError::unsupported("oxideav-dts encoder: channel layout is required"))?;
+    let (order, lfe) = dts_channel_order(layout).ok_or_else(|| {
+        CoreError::unsupported(format!(
+            "oxideav-dts encoder: channel layout {layout:?} has no Table 5-4 Core arrangement"
+        ))
+    })?;
+    let primaries = order.len() - usize::from(lfe);
+    let mut config = crate::EncoderConfig::new(sample_rate, primaries)
+        .map_err(|e| CoreError::unsupported(format!("oxideav-dts encoder: {e}")))?
+        .with_lfe(lfe);
+    if let Some(bps) = params.bit_rate {
+        let bps = u32::try_from(bps).unwrap_or(u32::MAX);
+        config = config
+            .with_bit_rate(bps)
+            .map_err(|e| CoreError::unsupported(format!("oxideav-dts encoder: {e}")))?;
+    }
+    let format = params.sample_format.unwrap_or(SampleFormat::S32P);
+    if !matches!(
+        format,
+        SampleFormat::S16
+            | SampleFormat::S16P
+            | SampleFormat::S32
+            | SampleFormat::S32P
+            | SampleFormat::F32
+            | SampleFormat::F32P
+            | SampleFormat::F64
+            | SampleFormat::F64P
+    ) {
+        return Err(CoreError::unsupported(format!(
+            "oxideav-dts encoder: sample format {format:?} not supported"
+        )));
+    }
+    let encoder = crate::CoreEncoder::new(config)
+        .map_err(|e| CoreError::unsupported(format!("oxideav-dts encoder: {e}")))?;
+    let mut output = CodecParameters::audio(params.codec_id.clone());
+    output.sample_rate = Some(sample_rate);
+    output.channels = Some(layout.channel_count());
+    output.channel_layout = Some(layout);
+    output.sample_format = Some(SampleFormat::S32P);
+    output.bit_rate = config.bit_rate_bps().ok().map(u64::from);
+    Ok(Box::new(DtsEncoderHandle {
+        codec_id: params.codec_id.clone(),
+        output,
+        encoder,
+        order,
+        format,
+        channels: layout.channel_count() as usize,
+        sample_rate,
+        queue: std::collections::VecDeque::new(),
+        next_pts: 0,
+        eof: false,
+    }))
+}
+
+/// For a framework layout, the input-plane index feeding each DTS
+/// plane (Table 5-4 order, LFE last) and whether the last plane is
+/// the LFE channel.
+fn dts_channel_order(layout: ChannelLayout) -> Option<(Vec<usize>, bool)> {
+    use ChannelPosition::*;
+    let positions = layout.positions();
+    let find = |p: ChannelPosition| positions.iter().position(|&q| q == p);
+    let lfe = find(LowFrequency);
+    let primaries: Vec<ChannelPosition> = positions
+        .iter()
+        .copied()
+        .filter(|&p| p != LowFrequency)
+        .collect();
+    // Table 5-4 arrangements this encoder emits, keyed by their
+    // primary-position sets.
+    let dts_order: &[ChannelPosition] = match primaries.as_slice() {
+        [FrontCenter] => &[FrontCenter],
+        [FrontLeft, FrontRight] => &[FrontLeft, FrontRight],
+        [FrontLeft, FrontRight, FrontCenter] => &[FrontCenter, FrontLeft, FrontRight],
+        [FrontLeft, FrontRight, SideLeft, SideRight]
+        | [FrontLeft, FrontRight, BackLeft, BackRight] => {
+            if primaries.contains(&SideLeft) {
+                &[FrontLeft, FrontRight, SideLeft, SideRight]
+            } else {
+                &[FrontLeft, FrontRight, BackLeft, BackRight]
+            }
+        }
+        [FrontLeft, FrontRight, FrontCenter, SideLeft, SideRight] => {
+            &[FrontCenter, FrontLeft, FrontRight, SideLeft, SideRight]
+        }
+        [FrontLeft, FrontRight, FrontCenter, BackLeft, BackRight] => {
+            &[FrontCenter, FrontLeft, FrontRight, BackLeft, BackRight]
+        }
+        _ => return None,
+    };
+    let mut order: Vec<usize> = dts_order.iter().map(|&p| find(p)).collect::<Option<_>>()?;
+    if let Some(l) = lfe {
+        order.push(l);
+    }
+    Some((order, lfe.is_some()))
+}
+
+/// In-process DTS Core encoder handle.
+pub struct DtsEncoderHandle {
+    codec_id: CodecId,
+    output: CodecParameters,
+    encoder: crate::CoreEncoder,
+    /// Input-plane index per DTS plane.
+    order: Vec<usize>,
+    format: SampleFormat,
+    channels: usize,
+    sample_rate: u32,
+    queue: std::collections::VecDeque<Packet>,
+    /// PTS (in samples) of the next frame to leave the encoder.
+    next_pts: i64,
+    eof: bool,
+}
+
+impl core::fmt::Debug for DtsEncoderHandle {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DtsEncoderHandle")
+            .field("codec_id", &self.codec_id)
+            .field("format", &self.format)
+            .field("channels", &self.channels)
+            .field("queued", &self.queue.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl DtsEncoderHandle {
+    /// Pull one input channel out of an [`AudioFrame`] as normalized
+    /// f64 samples.
+    fn channel_samples(&self, frame: &AudioFrame, ch: usize) -> CoreResult<Vec<f64>> {
+        let n = frame.samples as usize;
+        let bps = self.format.bytes_per_sample();
+        let (plane, stride, start) = if self.format.is_planar() {
+            let plane = frame
+                .data
+                .get(ch)
+                .ok_or_else(|| CoreError::invalid("oxideav-dts encoder: missing plane"))?;
+            (plane.as_slice(), bps, 0usize)
+        } else {
+            let plane = frame
+                .data
+                .first()
+                .ok_or_else(|| CoreError::invalid("oxideav-dts encoder: missing data"))?;
+            (plane.as_slice(), bps * self.channels, ch * bps)
+        };
+        if plane.len() < start + stride * n.saturating_sub(1) + bps {
+            return Err(CoreError::invalid(
+                "oxideav-dts encoder: audio frame shorter than its sample count",
+            ));
+        }
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let at = start + i * stride;
+            let b = &plane[at..at + bps];
+            let v = match self.format {
+                SampleFormat::S16 | SampleFormat::S16P => {
+                    f64::from(i16::from_le_bytes([b[0], b[1]])) / 32_768.0
+                }
+                SampleFormat::S32 | SampleFormat::S32P => {
+                    f64::from(i32::from_le_bytes([b[0], b[1], b[2], b[3]])) / 2_147_483_648.0
+                }
+                SampleFormat::F32 | SampleFormat::F32P => {
+                    f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                }
+                _ => f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
+            };
+            out.push(v);
+        }
+        Ok(out)
+    }
+
+    fn enqueue(&mut self, frames: Vec<Vec<u8>>) {
+        let time_base = TimeBase::new(1, i64::from(self.sample_rate));
+        for bytes in frames {
+            let pkt = Packet::new(0, time_base, bytes)
+                .with_pts(self.next_pts)
+                .with_dts(self.next_pts)
+                .with_duration(crate::ENCODER_FRAME_SAMPLES as i64)
+                .with_keyframe(true);
+            self.next_pts += crate::ENCODER_FRAME_SAMPLES as i64;
+            self.queue.push_back(pkt);
+        }
+    }
+}
+
+impl Encoder for DtsEncoderHandle {
+    fn codec_id(&self) -> &CodecId {
+        &self.codec_id
+    }
+
+    fn output_params(&self) -> &CodecParameters {
+        &self.output
+    }
+
+    fn send_frame(&mut self, frame: &Frame) -> CoreResult<()> {
+        let Frame::Audio(audio) = frame else {
+            return Err(CoreError::invalid(
+                "oxideav-dts encoder: expected an audio frame",
+            ));
+        };
+        let planes: Vec<Vec<f64>> = self
+            .order
+            .clone()
+            .into_iter()
+            .map(|src| self.channel_samples(audio, src))
+            .collect::<CoreResult<_>>()?;
+        let refs: Vec<&[f64]> = planes.iter().map(Vec::as_slice).collect();
+        let frames = self
+            .encoder
+            .push(&refs)
+            .map_err(|e| CoreError::invalid(format!("oxideav-dts encoder: {e}")))?;
+        self.enqueue(frames);
+        Ok(())
+    }
+
+    fn receive_packet(&mut self) -> CoreResult<Packet> {
+        if let Some(p) = self.queue.pop_front() {
+            return Ok(p);
+        }
+        if self.eof {
+            Err(CoreError::Eof)
+        } else {
+            Err(CoreError::NeedMore)
+        }
+    }
+
+    fn flush(&mut self) -> CoreResult<()> {
+        let frames = self.encoder.flush();
+        self.enqueue(frames);
+        self.eof = true;
         Ok(())
     }
 }

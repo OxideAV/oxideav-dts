@@ -742,7 +742,8 @@ pub use crate::unpack14::{pack_16bit_to_14bit, unpack_14bit_to_16bit, FourteenBi
 
 #[cfg(feature = "registry")]
 pub use crate::registry::{
-    make_decoder, probe_dts, register, register_codecs, DtsDecoderHandle, CODEC_ID_STR,
+    make_decoder, make_encoder, probe_dts, register, register_codecs, DtsDecoderHandle,
+    DtsEncoderHandle, CODEC_ID_STR,
 };
 
 // `oxideav_core::register!("dts", register)` lives inside the

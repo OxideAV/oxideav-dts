@@ -63,6 +63,7 @@ use crate::side_info::{
     RMS_7BIT,
 };
 use crate::step_size::{StepSizeTable, SAMPLES_PER_SUBSUBFRAME};
+use crate::unpack14::FourteenBitByteOrder;
 
 /// Samples per channel in one encoded frame (16 blocks of 32).
 pub const ENCODER_FRAME_SAMPLES: usize = 512;
@@ -182,6 +183,13 @@ pub struct EncoderConfig {
     /// Policy for the §D.5.12 difference-coded 6-bit scale factors
     /// (`SHUFF 0..=4`) versus the 7-bit linear field.
     pub huffman_scales: HuffmanScales,
+    /// On-wire word format of the emitted frames (raw 16-bit
+    /// big-/little-endian, or the 14-bits-per-word containers). The
+    /// 14-bit forms round the frame down to a multiple of 14 bytes so
+    /// every frame packs into whole 28-bit container pairs and the
+    /// stream stays sync-aligned (§6.1.3.1 / §3.3 of the staged
+    /// extracts).
+    pub sync_word_encoding: SyncWordEncoding,
 }
 
 /// Policy for the difference-coded scale factors (`SHUFF 0..=4`).
@@ -292,6 +300,7 @@ impl EncoderConfig {
             rate_index: 15,
             filter: FilterBankSelection::PerfectReconstruction,
             huffman_scales: HuffmanScales::Never,
+            sync_word_encoding: SyncWordEncoding::RawBigEndian,
         })
     }
 
@@ -330,6 +339,13 @@ impl EncoderConfig {
         self
     }
 
+    /// Set the on-wire word format (raw BE/LE or 14-bit BE/LE).
+    #[must_use]
+    pub fn with_sync_word_encoding(mut self, encoding: SyncWordEncoding) -> Self {
+        self.sync_word_encoding = encoding;
+        self
+    }
+
     /// The targeted bit rate for [`Self::rate_index`], in bit/s.
     pub fn bit_rate_bps(&self) -> Result<u32, EncodeError> {
         RATE_TABLE
@@ -349,7 +365,15 @@ impl EncoderConfig {
         let bytes = (u64::from(bps) * ENCODER_FRAME_SAMPLES as u64
             / u64::from(self.sample_rate)
             / 8) as usize;
-        let bytes = (bytes & !1).min(16_384);
+        // Whole 16-bit words; the 14-bit containers additionally need
+        // whole 28-bit pairs per frame (8·bytes ≡ 0 mod 14 ⇔ bytes ≡ 0
+        // mod 7, so multiples of 14 keep both).
+        let bytes = if self.sync_word_encoding.is_14bit_packed() {
+            bytes / 14 * 14
+        } else {
+            bytes & !1
+        }
+        .min(16_384);
         if bytes < 96 {
             return Err(EncodeError::BitRateTooLow {
                 bits_per_second: bps,
@@ -554,12 +578,13 @@ impl CoreEncoder {
         self.consumed += ENCODER_FRAME_SAMPLES;
 
         // (3) Statistics + allocation + entropy selection + emission.
-        encode_frame_bits(
+        let frame = encode_frame_bits(
             &self.config,
             self.frame_bytes,
             &rows,
             lfe_decimated.as_deref(),
-        )
+        );
+        to_wire(frame, self.config.sync_word_encoding)
     }
 }
 
@@ -1155,6 +1180,25 @@ fn emit_lfe(w: &mut BitWriter, decimated: &[f64]) {
         w.push_signed(q, 8);
     }
     w.push(scale_index as u32, 8);
+}
+
+/// Convert one raw-BE frame to the configured on-wire word format.
+fn to_wire(mut frame: Vec<u8>, encoding: SyncWordEncoding) -> Vec<u8> {
+    match encoding {
+        SyncWordEncoding::RawBigEndian => frame,
+        SyncWordEncoding::RawLittleEndian => {
+            for pair in frame.chunks_exact_mut(2) {
+                pair.swap(0, 1);
+            }
+            frame
+        }
+        SyncWordEncoding::FourteenBitBigEndian => {
+            crate::unpack14::pack_16bit_to_14bit(&frame, FourteenBitByteOrder::BigEndian).0
+        }
+        SyncWordEncoding::FourteenBitLittleEndian => {
+            crate::unpack14::pack_16bit_to_14bit(&frame, FourteenBitByteOrder::LittleEndian).0
+        }
+    }
 }
 
 /// Build the §5.3.1 header for one normal frame.
