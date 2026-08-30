@@ -8,6 +8,22 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 — **ADPCM prediction (§5.4.1 `PMODE`/`PVQ`, §C.2.2,
+  §D.10.1)**: per band a 4th-order least-squares predictor is fitted
+  over the decoder-side reconstructed history, quantized to the
+  staged §D.10.1 book (24 nearest coefficient vectors, exact
+  residual-energy pick) and used when it removes ≥ 3 dB; the residual
+  is quantized closed-loop against the reconstruction the decoder
+  will hold (mirroring the §C.2.2 accumulation order), and every
+  band's last four reconstructed samples — quantized, VQ or silent —
+  roll into the next frame's history under `HFLAG = 1`. Reference
+  decoder on the regenerated fixtures (no diagnostics): stereo 192k
+  33.2 / 31.5 → 37.9 / 34.3 dB, the 128k HF-VQ stream 17.9 / 17.8 →
+  21.1 / 20.6 dB, 5.1 primaries 45–48 dB, and ours-vs-reference still
+  ≥ 60 dB on every plane — i.e. the closed-loop history semantics
+  agree with the reference. `EncoderConfig::with_adpcm(false)`
+  disables it; the round-trip test pins a ≥ 3 dB gain on the tonal
+  stream through our decoder.
 - Round 453 — **transients, high-frequency VQ and band trimming**:
   bands whose two subsubframe halves differ by > 12 dB in peak are
   flagged `TMODE = 1` and carry two scale factors (no pre-echo: the

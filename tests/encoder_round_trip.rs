@@ -270,3 +270,48 @@ fn low_rate_uses_high_frequency_vq_above_nvqsub() {
         assert!(snr > 15.0, "ch {ch}: 128k+VQ round trip {snr:.1} dB");
     }
 }
+
+/// `PMODE` usage per frame: predicted bands per channel.
+fn predicted_bands(frame: &[u8]) -> Vec<usize> {
+    let hdr = parse_frame_header(frame).unwrap();
+    let hb = hdr.header_bit_length() as usize;
+    let (coding, bits) =
+        oxideav_dts::decode_audio_coding_header_at(frame, hb, hdr.crc_present).unwrap();
+    let (side, _) =
+        oxideav_dts::decode_primary_side_info_at(frame, hb + bits, &coding.channel_params).unwrap();
+    side.channels
+        .iter()
+        .map(|c| c.pmode.iter().filter(|&&p| p > 0).count())
+        .collect()
+}
+
+#[test]
+fn adpcm_predicts_tonal_bands_and_improves_the_round_trip() {
+    // Stationary tones are highly predictable in the subband domain.
+    let n = ENCODER_FRAME_SAMPLES * 6;
+    let planes = [multitone(n, 0.0), multitone(n, 0.7)];
+    let base = EncoderConfig::new(48_000, 2)
+        .unwrap()
+        .with_bit_rate(192_000)
+        .unwrap();
+    let with = encode_stream(base, &planes);
+    let without = encode_stream(base.with_adpcm(false), &planes);
+
+    let predicted: usize = iter_frames(&with)
+        .skip(1)
+        .map(|f| predicted_bands(f.unwrap().data).iter().sum::<usize>())
+        .sum();
+    assert!(predicted > 0, "ADPCM must be used on the tonal stream");
+    assert!(iter_frames(&without).all(|f| predicted_bands(f.unwrap().data).iter().all(|&c| c == 0)));
+
+    let (pcm_with, _) = decode_stream(&with, 2);
+    let (pcm_without, _) = decode_stream(&without, 2);
+    for ch in 0..2 {
+        let a = snr_db(&planes[ch], &pcm_with[ch]);
+        let b = snr_db(&planes[ch], &pcm_without[ch]);
+        assert!(
+            a > b + 3.0,
+            "ch {ch}: ADPCM {a:.1} dB must beat no-ADPCM {b:.1} dB by 3 dB"
+        );
+    }
+}

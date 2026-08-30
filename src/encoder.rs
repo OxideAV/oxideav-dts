@@ -54,6 +54,7 @@ use crate::block_code::block_code_offset;
 use crate::cos_mod::NUM_SUBBAND;
 use crate::filter_bank::FilterBankSelection;
 use crate::header::{encode_frame_header_be, DtsFrameHeader, FrameType, LfeMode, SyncWordEncoding};
+use crate::inverse_adpcm::NUM_ADPCM_COEFF;
 use crate::lfe_analysis::LfeAnalysis;
 use crate::lfe_interp::LfeInterpolationSelection;
 use crate::lfe_synth::LFE_SCALE_STEP;
@@ -178,6 +179,10 @@ pub struct EncoderConfig {
     /// Policy for the §D.5.12 difference-coded 6-bit scale factors
     /// (`SHUFF 0..=4`) versus the 7-bit linear field.
     pub huffman_scales: HuffmanScales,
+    /// Enable §5.4.1 `PMODE` ADPCM prediction (§C.2.2, §D.10.1 book)
+    /// on bands where a 4th-order predictor over the reconstructed
+    /// history removes ≥ 3 dB of energy. Default on.
+    pub adpcm: bool,
     /// On-wire word format of the emitted frames (raw 16-bit
     /// big-/little-endian, or the 14-bits-per-word containers). The
     /// 14-bit forms round the frame down to a multiple of 14 bytes so
@@ -295,6 +300,7 @@ impl EncoderConfig {
             rate_index: 15,
             filter: FilterBankSelection::PerfectReconstruction,
             huffman_scales: HuffmanScales::Never,
+            adpcm: true,
             sync_word_encoding: SyncWordEncoding::RawBigEndian,
         })
     }
@@ -331,6 +337,13 @@ impl EncoderConfig {
     #[must_use]
     pub fn with_huffman_scales(mut self, policy: HuffmanScales) -> Self {
         self.huffman_scales = policy;
+        self
+    }
+
+    /// Enable/disable ADPCM prediction.
+    #[must_use]
+    pub fn with_adpcm(mut self, adpcm: bool) -> Self {
+        self.adpcm = adpcm;
         self
     }
 
@@ -443,6 +456,10 @@ pub struct CoreEncoder {
     /// Samples of `buf` already emitted as frames (the next frame
     /// starts here). Buffers are compacted as frames leave.
     consumed: usize,
+    /// Per channel, per band: the last four *reconstructed* subband
+    /// samples of the previous frame — the decoder's §C.2.2 ADPCM
+    /// history (kept for every band, as the decoder does).
+    history: Vec<[[f64; NUM_ADPCM_COEFF]; NUM_SUBBAND]>,
 }
 
 impl CoreEncoder {
@@ -458,6 +475,7 @@ impl CoreEncoder {
                 .then(|| LfeAnalysis::new(LfeInterpolationSelection::Decimation64)),
             buf: vec![Vec::new(); config.plane_count()],
             consumed: 0,
+            history: vec![[[0.0; NUM_ADPCM_COEFF]; NUM_SUBBAND]; config.channels],
         })
     }
 
@@ -578,6 +596,7 @@ impl CoreEncoder {
             self.frame_bytes,
             &rows,
             lfe_decimated.as_deref(),
+            &mut self.history,
         );
         to_wire(frame, self.config.sync_word_encoding)
     }
@@ -604,6 +623,15 @@ struct BandPlan {
     idx: [i32; SAMPLES_PER_BAND],
     /// §D.10.2 vector index for a high-frequency-VQ band.
     vq_index: u16,
+    /// §D.10.1 predictor (`PVQ` index + its coefficients) when the
+    /// band is ADPCM-coded (`PMODE = 1`).
+    pvq: Option<(u16, [f64; NUM_ADPCM_COEFF])>,
+    /// Open-loop residual peak of the predictor (drives the scale
+    /// choice of a predicted band).
+    resid_peak: f64,
+    /// Reconstructed samples (what the decoder will hold), for the
+    /// next frame's history.
+    recon: [f64; SAMPLES_PER_BAND],
 }
 
 impl Default for BandPlan {
@@ -614,6 +642,9 @@ impl Default for BandPlan {
             scale_index: [0; 2],
             idx: [0; SAMPLES_PER_BAND],
             vq_index: 0,
+            pvq: None,
+            resid_peak: 0.0,
+            recon: [0.0; SAMPLES_PER_BAND],
         }
     }
 }
@@ -723,6 +754,7 @@ fn allocate(
                     let extra = band_sample_bits(next) - band_sample_bits(cur)
                         + if cur == 0 {
                             activation_side_bits(plan[ch][n].tmode)
+                                + if plan[ch][n].pvq.is_some() { 12 } else { 0 }
                         } else {
                             0
                         };
@@ -751,22 +783,186 @@ fn allocate(
     steps
 }
 
+/// Margin applied to a predictor's open-loop residual peak when
+/// choosing the closed-loop scale factor.
+const RESIDUAL_MARGIN: f64 = 1.25;
+
+/// Minimum open-loop prediction gain (energy ratio) for a band to be
+/// ADPCM-coded: 3 dB.
+const MIN_PREDICTION_GAIN: f64 = 2.0;
+
+/// Find a §D.10.1 predictor for one band's 16 samples given the
+/// decoder-side history: a 4th-order least-squares fit over the
+/// reconstructed past, quantized to the book by a coarse
+/// coefficient-distance pre-selection and an exact residual-energy
+/// pick. Returns `(index, coefficients, residual_peak)` when the book
+/// vector removes at least [`MIN_PREDICTION_GAIN`] of the energy.
+#[allow(clippy::needless_range_loop)] // index-heavy normal-equation arithmetic
+fn lpc_candidate(
+    x: &[f64; SAMPLES_PER_BAND],
+    hist: &[f64; NUM_ADPCM_COEFF],
+    book: &crate::AdpcmVqCodebook,
+) -> Option<(u16, [f64; NUM_ADPCM_COEFF], f64)> {
+    // Past sample `m - k - 1` for k in 0..4 (history for m < k+1).
+    let past = |m: usize, k: usize| -> f64 {
+        if m > k {
+            x[m - k - 1]
+        } else {
+            hist[NUM_ADPCM_COEFF + m - k - 1]
+        }
+    };
+    let mut r0 = 0.0_f64;
+    let mut r = [0.0_f64; NUM_ADPCM_COEFF];
+    let mut rr = [[0.0_f64; NUM_ADPCM_COEFF]; NUM_ADPCM_COEFF];
+    for m in 0..SAMPLES_PER_BAND {
+        r0 += x[m] * x[m];
+        for i in 0..NUM_ADPCM_COEFF {
+            let pi = past(m, i);
+            r[i] += x[m] * pi;
+            for j in 0..NUM_ADPCM_COEFF {
+                rr[i][j] += pi * past(m, j);
+            }
+        }
+    }
+    if r0 <= 0.0 {
+        return None;
+    }
+    // Residual energy of coefficient vector c: r0 − 2c·r + cᵀRc.
+    let energy = |c: &[f64; NUM_ADPCM_COEFF]| -> f64 {
+        let mut e = r0;
+        for i in 0..NUM_ADPCM_COEFF {
+            e -= 2.0 * c[i] * r[i];
+            for j in 0..NUM_ADPCM_COEFF {
+                e += c[i] * rr[i][j] * c[j];
+            }
+        }
+        e
+    };
+    // Unquantized least-squares solution (regularized).
+    let mut a = rr;
+    let mut b = r;
+    for (i, row) in a.iter_mut().enumerate() {
+        row[i] += 1e-9 * r0 + 1e-300;
+    }
+    for col in 0..NUM_ADPCM_COEFF {
+        let pivot = (col..NUM_ADPCM_COEFF)
+            .max_by(|&p, &q| a[p][col].abs().partial_cmp(&a[q][col].abs()).unwrap())
+            .unwrap();
+        a.swap(col, pivot);
+        b.swap(col, pivot);
+        let d = a[col][col];
+        if d.abs() < 1e-300 {
+            return None;
+        }
+        for j in 0..NUM_ADPCM_COEFF {
+            a[col][j] /= d;
+        }
+        b[col] /= d;
+        for row in 0..NUM_ADPCM_COEFF {
+            if row != col {
+                let f = a[row][col];
+                if f != 0.0 {
+                    for j in 0..NUM_ADPCM_COEFF {
+                        a[row][j] -= f * a[col][j];
+                    }
+                    b[row] -= f * b[col];
+                }
+            }
+        }
+    }
+    if energy(&b) > r0 / MIN_PREDICTION_GAIN {
+        return None;
+    }
+    // Coarse: the 24 book vectors nearest to the unquantized solution.
+    let mut coarse: Vec<(f64, u16)> = (0..crate::ADPCM_VQ_BOOK_SIZE as u16)
+        .map(|i| {
+            let c = book.coefficients(i);
+            let d: f64 = c.iter().zip(b.iter()).map(|(p, q)| (p - q) * (p - q)).sum();
+            (d, i)
+        })
+        .collect();
+    coarse.sort_by(|p, q| p.0.partial_cmp(&q.0).unwrap());
+    let mut best: Option<(f64, u16)> = None;
+    for &(_, i) in coarse.iter().take(24) {
+        let e = energy(book.coefficients(i));
+        if best.map_or(true, |(be, _)| e < be) {
+            best = Some((e, i));
+        }
+    }
+    let (e, index) = best?;
+    if e > r0 / MIN_PREDICTION_GAIN {
+        return None;
+    }
+    let coeffs = *book.coefficients(index);
+    let mut peak = 0.0_f64;
+    for m in 0..SAMPLES_PER_BAND {
+        let mut pred = 0.0;
+        for (k, c) in coeffs.iter().enumerate() {
+            pred += c * past(m, k);
+        }
+        peak = peak.max((x[m] - pred).abs());
+    }
+    Some((index, coeffs, peak))
+}
+
 /// Quantize every active band of one channel against its chosen
 /// scale grid (`table` = the valid prefix of the §D.1 table its
 /// `SHUFF` implies), honouring the per-half scale of transient bands.
+#[allow(clippy::needless_range_loop)] // closed-loop recursion indexes the reconstruction it writes
 fn quantize_channel(
     plan: &mut [BandPlan; NUM_SUBBAND],
     rows: &[[f64; NUM_SUBBAND]],
     peak: &[[f64; NUM_SUBBAND]; 2],
+    history: &[[f64; NUM_ADPCM_COEFF]; NUM_SUBBAND],
     step_table: StepSizeTable,
     table: &[u32],
 ) {
     for (n, band) in plan.iter_mut().enumerate() {
         if band.abits == 0 {
+            band.pvq = None;
             continue;
         }
         let step = step_table.step_size(band.abits).expect("valid ABITS");
         let q = qmax(band.abits);
+        if let Some((_, coeffs)) = band.pvq {
+            // Closed-loop ADPCM: predict from the *reconstructed* past
+            // exactly as the decoder's §C.2.2 loop will, quantize the
+            // residual, reconstruct.
+            let sc = scale_index_in(
+                band.abits,
+                band.resid_peak * RESIDUAL_MARGIN,
+                step_table,
+                table,
+            );
+            band.scale_index = [sc, sc];
+            let recon_step = step * f64::from(table[sc as usize]);
+            for m in 0..SAMPLES_PER_BAND {
+                let mut pred = 0.0_f64;
+                for (k, c) in coeffs.iter().enumerate() {
+                    let past = if m > k {
+                        band.recon[m - k - 1]
+                    } else {
+                        history[n][NUM_ADPCM_COEFF + m - k - 1]
+                    };
+                    pred += c * past;
+                }
+                let e = rows[m][n] - pred;
+                let idx = (e / recon_step).round().clamp(f64::from(-q), f64::from(q)) as i32;
+                band.idx[m] = idx;
+                // Mirror the decoder's accumulation order.
+                let mut acc = recon_step * f64::from(idx);
+                for (k, c) in coeffs.iter().enumerate() {
+                    let past = if m > k {
+                        band.recon[m - k - 1]
+                    } else {
+                        history[n][NUM_ADPCM_COEFF + m - k - 1]
+                    };
+                    acc += c * past;
+                }
+                band.recon[m] = acc;
+            }
+            continue;
+        }
         if band.tmode > 0 {
             band.scale_index[0] = scale_index_in(band.abits, peak[0][n], step_table, table);
             band.scale_index[1] = scale_index_in(band.abits, peak[1][n], step_table, table);
@@ -775,16 +971,18 @@ fn quantize_channel(
             band.scale_index[0] = scale_index_in(band.abits, p, step_table, table);
             band.scale_index[1] = band.scale_index[0];
         }
-        for (m, slot) in band.idx.iter_mut().enumerate() {
+        for m in 0..SAMPLES_PER_BAND {
             let half = if band.tmode > 0 && m >= SAMPLES_PER_SUBSUBFRAME {
                 1
             } else {
                 0
             };
-            let recon = step * f64::from(table[band.scale_index[half] as usize]);
-            *slot = (rows[m][n] / recon)
+            let recon_step = step * f64::from(table[band.scale_index[half] as usize]);
+            let idx = (rows[m][n] / recon_step)
                 .round()
                 .clamp(f64::from(-q), f64::from(q)) as i32;
+            band.idx[m] = idx;
+            band.recon[m] = recon_step * f64::from(idx);
         }
     }
 }
@@ -987,10 +1185,12 @@ fn encode_frame_bits(
     frame_bytes: usize,
     rows: &[Vec<[f64; NUM_SUBBAND]>],
     lfe_decimated: Option<&[f64]>,
+    history: &mut [[[f64; NUM_ADPCM_COEFF]; NUM_SUBBAND]],
 ) -> Vec<u8> {
     let channels = config.channels;
     let step_table = StepSizeTable::for_rate(config.rate_index);
     let hf_book = crate::HfVqCodebook::builtin();
+    let adpcm_book = crate::AdpcmVqCodebook::builtin();
 
     // --- Statistics -------------------------------------------------
     // Band peak per subsubframe half, and mean-square over the frame.
@@ -1018,7 +1218,7 @@ fn encode_frame_bits(
         })
         .collect();
 
-    // --- Transients --------------------------------------------------
+    // --- Transients + ADPCM candidates --------------------------------
     let mut plan = vec![[BandPlan::default(); NUM_SUBBAND]; channels];
     for ch in 0..channels {
         for n in 0..NUM_SUBBAND {
@@ -1026,6 +1226,21 @@ fn encode_frame_bits(
             let (lo, hi) = (a.min(b), a.max(b));
             if lo > 0.0 && hi > TRANSIENT_RATIO * lo {
                 plan[ch][n].tmode = 1;
+            }
+            if config.adpcm && band_peak[ch][n] > SILENCE_FLOOR {
+                let mut x = [0.0_f64; SAMPLES_PER_BAND];
+                for (m, row) in rows[ch].iter().enumerate() {
+                    x[m] = row[n];
+                }
+                if let Some((index, coeffs, resid_peak)) =
+                    lpc_candidate(&x, &history[ch][n], &adpcm_book)
+                {
+                    plan[ch][n].pvq = Some((index, coeffs));
+                    plan[ch][n].resid_peak = resid_peak;
+                    // A predicted band uses one scale over the whole
+                    // subframe.
+                    plan[ch][n].tmode = 0;
+                }
             }
         }
     }
@@ -1055,7 +1270,9 @@ fn encode_frame_bits(
             let mut l = [0.0_f64; 27];
             l[0] = power[ch][n];
             for a in 1..=MAX_ABITS {
-                let q = if plan[ch][n].tmode > 0 {
+                let q = if plan[ch][n].pvq.is_some() {
+                    noise_power(a, plan[ch][n].resid_peak * RESIDUAL_MARGIN, step_table)
+                } else if plan[ch][n].tmode > 0 {
                     0.5 * (noise_power(a, peak[ch][0][n], step_table)
                         + noise_power(a, peak[ch][1][n], step_table))
                 } else {
@@ -1104,7 +1321,14 @@ fn encode_frame_bits(
                 vec![(6, table7)]
             };
             for (code, table) in candidates {
-                quantize_channel(&mut plan[ch], &rows[ch], &peak[ch], step_table, table);
+                quantize_channel(
+                    &mut plan[ch],
+                    &rows[ch],
+                    &peak[ch],
+                    &history[ch],
+                    step_table,
+                    table,
+                );
                 for (n, band) in plan[ch].iter_mut().enumerate().take(n_subs).skip(n_vqsub) {
                     let (vq, sc) = choose_hf_vq(&rows[ch], n, &hf_book, table);
                     band.vq_index = vq;
@@ -1142,6 +1366,7 @@ fn encode_frame_bits(
                 &mut plan[ch],
                 &rows[ch],
                 &peak[ch],
+                &history[ch],
                 step_table,
                 chosen_table,
             );
@@ -1154,7 +1379,12 @@ fn encode_frame_bits(
             let (sel, audio_bits) = choose_sel(&plan[ch][..n_vqsub]);
             let (bhuff, abits_bits) = choose_bhuff(&plan[ch][..n_vqsub]);
             let (thuff, tmode_bits) = choose_thuff(&plan[ch][..n_vqsub]);
-            let pmode_bits = n_subs;
+            // PMODE bit per active band + 12-bit PVQ per predicted band.
+            let pmode_bits = n_subs
+                + 12 * plan[ch][..n_vqsub]
+                    .iter()
+                    .filter(|b| b.abits > 0 && b.pvq.is_some())
+                    .count();
             let vq_bits = 10 * (n_subs - n_vqsub);
             used += pmode_bits + abits_bits + tmode_bits + scale_bits + vq_bits + audio_bits;
             coding.push(ChannelCoding {
@@ -1283,9 +1513,17 @@ fn encode_frame_bits(
     // §5.4.1 side information (Table 5-28).
     w.push(N_SSC as u32 - 1, 2); // SSC
     w.push(0, 3); // PSC
-    for c in &coding {
-        for _ in 0..c.n_subs {
-            w.push(0, 1); // PMODE = 0
+    for (ch, c) in coding.iter().enumerate() {
+        for band in &plan[ch][..c.n_subs] {
+            w.push(u32::from(band.pvq.is_some()), 1); // PMODE
+        }
+    }
+    // PVQ: the §D.10.1 index of every predicted band.
+    for (ch, c) in coding.iter().enumerate() {
+        for band in &plan[ch][..c.n_subs] {
+            if let Some((index, _)) = band.pvq {
+                w.push(u32::from(index), crate::ADPCM_VQ_INDEX_BITS);
+            }
         }
     }
     // ABITS.
@@ -1356,6 +1594,27 @@ fn encode_frame_bits(
         w.bit_len()
     );
     w.pad_to_bytes(frame_bytes);
+
+    // --- Decoder-side history for the next frame -------------------
+    // The decoder keeps the last four reconstructed samples of every
+    // band (quantized: the dequantized / predicted values; VQ: the
+    // scaled book vector; silent: zero).
+    for (ch, c) in coding.iter().enumerate() {
+        let table: &[u32] = if c.shuff == 6 { &RMS_7BIT } else { &RMS_6BIT };
+        for (n, band) in plan[ch].iter().enumerate() {
+            let mut h = [0.0_f64; NUM_ADPCM_COEFF];
+            if n < c.n_vqsub && band.abits > 0 {
+                h.copy_from_slice(&band.recon[SAMPLES_PER_BAND - NUM_ADPCM_COEFF..]);
+            } else if n >= c.n_vqsub && n < c.n_subs {
+                let scale = f64::from(table[band.scale_index[0] as usize]);
+                let v = hf_book.vector(band.vq_index);
+                for (k, slot) in h.iter_mut().enumerate() {
+                    *slot = scale * v[SAMPLES_PER_BAND - NUM_ADPCM_COEFF + k];
+                }
+            }
+            history[ch][n] = h;
+        }
+    }
     w.into_bytes()
 }
 
