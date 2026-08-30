@@ -8,6 +8,17 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 — **encoder black-box validation** (`tests/black_box_encoder.rs`
+  + three committed fixture pairs `enc_stereo_768k` / `enc_stereo_192k`
+  / `enc_51_lfe_768k`): streams produced by `CoreEncoder` decoded by the
+  opaque reference decoder **without diagnostics**, and the reference
+  PCM reconstructs the original input at unity gain — 66.6 / 66.2 dB
+  (stereo 768k), 33.9 / 31.8 dB (stereo 192k, the allocator's own
+  choice to drop the −34 dBFS 17.5 kHz tone), 42–45 dB on the five
+  primaries and 24.8 dB on the LFE of the 5.1 stream — with per-band
+  energy error ≤ 0.01 dB on the 768k stereo stream. Our decoder and
+  the reference agree at 68.8 dB on every primary plane (121 dB on the
+  LFE plane) of our own streams.
 - Round 453 — **Core encoder** (`CoreEncoder` / `EncoderConfig` /
   `BitWriter`): §5.3.1 header + §5.3.2 coding header + §5.4.1 side
   information + §5.5 audio arrays for normal frames (16 blocks, one
