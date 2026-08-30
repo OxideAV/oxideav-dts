@@ -669,7 +669,8 @@ pub use crate::lfe_interp::LfeInterpolationSelection;
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
 pub use crate::lfe_synth::{
-    LfeChannel, LfeChannelError, LfeInterpError, LfeInterpolator, LFE_HISTORY_LEN, LFE_SCALE_STEP,
+    LfeChannel, LfeChannelError, LfeInterpError, LfeInterpolator, LFE_HISTORY_LEN,
+    LFE_OUTPUT_CALIBRATION, LFE_SCALE_STEP,
 };
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]
@@ -720,7 +721,8 @@ pub use crate::subframe::{
 };
 pub use crate::subframe_pcm::{
     decode_core_frame, decode_core_frame_with_info, CoreFrameDecodeError, CoreStreamDecoder,
-    Subframe, SubframePcm, SubframePcmDecoder, SubframePcmError, PCM_PER_SUBBAND_ROW,
+    Subframe, SubframePcm, SubframePcmDecoder, SubframePcmError, OUTPUT_LEVEL_CALIBRATION,
+    PCM_PER_SUBBAND_ROW,
 };
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]

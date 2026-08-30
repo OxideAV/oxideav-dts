@@ -279,6 +279,23 @@ impl LfeInterpolator {
 /// `docs/audio/dts/dts-lfe-interpolation-and-audio-walker.md` §2.2.
 pub const LFE_SCALE_STEP: f64 = 0.035;
 
+/// Implementation-defined LFE output-level calibration (the LFE
+/// counterpart of [`crate::subframe_pcm::OUTPUT_LEVEL_CALIBRATION`]).
+///
+/// The §C.2.6 interpolation output has no `rScale` of its own — the
+/// spec's LFE dequant (`LFE·nScale·0.035`) fixes the decimated-domain
+/// level but, like the §C.2.5 output gain, the mapping of that domain
+/// onto integer PCM is implementation-defined. The black-box reference
+/// decoder emits the LFE plane at exactly **256×** this crate's plain
+/// §C.2.6 dequant level (ratio measured as 256.000 on the bundled 5.1
+/// fixture), consistent with the primary channels' full-scale
+/// convention. Round 453 folds that constant into the decode chain
+/// ([`LfeChannel::decode_subframe_calibrated`], used by the frame
+/// walker) so the LFE plane sits at the same level as the primary
+/// planes; the uncalibrated [`LfeChannel::decode_subframe`] keeps the
+/// literal spec dequant for callers that want it raw.
+pub const LFE_OUTPUT_CALIBRATION: f64 = 256.0;
+
 /// Errors from the §5.5 LFE-phase dequant + interpolation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -393,6 +410,36 @@ impl LfeChannel {
         let r_scale = n_scale * LFE_SCALE_STEP;
 
         // rLFE[n] = LFE[n] * rScale.
+        let decimated: Vec<f64> = lfe_samples
+            .iter()
+            .map(|&s| f64::from(s) * r_scale)
+            .collect();
+
+        let selection = Self::selection_for_lff(lff);
+        Ok(self.interp.interpolate(&decimated, selection))
+    }
+
+    /// [`Self::decode_subframe`] with the implementation-defined
+    /// output-level calibration ([`LFE_OUTPUT_CALIBRATION`]) applied
+    /// before the integer cast, so the LFE plane comes out at the
+    /// same full-scale convention as the §C.2.5 primary channels (and
+    /// the black-box reference). This is what the §5.5 frame walker
+    /// uses.
+    pub fn decode_subframe_calibrated(
+        &mut self,
+        lfe_samples: &[i8],
+        scale_index: u8,
+        lff: u8,
+    ) -> Result<Vec<i32>, LfeChannelError> {
+        if lff == 0 {
+            return Err(LfeChannelError::NoLfeChannel);
+        }
+        if (scale_index as usize) >= crate::side_info::RMS_7BIT.len() - 3 {
+            return Err(LfeChannelError::ReservedScaleIndex { index: scale_index });
+        }
+        let n_scale = crate::side_info::RMS_7BIT[scale_index as usize] as f64;
+        let r_scale = n_scale * LFE_SCALE_STEP * LFE_OUTPUT_CALIBRATION;
+
         let decimated: Vec<f64> = lfe_samples
             .iter()
             .map(|&s| f64::from(s) * r_scale)

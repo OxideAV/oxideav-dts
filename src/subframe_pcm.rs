@@ -102,6 +102,24 @@ pub type SubframePcm = Vec<Vec<i32>>;
 /// polyphase output block).
 pub const PCM_PER_SUBBAND_ROW: usize = NUM_SUBBAND;
 
+/// Implementation-defined output-level calibration applied on top of
+/// [`DtsFrameHeader::output_r_scale`] by the §C.2.5 synthesis step of
+/// this decoder.
+///
+/// Per `docs/audio/dts/dts-qmf-driver.md` §2, the §C.2.5 output
+/// `rScale` is **not** a normative constant: it is whatever fixed gain
+/// maps the implementation's internal `raZ` normalization to
+/// full-scale integer PCM at the `PCMR` resolution. This crate's
+/// `raZ` domain (fixed by the literal §C.2.5 cosine-modulation
+/// scalers) sits exactly √2 below the level the black-box reference
+/// decoder emits for the same streams — a constant ratio measured to
+/// < 1e-4 across every bundled `ffmpeg`-reference fixture (stereo,
+/// 5.1 and the three §D.10 fixture families). Round 453 folds that √2
+/// into the decode chain so the reconstructed PCM matches the
+/// reference (and the round trip through this crate's own encoder is
+/// unity), instead of documenting the ratio test-side.
+pub const OUTPUT_LEVEL_CALIBRATION: f64 = std::f64::consts::SQRT_2;
+
 /// Errors from the §5.5 + §C.2.5 end-to-end subframe→PCM bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -476,6 +494,10 @@ impl SubframePcmDecoder {
                 pcmr: header.source_pcm_resolution_index,
             });
         };
+        // The header accessor gives the PCMR full-scale gain; the
+        // decoder's own output level is that times the calibration
+        // constant (see OUTPUT_LEVEL_CALIBRATION).
+        let r_scale = r_scale * OUTPUT_LEVEL_CALIBRATION;
         let filter: FilterBankSelection = header.filter_bank_selection();
 
         // Joint-intensity subband coding (JOINX > 0) is applied below
@@ -1512,7 +1534,7 @@ mod tests {
             &refs,
             &[1],
             header.filter_bank_selection(),
-            32768.0,
+            32768.0 * OUTPUT_LEVEL_CALIBRATION,
             &mut expect,
         )
         .unwrap();

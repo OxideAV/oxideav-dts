@@ -8,6 +8,19 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 — **output level calibrated to the black-box reference**:
+  the decode chain now multiplies the §C.2.5 output `rScale` by
+  `OUTPUT_LEVEL_CALIBRATION` (= √2) and the §C.2.6 LFE plane by
+  `LFE_OUTPUT_CALIBRATION` (= 256, applied before the integer cast via
+  `LfeChannel::decode_subframe_calibrated`). Both gains are
+  implementation-defined per `docs/audio/dts/dts-qmf-driver.md` §2 (the
+  spec fixes neither); the constants are the ratios measured against
+  the black-box reference decodes of every bundled fixture (√2 to
+  <1e-4 on five fixture families; 256.000 on the 5.1 LFE plane). The
+  black-box gain tests now assert **unity**, and the reference-decoder
+  parity makes the upcoming encoder's round trip unity through both
+  decoders. `LfeChannel::decode_subframe` keeps the literal spec
+  dequant for raw callers.
 - Round 453 (2026-08-30) — **encoder front end: 32-band analysis QMF +
   LFE decimator**. `QmfAnalysis` mirrors the §C.2.5
   `QMFInterpolation()` synthesis driver as its exact inverse: the FIR

@@ -186,7 +186,8 @@ fn synthesize(
 ) -> Vec<Vec<i32>> {
     let refs: Vec<&[[f64; NUM_SUBBAND]]> = matrices.iter().map(|m| m.as_slice()).collect();
     let filter: FilterBankSelection = header.filter_bank_selection();
-    let r_scale = header.output_r_scale().expect("PCMR not reserved");
+    let r_scale =
+        header.output_r_scale().expect("PCMR not reserved") * oxideav_dts::OUTPUT_LEVEL_CALIBRATION;
     let mut pcm: Vec<Vec<i32>> = vec![Vec::new(); 2];
     qmf.synthesize_planar(&refs, &n_subs, filter, r_scale, &mut pcm)
         .expect("analytic QMF synthesis");

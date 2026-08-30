@@ -102,7 +102,7 @@ fn analytic_pcm(spec: &JointFrameSpec, header: &DtsFrameHeader) -> Vec<Vec<i32>>
             &refs,
             &eff,
             header.filter_bank_selection(),
-            header.output_r_scale().unwrap(),
+            header.output_r_scale().unwrap() * oxideav_dts::OUTPUT_LEVEL_CALIBRATION,
             &mut block,
         )
         .expect("analytic QMF synthesis");

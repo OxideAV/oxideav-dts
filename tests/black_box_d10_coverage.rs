@@ -190,15 +190,14 @@ fn every_swept_frame_is_shape_identical_to_reference() {
 fn every_swept_frame_matches_reference_at_90db_after_constant_gain() {
     let reference = reference();
     let ours = ours();
-    let sqrt2 = 2f64.sqrt();
     for frame in 0..FRAMES {
         let a = frame * SAMPLES_PER_FRAME;
         let b = a + SAMPLES_PER_FRAME;
         for ch in 0..2 {
             let (g, snr) = gain_and_snr(&ours[ch][a..b], &reference[ch][a..b]);
             assert!(
-                (g / sqrt2 - 1.0).abs() < 1e-4,
-                "frame {frame} ch {ch}: gain {g} — expected the √2 rScale ratio"
+                (g - 1.0).abs() < 1e-4,
+                "frame {frame} ch {ch}: gain {g} — expected unity gain after the round-453 output calibration"
             );
             assert!(snr > 90.0, "frame {frame} ch {ch}: SNR {snr} dB");
         }

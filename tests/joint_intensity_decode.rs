@@ -173,7 +173,7 @@ fn joint_import_changes_channel1_output() {
             &refs,
             &[JOINT_N_SUBS_CH0, JOINT_N_SUBS_CH0],
             header.filter_bank_selection(),
-            header.output_r_scale().unwrap(),
+            header.output_r_scale().unwrap() * oxideav_dts::OUTPUT_LEVEL_CALIBRATION,
             &mut ablated,
         )
         .expect("ablated QMF synthesis");

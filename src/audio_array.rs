@@ -375,7 +375,7 @@ pub fn decode_lfe_phase_at(
     let bits_consumed = br.absolute_bit_position() - bit_offset;
 
     let pcm = lfe
-        .decode_subframe(&samples, scale_index, lff)
+        .decode_subframe_calibrated(&samples, scale_index, lff)
         .map_err(AudioArrayError::LfePhase)?;
 
     Ok((pcm, bits_consumed))
@@ -1390,9 +1390,11 @@ mod tests {
         let mut lfe = crate::LfeChannel::new();
         let (pcm, _) = decode_lfe_phase_at(&stream, 0, lff, n_ssc, &mut lfe).unwrap();
 
-        // Reference: phase-0 first output = (int)((-1)·nScale·0.035·c0).
+        // Reference: phase-0 first output =
+        // (int)((-1)·nScale·0.035·calibration·c0) — the walker uses the
+        // calibrated LFE decode (see LFE_OUTPUT_CALIBRATION).
         let n_scale = crate::side_info::RMS_7BIT[scale_index as usize] as f64;
-        let r_scale = n_scale * crate::LFE_SCALE_STEP;
+        let r_scale = n_scale * crate::LFE_SCALE_STEP * crate::LFE_OUTPUT_CALIBRATION;
         let sel = crate::LfeInterpolationSelection::Decimation64;
         let c0 = sel.coefficients()[0];
         let expected0 = (-(r_scale * c0)) as i32;
