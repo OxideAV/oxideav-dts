@@ -170,10 +170,7 @@ fn silence_encodes_and_decodes_to_silence() {
     let config = EncoderConfig::new(48_000, 2).unwrap();
     let bytes = encode_stream(config, &planes);
     let (pcm, _) = decode_stream(&bytes, 2);
-    for ch in 0..2 {
-        assert!(
-            pcm[ch].iter().all(|&v| v == 0.0),
-            "ch {ch} must stay silent"
-        );
+    for (ch, plane) in pcm.iter().enumerate() {
+        assert!(plane.iter().all(|&v| v == 0.0), "ch {ch} must stay silent");
     }
 }
