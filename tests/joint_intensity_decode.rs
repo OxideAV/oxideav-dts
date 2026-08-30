@@ -126,7 +126,8 @@ fn joint_frame_decode_matches_analytic_reconstruction() {
     let filter: FilterBankSelection = header.filter_bank_selection();
     let r_scale = header
         .output_r_scale()
-        .expect("template PCMR is not reserved");
+        .expect("template PCMR is not reserved")
+        * oxideav_dts::OUTPUT_LEVEL_CALIBRATION;
     // Per §C.2.5 (PDF p.184): the jointly-coded channel's active count
     // "must be set to that of the source channel".
     let n_subs_eff = [JOINT_N_SUBS_CH0, JOINT_N_SUBS_CH0];
