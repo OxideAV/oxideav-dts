@@ -166,7 +166,7 @@ pub struct JointFrameSpec {
     pub joinx: [u8; 2],
     /// The 3-bit `JOIN_SHUFF` selector written for every jointly-coded
     /// channel: 5 → Linear6Bit raw, 6 → Linear7Bit raw, 0 → Huffman
-    /// SA129 (§D.5.3 Table A5 symbols), 7 → reserved (error-path).
+    /// SA129 (129-level difference symbols), 7 → reserved (error-path).
     pub join_shuff: u8,
     /// The raw `JOIN_SCALES` symbols written per jointly-coded channel
     /// and subframe (linear: absolute index; Huffman: signed symbol).
@@ -283,18 +283,16 @@ impl JointFrameSpec {
     }
 }
 
-/// §D.5.3 Table A5 (SA129 difference symbols) — the encode direction
-/// of the 5-level Huffman book, for writing Huffman-coded
+/// SA129 difference symbols — the encode direction of the crate's
+/// `SHUFF = 0` book (the §D.5.12 129-level A129 alphabet since round
+/// 453; see `ScalesCodebook`), for writing Huffman-coded
 /// `JOIN_SCALES` symbols: `symbol → (code, code_len)`.
-fn a5_encode(symbol: i32) -> (u32, u8) {
-    match symbol {
-        0 => (0, 1),
-        1 => (2, 2),
-        -1 => (6, 3),
-        2 => (14, 4),
-        -2 => (15, 4),
-        other => panic!("A5 has no codeword for symbol {other}"),
-    }
+fn sa129_encode(symbol: i32) -> (u32, u8) {
+    oxideav_dts::scales_code(
+        oxideav_dts::ScalesCodebook::Sa129,
+        i16::try_from(symbol).expect("symbol fits"),
+    )
+    .unwrap_or_else(|| panic!("SA129 has no codeword for symbol {symbol}"))
 }
 
 /// Build one synthetic stereo joint-intensity Core frame.
@@ -495,7 +493,7 @@ pub fn build_frame_from_spec(template: &DtsFrameHeader, spec: &JointFrameSpec) -
                         5 => b.push(sym as u32, 6),
                         6 => b.push(sym as u32, 7),
                         0 => {
-                            let (code, len) = a5_encode(sym);
+                            let (code, len) = sa129_encode(sym);
                             b.push(code, len);
                         }
                         other => panic!("builder does not encode JOIN_SHUFF {other}"),

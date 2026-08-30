@@ -519,6 +519,14 @@ mod tests {
 
     /// Pack a series of (value, bit_width) fields into a byte stream
     /// MSB-first. Trailing bits are zero-padded.
+    /// `(code, len)` of a SCALES difference symbol in the SA129 book
+    /// (§D.5.12 Table A129).
+    fn sa129(diff: i16) -> (u32, u8) {
+        let table = crate::side_info::scales_table(ScalesCodebook::Sa129).unwrap();
+        let &(_, len, code) = table.iter().find(|&&(s, _, _)| s == diff).unwrap();
+        (u32::from(code), len)
+    }
+
     fn pack_fields(fields: &[(u32, u8)]) -> Vec<u8> {
         let total_bits: usize = fields.iter().map(|(_, w)| *w as usize).sum();
         let mut out = vec![0u8; total_bits.div_ceil(8)];
@@ -681,13 +689,13 @@ mod tests {
         // accumulator across both loops, per Table 5-28.
         let stream = pack_fields(&[
             (0, 2),
-            (0, 3),      // SSC=0, PSC=0
-            (0, 3),      // PMODE[0..3] = 0
-            (0b10, 2),   // ABITS[0] = 2 (A12)
-            (0b10, 2),   // ABITS[1] = 2 (A12)
-            (0b1110, 4), // SCALES[0][0]: diff +2 -> sum 2
-            (0b10, 2),   // SCALES[1][0]: diff +1 -> sum 3
-            (0b0, 1),    // SCALES[2][0] (HF): diff 0 -> sum 3
+            (0, 3),    // SSC=0, PSC=0
+            (0, 3),    // PMODE[0..3] = 0
+            (0b10, 2), // ABITS[0] = 2 (A12)
+            (0b10, 2), // ABITS[1] = 2 (A12)
+            sa129(2),  // SCALES[0][0]: diff +2 -> sum 2
+            sa129(1),  // SCALES[1][0]: diff +1 -> sum 3
+            sa129(0),  // SCALES[2][0] (HF): diff 0 -> sum 3
         ]);
         let params = [ChannelSideInfoParams {
             n_subs: 3,
@@ -702,7 +710,8 @@ mod tests {
         assert_eq!(ch.scales[0][0], RMS_6BIT[2]);
         assert_eq!(ch.scales[1][0], RMS_6BIT[3]);
         assert_eq!(ch.scales[2][0], RMS_6BIT[3]);
-        assert_eq!(bits, 5 + 3 + 4 + 7);
+        let scale_bits: u8 = [2, 1, 0].iter().map(|&d| sa129(d).1).sum();
+        assert_eq!(bits, 5 + 3 + 4 + usize::from(scale_bits));
     }
 
     #[test]
@@ -714,13 +723,13 @@ mod tests {
         let stream = pack_fields(&[
             (0, 2),
             (0, 3),
-            (0, 1),      // PMODE ch0[0] (nSUBS = 1)
-            (0, 2),      // PMODE ch1[0..2] (nSUBS = 2)
-            (0b10, 2),   // ABITS ch0[0] = 2 (A12)
-            (0b10, 2),   // ABITS ch1[0] = 2 (A12)
-            (0b1110, 4), // ch0 SCALES[0][0]: diff +2 -> sum 2
-            (0b10, 2),   // ch1 SCALES[0][0]: diff +1 -> fresh sum 1
-            (0b10, 2),   // ch1 SCALES[1][0] (HF VQ): diff +1 -> sum 2
+            (0, 1),    // PMODE ch0[0] (nSUBS = 1)
+            (0, 2),    // PMODE ch1[0..2] (nSUBS = 2)
+            (0b10, 2), // ABITS ch0[0] = 2 (A12)
+            (0b10, 2), // ABITS ch1[0] = 2 (A12)
+            sa129(2),  // ch0 SCALES[0][0]: diff +2 -> sum 2
+            sa129(1),  // ch1 SCALES[0][0]: diff +1 -> fresh sum 1
+            sa129(1),  // ch1 SCALES[1][0] (HF VQ): diff +1 -> sum 2
         ]);
         // Layout note: ch0 has nSUBS = nVQSUB = 1 so its SCALES block
         // is the single +2 difference (no HF tail); ch1 (nSUBS = 2,

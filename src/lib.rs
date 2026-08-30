@@ -681,7 +681,8 @@ pub use crate::optional_info::{decode_optional_info_at, OptionalInfo, MAX_AUX_BY
 // analysis QMF and §C.2.6-adjoint LFE decimator).
 pub use crate::bitwriter::BitWriter;
 pub use crate::encoder::{
-    CoreEncoder, EncodeError, EncoderConfig, ENCODER_FRAME_SAMPLES, ENCODER_LOOKAHEAD,
+    CoreEncoder, EncodeError, EncoderConfig, HuffmanScales, ENCODER_FRAME_SAMPLES,
+    ENCODER_LOOKAHEAD,
 };
 pub use crate::lfe_analysis::{LfeAnalysis, LFE_ANALYSIS_SYNTHESIS_DELAY, LFE_EQ_HALF};
 pub use crate::qmf_analysis::{
@@ -709,8 +710,8 @@ pub use crate::rev2_aux::{
 #[doc(hidden)]
 pub use crate::side_info::{
     decode_abits_at, decode_adj_at, decode_join_scale_at, decode_scales_at,
-    decode_subsubframe_count_at, decode_tmode_at, AbitsCodebook, ScaleFactorAdjustment,
-    ScalesCodebook, SubsubframeCount, TmodeCodebook, RMS_6BIT, RMS_7BIT,
+    decode_subsubframe_count_at, decode_tmode_at, scales_code, AbitsCodebook,
+    ScaleFactorAdjustment, ScalesCodebook, SubsubframeCount, TmodeCodebook, RMS_6BIT, RMS_7BIT,
 };
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]

@@ -2606,6 +2606,13 @@ impl AudioHuffCodebook {
 /// code of the prefix-matched length is found. Returns
 /// [`Error::HuffmanDecodeFailed`] when no entry matches within
 /// [`MAX_AUDIO_HUFF_CODE_LEN`] bits.
+/// The `(symbol, code_length, code)` entries of `codebook`, for the
+/// encoder (and for the §5.4.1 SCALES path, whose `SA129..SE129`
+/// selectors are the §D.5.12 129-level books A129..E129).
+pub(crate) fn table_for(codebook: AudioHuffCodebook) -> &'static [AudioHuffEntry] {
+    codebook.table().0
+}
+
 fn decode_audio_huff(br: &mut BitReader<'_>, codebook: AudioHuffCodebook) -> Result<i16> {
     let (table, name) = codebook.table();
     // Each book's own deepest leaf bounds the walk; never read past the

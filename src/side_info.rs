@@ -215,7 +215,7 @@ const TABLE_E12: &[HuffmanEntry] = &[
 /// Maximum code length over every codebook in this module. The
 /// decoder reads bits one at a time up to this bound; an unmatched
 /// pattern after that many bits is a stream-format failure.
-const MAX_HUFFMAN_CODE_LEN: u32 = 14;
+const MAX_HUFFMAN_CODE_LEN: u32 = 16;
 
 /// Walk a Huffman codebook one bit at a time, MSB-first, returning
 /// the matching `symbol` when a code of the prefix-matched length is
@@ -454,48 +454,50 @@ pub(crate) fn decode_tmode(br: &mut BitReader<'_>, codebook: TmodeCodebook) -> R
 // |     6     | 7-bit linear    | 7 bit (clause D.1.2)    |
 // |     7     | Invalid         | Invalid                 |
 //
-// The five 129-entry SA/SB/SC/SD/SE codebooks themselves are NOT
-// transcribed in the staged PDF as "129"-suffixed tables; the spec
-// instead routes them through the Annex D §D.5.x small-Huffman
-// codebooks for the 5- and 7-level cases. Per Table 5-28's
-// `nScaleSum += nScale; pScaleTable->LookUp(nScaleSum, …)` flow, the
-// transmitted Huffman codeword is a **difference** between two
-// consecutive scale-factor quantisation indexes, not the absolute
-// index. The decoder accumulates `nScaleSum` across the loop and
-// looks the running sum up in the 6- or 7-bit square-root table.
-//
-// Round 195 surfaces the 6- and 7-bit linear paths plus the Annex D
-// §D.5.3 (5-level: A5/B5/C5) and §D.5.4 (7-level: A7/B7/C7) Huffman
-// codebooks used by SHUFF=0..4 to encode the **scale-factor
-// difference** symbols. The staged ETSI PDF p.198-200 has the small-
-// Huffman codebooks; the dispatch from SHUFF to (5-level or 7-level)
-// is identified by the (signed) range of differences the codebook
-// covers: SA/SB/SC129 use 5-level (-2..=2) differences and SD/SE129
-// use 7-level (-3..=3) differences in the staged tables. The full
-// 129-level SA129..SE129 mapping itself remains a docs-completeness
-// follow-up because the spec's staged Annex D in this revision
-// elides the 129-entry tables; see README "Docs gaps" for the file
-// citation.
+// The five `SA129..SE129` code books are the Annex D §D.5.12 "129
+// Levels" Huffman tables A129..E129 (staged PDF p.219 ff.): the
+// `S` prefix marks their SCALES use, the `129` their level count.
+// Per Table 5-28's `nScaleSum += nScale; pScaleTable->LookUp(
+// nScaleSum, …)` flow the transmitted symbol is a **difference**
+// between consecutive scale-factor quantization indexes, accumulated
+// from `nScaleSum = 0` — so the very first index of a channel is
+// itself coded as a difference from zero, which only a ±64 alphabet
+// can reach across the 64-entry §D.1.1 table (and the §5.4.1
+// `JOIN_SCALES` path biases the same symbol by +64 into the
+// 129-entry §D.3 table: again exactly the 129-level alphabet).
+// Rounds 195–452 routed these selectors through the 5-/7-level
+// §D.5.3/§D.5.4 books, which cannot express a first index above 3.
+// Round 453 moved them to the structurally consistent 129-level
+// alphabet — **but this remains unverified**: the spec never prints
+// tables named `SA129..SE129`, and streams the round-453 encoder
+// codes through A129..E129 (`HuffmanScales::WhenCheaper`) are
+// rejected by the black-box reference decoder ("invalid scale factor
+// index" on every frame) while its `SHUFF = 6` streams decode
+// perfectly. The five scale-factor books are therefore distinct,
+// unprinted tables — a `docs/` gap, recorded in the README. Streams
+// in the wild (every reference-encoder fixture bundled here) use
+// `SHUFF = 6`, so the decode path below is exercised only by
+// spec-shaped synthetic tests.
 
 /// Codebook selector for the scale-factor (SCALES) field, per §5.3.x
 /// Table 5-24. `SHUFF[ch] == 7` is reserved/invalid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScalesCodebook {
-    /// `SHUFF=0` — SA129 difference codebook (Annex D §D.5.3
-    /// Table A5 for the 5-level difference symbol set). Lookup table:
-    /// 6-bit RMS (§D.1.1).
+    /// `SHUFF=0` — SA129 difference codebook (Annex D §D.5.12
+    /// Table A129, ±64 difference symbols). Lookup table: 6-bit RMS
+    /// (§D.1.1).
     Sa129,
-    /// `SHUFF=1` — SB129 difference codebook (Annex D §D.5.3
-    /// Table B5). Lookup table: 6-bit RMS (§D.1.1).
+    /// `SHUFF=1` — SB129 difference codebook (Annex D §D.5.12
+    /// Table B129). Lookup table: 6-bit RMS (§D.1.1).
     Sb129,
-    /// `SHUFF=2` — SC129 difference codebook (Annex D §D.5.3
-    /// Table C5). Lookup table: 6-bit RMS (§D.1.1).
+    /// `SHUFF=2` — SC129 difference codebook (Annex D §D.5.12
+    /// Table C129). Lookup table: 6-bit RMS (§D.1.1).
     Sc129,
-    /// `SHUFF=3` — SD129 difference codebook (Annex D §D.5.4
-    /// Table A7). Lookup table: 6-bit RMS (§D.1.1).
+    /// `SHUFF=3` — SD129 difference codebook (Annex D §D.5.12
+    /// Table D129). Lookup table: 6-bit RMS (§D.1.1).
     Sd129,
-    /// `SHUFF=4` — SE129 difference codebook (Annex D §D.5.4
-    /// Table B7). Lookup table: 6-bit RMS (§D.1.1).
+    /// `SHUFF=4` — SE129 difference codebook (Annex D §D.5.12
+    /// Table E129). Lookup table: 6-bit RMS (§D.1.1).
     Se129,
     /// `SHUFF=5` — Linear 6-bit (raw 6-bit absolute SCALES index,
     /// 0..=63). Lookup table: 6-bit RMS (§D.1.1).
@@ -545,51 +547,57 @@ impl ScalesCodebook {
     }
 }
 
-/// Annex D §D.5.3 Table A5.
-const TABLE_A5: &[HuffmanEntry] = &[(0, 1, 0), (1, 2, 2), (-1, 3, 6), (2, 4, 14), (-2, 4, 15)];
-
-/// Annex D §D.5.3 Table B5.
-const TABLE_B5: &[HuffmanEntry] = &[(0, 2, 2), (1, 2, 0), (-1, 2, 1), (2, 3, 6), (-2, 3, 7)];
-
-/// Annex D §D.5.3 Table C5.
-const TABLE_C5: &[HuffmanEntry] = &[(0, 1, 0), (1, 3, 4), (-1, 3, 5), (2, 3, 6), (-2, 3, 7)];
-
-/// Annex D §D.5.4 Table A7.
-const TABLE_A7: &[HuffmanEntry] = &[
-    (0, 1, 0),
-    (1, 3, 6),
-    (-1, 3, 5),
-    (2, 3, 4),
-    (-2, 4, 14),
-    (3, 5, 31),
-    (-3, 5, 30),
-];
-
-/// Annex D §D.5.4 Table B7.
-const TABLE_B7: &[HuffmanEntry] = &[
-    (0, 2, 3),
-    (1, 2, 1),
-    (-1, 2, 0),
-    (2, 3, 4),
-    (-2, 4, 11),
-    (3, 5, 21),
-    (-3, 5, 20),
-];
-
-/// Per Table 5-24, the SHUFF=0..2 entries (SA129/SB129/SC129) route
-/// through the 5-level codebooks; SHUFF=3..4 (SD129/SE129) route
-/// through the 7-level codebooks. The dispatch is by codebook variant.
+/// Per Table 5-24, the SHUFF=0..=4 entries (SA129..SE129) are the
+/// Annex D §D.5.12 129-level books A129..E129 (see the note above the
+/// [`ScalesCodebook`] definition). The dispatch is by codebook variant.
 fn scales_huffman_codebook(codebook: ScalesCodebook) -> (&'static [HuffmanEntry], &'static str) {
+    use crate::audio_huff::{table_for, AudioHuffCodebook};
     match codebook {
-        ScalesCodebook::Sa129 => (TABLE_A5, "A5"),
-        ScalesCodebook::Sb129 => (TABLE_B5, "B5"),
-        ScalesCodebook::Sc129 => (TABLE_C5, "C5"),
-        ScalesCodebook::Sd129 => (TABLE_A7, "A7"),
-        ScalesCodebook::Se129 => (TABLE_B7, "B7"),
+        ScalesCodebook::Sa129 => (table_for(AudioHuffCodebook::A129), "SA129"),
+        ScalesCodebook::Sb129 => (table_for(AudioHuffCodebook::B129), "SB129"),
+        ScalesCodebook::Sc129 => (table_for(AudioHuffCodebook::C129), "SC129"),
+        ScalesCodebook::Sd129 => (table_for(AudioHuffCodebook::D129), "SD129"),
+        ScalesCodebook::Se129 => (table_for(AudioHuffCodebook::E129), "SE129"),
         // Unreachable: the caller dispatches linear variants
         // separately via the `is_huffman_encoded()` check.
         ScalesCodebook::Linear6Bit | ScalesCodebook::Linear7Bit => (&[], "<linear>"),
     }
+}
+
+/// `(code, code_length)` of the SCALES / JOIN_SCALES difference
+/// `symbol` under a Huffman selector — `None` for the linear selectors
+/// or a symbol outside the book's ±64 alphabet. Exposed for tests and
+/// fuzz harnesses that build spec-shaped streams; not a stable API.
+#[doc(hidden)]
+#[must_use]
+pub fn scales_code(codebook: ScalesCodebook, symbol: i16) -> Option<(u32, u8)> {
+    scales_table(codebook)?
+        .iter()
+        .find(|&&(sym, _, _)| sym == symbol)
+        .map(|&(_, len, code)| (u32::from(code), len))
+}
+
+/// Encoder-side view of the SCALES / JOIN_SCALES Huffman book for a
+/// selector (`None` for the two linear selectors).
+pub(crate) fn scales_table(codebook: ScalesCodebook) -> Option<&'static [HuffmanEntry]> {
+    if codebook.is_huffman_encoded() {
+        Some(scales_huffman_codebook(codebook).0)
+    } else {
+        None
+    }
+}
+
+/// Encoder-side view of the §D.5.6 ABITS book for a selector (`None`
+/// for the two linear selectors).
+pub(crate) fn abits_table(codebook: AbitsCodebook) -> Option<&'static [HuffmanEntry]> {
+    Some(match codebook {
+        AbitsCodebook::A12 => TABLE_A12,
+        AbitsCodebook::B12 => TABLE_B12,
+        AbitsCodebook::C12 => TABLE_C12,
+        AbitsCodebook::D12 => TABLE_D12,
+        AbitsCodebook::E12 => TABLE_E12,
+        AbitsCodebook::Linear4Bit | AbitsCodebook::Linear5Bit => return None,
+    })
 }
 
 // ---------------------------------------------------------------
@@ -1298,8 +1306,8 @@ mod tests {
 
     #[test]
     fn huffman_codebooks_are_complete_prefix_codes() {
-        // Sanity check: each of the ten Annex D codebooks transcribed
-        // in this module must satisfy Kraft's inequality with equality
+        // Sanity check: each Annex D codebook this module dispatches
+        // to must satisfy Kraft's inequality with equality
         // (sum_i 2^{-len_i} == 1.0) for it to be a complete prefix
         // code — i.e. every infinite bit stream maps to exactly one
         // symbol. The ETSI tables are designed this way and our
@@ -1312,11 +1320,11 @@ mod tests {
             ("C12", TABLE_C12),
             ("D12", TABLE_D12),
             ("E12", TABLE_E12),
-            ("A5", TABLE_A5),
-            ("B5", TABLE_B5),
-            ("C5", TABLE_C5),
-            ("A7", TABLE_A7),
-            ("B7", TABLE_B7),
+            ("SA129", scales_huffman_codebook(ScalesCodebook::Sa129).0),
+            ("SB129", scales_huffman_codebook(ScalesCodebook::Sb129).0),
+            ("SC129", scales_huffman_codebook(ScalesCodebook::Sc129).0),
+            ("SD129", scales_huffman_codebook(ScalesCodebook::Sd129).0),
+            ("SE129", scales_huffman_codebook(ScalesCodebook::Se129).0),
             ("A4", TABLE_A4),
             ("B4", TABLE_B4),
             ("C4", TABLE_C4),
@@ -1515,44 +1523,73 @@ mod tests {
         assert_eq!(sum, 31);
     }
 
+    /// `(code, len)` of `symbol` in a `(symbol, len, code)` book.
+    fn code_of(table: &[HuffmanEntry], symbol: i16) -> (u16, u8) {
+        let &(_, len, code) = table
+            .iter()
+            .find(|&&(sym, _, _)| sym == symbol)
+            .expect("symbol in book");
+        (code, len)
+    }
+
     #[test]
     fn decode_scales_sa129_accumulates_differences() {
-        // SA129 -> TABLE_A5. Symbols carry signed differences.
-        // Pack the sequence (+1, +1, +1, -1) which equals
-        // (TABLE_A5[1].code, TABLE_A5[0].code, TABLE_A5[0].code,
-        //  TABLE_A5[2].code) by their (symbol -> entry) mapping:
-        //   +1 -> (1, 2, 2)
-        //    0 -> (0, 1, 0)   (we'll use this for "no movement")
-        //   -1 -> (-1, 3, 6)
-        // Actually use +1, +1, -1 (skip the zero-movement step):
-        //   +1 = code 0b10 (len 2)
-        //   +1 = code 0b10 (len 2)
-        //   -1 = code 0b110 (len 3)
-        // Stream bits: 10_10_110_0 = 0b10101100 = 0xAC.
-        let stream = [0xAC];
+        // SA129 -> §D.5.12 Table A129 (±64 difference symbols). The
+        // first index of a channel is itself a difference from the
+        // cleared accumulator, so +40 lands directly on RMS_6BIT[40];
+        // then +1 and -3.
+        let (table, _) = scales_huffman_codebook(ScalesCodebook::Sa129);
+        let stream = pack_codes(&[code_of(table, 40), code_of(table, 1), code_of(table, -3)]);
         let mut br = BitReader::new(&stream);
 
         let (val1, sum1) = decode_scales(&mut br, ScalesCodebook::Sa129, 0).unwrap();
-        // 0 + 1 = 1; RMS_6BIT[1] = 2.
-        assert_eq!(sum1, 1);
-        assert_eq!(val1, RMS_6BIT[1]);
+        assert_eq!(sum1, 40);
+        assert_eq!(val1, RMS_6BIT[40]);
 
         let (val2, sum2) = decode_scales(&mut br, ScalesCodebook::Sa129, sum1).unwrap();
-        // 1 + 1 = 2; RMS_6BIT[2] = 2.
-        assert_eq!(sum2, 2);
-        assert_eq!(val2, RMS_6BIT[2]);
+        assert_eq!(sum2, 41);
+        assert_eq!(val2, RMS_6BIT[41]);
 
         let (val3, sum3) = decode_scales(&mut br, ScalesCodebook::Sa129, sum2).unwrap();
-        // 2 + (-1) = 1; RMS_6BIT[1] = 2.
-        assert_eq!(sum3, 1);
-        assert_eq!(val3, RMS_6BIT[1]);
+        assert_eq!(sum3, 38);
+        assert_eq!(val3, RMS_6BIT[38]);
+    }
+
+    #[test]
+    fn every_scales_book_is_the_full_129_level_alphabet() {
+        for cb in [
+            ScalesCodebook::Sa129,
+            ScalesCodebook::Sb129,
+            ScalesCodebook::Sc129,
+            ScalesCodebook::Sd129,
+            ScalesCodebook::Se129,
+        ] {
+            let (table, _) = scales_huffman_codebook(cb);
+            assert_eq!(table.len(), 129, "{cb:?}");
+            for sym in -64..=64i16 {
+                let (code, len) = code_of(table, sym);
+                let stream = pack_codes(&[(code, len)]);
+                let mut br = BitReader::new(&stream);
+                // Start from 64 so every symbol lands inside 0..=63
+                // for the negative half and the check exercises the
+                // book, not the table bound.
+                let start = if sym < 0 { 63 } else { 0 };
+                let expect = start + i32::from(sym);
+                if (0..63).contains(&expect) {
+                    let (val, sum) = decode_scales(&mut br, cb, start).unwrap();
+                    assert_eq!(sum, expect, "{cb:?} symbol {sym}");
+                    assert_eq!(val, RMS_6BIT[expect as usize]);
+                }
+            }
+        }
     }
 
     #[test]
     fn decode_scales_negative_accumulator_rejected() {
-        // SA129 starting at 0, transmit -1 (code 0b110 len 3 + pad).
-        // Resulting accumulator = -1, out of [0, 64) → error.
-        let stream = [0b1100_0000];
+        // SA129 starting at 0, transmit -1: accumulator -1 is outside
+        // [0, 64) → error.
+        let (table, _) = scales_huffman_codebook(ScalesCodebook::Sa129);
+        let stream = pack_codes(&[code_of(table, -1)]);
         let mut br = BitReader::new(&stream);
         let err = decode_scales(&mut br, ScalesCodebook::Sa129, 0).unwrap_err();
         assert!(matches!(
@@ -1593,20 +1630,19 @@ mod tests {
     }
 
     #[test]
-    fn decode_scales_sd129_uses_7level_table_with_difference_semantics() {
-        // SD129 -> TABLE_A7. Symbols ±3 in addition to A5's ±2 range.
-        // Pack +3 (code 31, len 5) then -3 (code 30, len 5).
-        // Stream bits: 11111_11110_000000 = 0b11111111 0b10000000 = 0xFF 0x80.
-        let stream = [0xFF, 0x80];
+    fn decode_scales_sd129_uses_d129_with_difference_semantics() {
+        // SD129 -> Table D129: +3 then -3 back to zero.
+        let (table, _) = scales_huffman_codebook(ScalesCodebook::Sd129);
+        let stream = pack_codes(&[code_of(table, 3), code_of(table, -3)]);
         let mut br = BitReader::new(&stream);
 
         let (val1, sum1) = decode_scales(&mut br, ScalesCodebook::Sd129, 0).unwrap();
-        assert_eq!(sum1, 3); // 0 + 3
-        assert_eq!(val1, RMS_6BIT[3]); // RMS_6BIT[3] = 3
+        assert_eq!(sum1, 3);
+        assert_eq!(val1, RMS_6BIT[3]);
 
         let (val2, sum2) = decode_scales(&mut br, ScalesCodebook::Sd129, sum1).unwrap();
-        assert_eq!(sum2, 0); // 3 + (-3)
-        assert_eq!(val2, RMS_6BIT[0]); // RMS_6BIT[0] = 1
+        assert_eq!(sum2, 0);
+        assert_eq!(val2, RMS_6BIT[0]);
     }
 
     // -----------------------------------------------------------
@@ -1918,28 +1954,31 @@ mod tests {
 
     #[test]
     fn decode_join_scale_huffman_zero_symbol_is_unity() {
-        // The SA129 Huffman table (A5) codes symbol 0 as a 1-bit `0`.
-        // After the +64 bias that lands on the §D.3 unity entry (1.0).
-        let stream = pack_codes(&[(0, 1)]);
+        // The SA129 (A129) zero symbol, after the +64 bias, lands on
+        // the §D.3 unity entry (1.0).
+        let (table, _) = scales_huffman_codebook(ScalesCodebook::Sa129);
+        let (code, len) = code_of(table, 0);
+        let stream = pack_codes(&[(code, len)]);
         let (factor, biased, bits) =
             decode_join_scale_at(&stream, 0, ScalesCodebook::Sa129).unwrap();
         assert_eq!(biased, 64);
         assert_eq!(factor, 1.0);
-        assert_eq!(bits, 1);
+        assert_eq!(bits, usize::from(len));
     }
 
     #[test]
-    fn decode_join_scale_huffman_walks_every_a5_symbol() {
-        // Each SA129 (A5) symbol biases by +64 and must land on a valid
-        // §D.3 entry (all of {-2,-1,0,1,2} + 64 are inside 0..=128).
-        for &(symbol, len, code) in TABLE_A5 {
+    fn decode_join_scale_huffman_walks_every_a129_symbol() {
+        // Each SA129 symbol biases by +64 onto a valid §D.3 entry: the
+        // ±64 alphabet maps exactly onto the 129-entry table.
+        let (table, _) = scales_huffman_codebook(ScalesCodebook::Sa129);
+        for &(symbol, len, code) in table {
             let stream = pack_codes(&[(code, len)]);
             let (factor, biased, _) =
                 decode_join_scale_at(&stream, 0, ScalesCodebook::Sa129).unwrap();
-            assert_eq!(biased, symbol as i32 + 64);
+            assert_eq!(biased, i32::from(symbol) + 64);
             assert_eq!(
                 factor,
-                crate::JOIN_SCALE_FACTOR[(symbol as i32 + 64) as usize]
+                crate::JOIN_SCALE_FACTOR[(i32::from(symbol) + 64) as usize]
             );
         }
     }

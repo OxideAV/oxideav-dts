@@ -9,7 +9,8 @@
 //! the in-module tests' direct `BitReader` access.
 
 use oxideav_dts::{
-    decode_abits_at, decode_scales_at, AbitsCodebook, ScalesCodebook, RMS_6BIT, RMS_7BIT,
+    decode_abits_at, decode_scales_at, scales_code, AbitsCodebook, ScalesCodebook, RMS_6BIT,
+    RMS_7BIT,
 };
 
 /// Pack a series of (code, code_length) pairs into a byte stream
@@ -65,7 +66,7 @@ fn abits_block_decode_walks_contiguous_subband_loop_under_bhuff_a12() {
 }
 
 /// Walk a contiguous block of SCALES fields encoded with SHUFF=0
-/// (SA129 / Table A5), demonstrating the difference-accumulator
+/// (SA129, the 129-level difference book), demonstrating the difference-accumulator
 /// contract: the running `n_scale_sum` from each call feeds the next.
 /// This is the §5.4.1 Table 5-28 inner loop:
 ///
@@ -81,26 +82,22 @@ fn abits_block_decode_walks_contiguous_subband_loop_under_bhuff_a12() {
 /// ```
 #[test]
 fn scales_block_decode_accumulates_through_difference_loop_under_shuff_sa129() {
-    // From Annex D §D.5.3 Table A5 (the 5-level difference codebook
-    // for SA129..SC129):
-    //   diff=0  -> (1, 0)
-    //   diff=+1 -> (2, 2)    (binary 10)
-    //   diff=-1 -> (3, 6)    (binary 110)
-    //   diff=+2 -> (4, 14)   (binary 1110)
-    //   diff=-2 -> (4, 15)   (binary 1111)
-    //
-    // Encode the difference sequence (+2, +1, 0, -1, -2) starting from
-    // n_scale_sum=10. After each step the absolute index becomes
-    // 12, 13, 13, 12, 10. The corresponding RMS_6BIT lookups are:
-    //   RMS_6BIT[12] = 26
-    //   RMS_6BIT[13] = 34
-    //   RMS_6BIT[13] = 34
-    //   RMS_6BIT[12] = 26
-    //   RMS_6BIT[10] = 16
-    let stream = pack_codes(&[(14, 4), (2, 2), (0, 1), (6, 3), (15, 4)]);
-    // Total bits = 4 + 2 + 1 + 3 + 4 = 14, so 2 bytes (the high 2 bits
-    // of byte 1 carry actual payload; the low 2 bits are pad).
-    assert_eq!(stream.len(), 2);
+    // SA129 is the Annex D §D.5.12 129-level Table A129 (±64
+    // difference symbols). Encode the difference sequence
+    // (+2, +1, 0, -1, -2) starting from n_scale_sum=10. After each
+    // step the absolute index becomes 12, 13, 13, 12, 10, with the
+    // RMS_6BIT lookups 26, 34, 34, 26, 16.
+    // SA129 is the §D.5.12 129-level Table A129; look the difference
+    // codes up rather than hard-coding them.
+    let codes: Vec<(u16, u8)> = [2i16, 1, 0, -1, -2]
+        .iter()
+        .map(|&d| {
+            let (code, len) = scales_code(ScalesCodebook::Sa129, d).unwrap();
+            (code as u16, len)
+        })
+        .collect();
+    let total_bits: usize = codes.iter().map(|&(_, l)| usize::from(l)).sum();
+    let stream = pack_codes(&codes);
 
     let mut cursor_bits = 0usize;
     let mut n_scale_sum: i32 = 10;
@@ -125,7 +122,7 @@ fn scales_block_decode_accumulates_through_difference_loop_under_shuff_sa129() {
         ]
     );
     assert_eq!(accumulator_history, vec![12, 13, 13, 12, 10]);
-    assert_eq!(cursor_bits, 4 + 2 + 1 + 3 + 4);
+    assert_eq!(cursor_bits, total_bits);
 }
 
 /// Cross-check that the linear-7-bit SHUFF path bypasses the

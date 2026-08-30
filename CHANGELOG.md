@@ -8,13 +8,40 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Round 453 — **encoder entropy coding + two-pass allocation**: per
+  `(channel, ABITS)` family the cheapest Table 5-26 `SEL` is chosen
+  by exact bit count (a §D.5 Huffman book with the Table 5-27 `ADJ`
+  field at unity, a §D.6 block code, or NFE), `ABITS` goes through
+  the cheapest of the §D.5.6 12-level books / linear 4- / 5-bit
+  fields, and the allocator re-spends the bits the entropy selection
+  saved in a second worst-case-priced pass with rollback of the
+  newest steps until the exact re-selected total fits. Stereo
+  multitone through our decoder: 384k 47/50 → 51/54 dB, 512k 54/56 →
+  62/63 dB, 768k 70/70 → 75/75 dB. Fixtures regenerated; the
+  reference decoder now reconstructs them at 67.9/67.8 dB (768k),
+  34.6/32.8 dB (192k) and 44–49 dB / 24.8 dB LFE (5.1).
+- Round 453 — **`SHUFF 0..=4` scale-factor books (`SA129..SE129`)**:
+  the decoder's routing of these selectors moves from the 5-/7-level
+  §D.5.3/§D.5.4 books (which cannot code a first index above 3) to
+  the structurally consistent §D.5.12 129-level A129..E129 alphabet
+  (±64 differences over the 64-entry §D.1.1 grid from a zeroed
+  accumulator; the `JOIN_SCALES` `+64` bias into the 129-entry §D.3
+  table needs the same alphabet). **Unverified**: the spec prints no
+  table under the `SA129..SE129` names, and the black-box reference
+  decoder rejects streams the encoder codes this way ("invalid scale
+  factor index") while accepting its `SHUFF = 6` streams — so the
+  five books are unprinted, distinct tables (docs gap). The encoder
+  keeps `HuffmanScales::Never` as default; the difference-coded path
+  is available for experiments and round-trips only through this
+  crate's decoder. `MAX_HUFFMAN_CODE_LEN` rose to 16 for the deeper
+  D129/E129 leaves.
 - Round 453 — **encoder black-box validation** (`tests/black_box_encoder.rs`
   + three committed fixture pairs `enc_stereo_768k` / `enc_stereo_192k`
   / `enc_51_lfe_768k`): streams produced by `CoreEncoder` decoded by the
   opaque reference decoder **without diagnostics**, and the reference
-  PCM reconstructs the original input at unity gain — 66.6 / 66.2 dB
-  (stereo 768k), 33.9 / 31.8 dB (stereo 192k, the allocator's own
-  choice to drop the −34 dBFS 17.5 kHz tone), 42–45 dB on the five
+  PCM reconstructs the original input at unity gain — 67.9 / 67.8 dB
+  (stereo 768k), 34.6 / 32.8 dB (stereo 192k, the allocator's own
+  choice to drop the −34 dBFS 17.5 kHz tone), 44–49 dB on the five
   primaries and 24.8 dB on the LFE of the 5.1 stream — with per-band
   energy error ≤ 0.01 dB on the 768k stereo stream. Our decoder and
   the reference agree at 68.8 dB on every primary plane (121 dB on the

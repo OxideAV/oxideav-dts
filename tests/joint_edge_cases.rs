@@ -164,7 +164,7 @@ fn forward_source_joint_decodes() {
     assert_matches_analytic(&spec);
 }
 
-/// Huffman `JOIN_SHUFF = 0` (SA129 → §D.5.3 Table A5): the joint scale
+/// Huffman `JOIN_SHUFF = 0` (SA129, 129-level difference book): the joint scale
 /// symbols are entropy-coded signed differences around zero, each
 /// independently biased by +64 into the §D.3 table (no running
 /// accumulator, unlike the SCALES walk).
