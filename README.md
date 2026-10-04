@@ -489,8 +489,8 @@ if let Ok(_hdr) = parse_frame_header(bytes) {
     // inspect channel layout, sample-rate code, frame size, ...
 }
 
-// Walk a multi-frame stream.
-for frame in iter_frames(bytes) {
+// Walk a multi-frame stream (each item is a `Result<FrameView>`).
+for frame in iter_frames(bytes).flatten() {
     let _payload = frame.payload();
 }
 
