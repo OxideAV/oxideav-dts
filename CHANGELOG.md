@@ -6,6 +6,149 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-dts/compare/v0.0.1...v0.0.2) - 2026-10-04
+
+### Fixed
+
+- clippy needless_range_loop in the encoder silence test
+- joint analytic expectation carries the output calibration; clippy-1.98 manual_slice_fill
+
+### Other
+
+- README examples use the current registry API
+- README + manifest: Encoder section (front end, coding tools, measured ladder, black-box table, gaps)
+- DYNF/RANGE dynamic range, opt-in joint intensity (JOINX/JOIN_SCALES), §5.7.1 aux chunk with downmix coefficients + nAUXCRC16
+- closed-loop ADPCM prediction through the §D.10.1 book (PMODE/PVQ), reconstructed history rolled across frames
+- TMODE transients with two scale factors, §D.10.2 high-frequency VQ above nVQSUB, nSUBS/nVQSUB trimming
+- registry Encoder (make_encoder / DtsEncoderHandle) + raw-LE / 14-bit wire variants; fix registry decoder's raw-LE payload path
+- encoder entropy coding + two-pass allocation; SHUFF 0-4 routed to the 129-level books (unverified, docs gap)
+- encoder black-box validation: three committed stream/reference pairs decoded by the opaque reference
+- Core encoder: §5.3/§5.3.2/§5.4.1/§5.5 bitstream writer, overload-free scales, block/NFE quantization, greedy allocator
+- output level calibrated to the black-box reference: √2 on §C.2.5, 256 on the LFE plane
+- encoder front end: 32-band analysis QMF (exact §C.2.5 inverse) + equalized §C.2.6 LFE decimator
+- table-integrity pin: the §D.10 transcriptions re-serialize to the staged CSVs' exact digests
+- README + CHANGELOG: round 446 — §D.10 index space closed, 480 vectors black-box-confirmed
+- black-box book-coverage fixture: 480 swept §D.10 vectors shape-identical to the reference
+- §D.10 full index-space sweeps: all 1024 HF-VQ + all 4096 ADPCM vectors decode bit-exact
+- state the black-box-oracle posture without denial clauses
+- §D.10 interaction-stress fixture: 6-frame stream validated against the reference
+- README + CHANGELOG: the §D.10 gap is closed — Core-profile decode chain complete
+- registry-surface §D.10 decode pinned: the framework path emits audio by default
+- built-in §D.10 books become the decoder default — the D.10 wall is gone
+- §D.10 frames now compared numerically — shape-identical, >90 dB after the √2 rScale
+- §D.10 VQ code books land as data: built-in books, ÷2^4 divisor + low-byte-first corrections
+- streaming-decode bullet — joint frames decode; only bookless §D.10 frames map to Unsupported
+- §D.10 depth: full-vector nSSC=4 fill, multi-subframe HF+ADPCM+ASPF+CPF grid, real-fixture additivity; doc refresh
+- §D.10 hardening: corruption sweep over the D10 stream (bookless + recovered-book), typed-error unit proofs
+- round 434 — §D.10 sub-paths implemented behind the VqCodebooks drop-in; gap is data-acquisition-only
+- black-box §D.10 framing fixture: reference accepts the spec-built HF-VQ/PMODE stream cleanly
+- spec-built §D.10 battery: synthetic stand-in books, bit-exact analytic validation, HFLAG grid, PSC interactions
+- §5.5 recovered-book decode paths: phase-1 HF-VQ fill + §C.2.2 inverse-ADPCM with the §5.3.1 HFLAG history gate
+- Extractor-09 forensics reconciliation + drop-in containers for recovered §D.10 books
+- PSC depth: Huffman-carrier partial extraction pinned + per-byte-dense termination-frame corruption sweep
+- README + CHANGELOG: termination-frame decode (FTYPE=0 x PSC) documented
+- black-box termination fixture: reference skips FTYPE=0 at parser level; prefix shape-exact; corruption sweep extended
+- termination battery: builder FTYPE/SHORT/PSC/LFE knobs + SSC x PSC grid + interaction tests
+- SS 5.4.1 PSC: termination-frame partial-subsubframe decode
+- joint battery extension: ASPF framing, nSSC=1, 14-bit container round trip
+- joint-intensity decode is validated; three black-box fixtures
+- joint-intensity adjacent coverage: FRONT_SUM interaction, registry path, corruption sweep
+- joint-intensity boundary battery over a parameterized spec-frame builder
+- joint-intensity black-box regression: both channels shape-identical to reference decode
+- SS C.2.5: widen jointly-coded channels' QMF nSUBS to the source channel's count
+- Hide internal DSP/VQ/CRC/§D.10 plumbing re-exports from the semver surface
+- corruption-robustness sweep over both real fixtures
+- SS 5.7.2.2: CRC-gated Rev2AUX DRC override of the legacy DYNF gain
+- 5.1 + LFE black-box regression: all six planes shape-identical to reference decode
+- SS D.10 VQ shell: spec-defined constants + entry scalings + structural HF-VQ index scan
+- signed-Q2 dts_dynrng_to_db/dts_dynrng_to_linear; fix off-by-127 DYNF gain
+- verify nAUXCRC16 + nRev2AUXCRC16 with the Annex B CRC; core HCRC family stays untested per spec
+- Annex B CRC-16 (CRC-CCITT 0x1021/0xFFFF): dts_crc16 + incremental + table forms
+- walk the §5.6 Table 5-30 optional-information region from the decode cursor
+- document the §5.7 optional-information decode surface
+- FrameView §5.7 chunk accessors + DynamicDownmix planar PCM fold
+- decode the §5.7.2 Rev2 Auxiliary Data Chunk (ES downmix scale + broadcast DRC/dialnorm)
+- decode the §5.7.1 Auxiliary Data chunk (time stamp + dynamic downmix coefficients)
+- transcribe the §D.11 downmix scale-factor tables + §5.7.1 coefficient-code resolver
+- wire §C.2.4 sum/difference decoding into the reconstruction chain
+- decode 14-bit container frames to PCM through the registry Decoder
+- add CI / crates.io / docs.rs / MIT-license badges
+- document JOINX>0 joint-intensity decode in README
+- refresh registry/decode-path docs for JOINX>0 support
+- decode JOINX>0 joint-intensity frames end to end (§5.4.1 + §C.2.3)
+- §5.4.1 JOIN_SCALES single-field decoder (decode_join_scale_at)
+- §D.3 joint-intensity scale-factor table (JScaleTbl)
+- emit the LFE channel in the registry planar S32 AudioFrame
+- §5.5 LFE phase walker + LFE-present frame cursor fix
+- §5.5 LFE phase dequant (LfeChannel) over the §C.2.6 interpolator
+- §C.2.6 InterpolationFIR LFE polyphase convolution driver body
+- black-box ffmpeg PCM validation of the Core reconstruction chain
+- persist §C.2.5 stream filter across registry decoder packets
+- add CoreStreamDecoder persisting §C.2.5 filter tail across frames
+- cite spec PDF directly for §D.4 DRC table provenance (drop reverted docs-CSV pointer)
+- end-to-end DYNF RANGE integration test + README/CHANGELOG
+- decode DYNF (RANGE) + CPF (SICRC) frames; fix CPF↔predictor_history mixup
+- §5.4.1 Table 5-28 RANGE/SICRC side-info tail decoder
+- §D.4 Dynamic Range Control RANGE multiplier table (drc_range)
+- decode_core_frame + registry PCM output for the common Core case
+- §5.3.2 nSUBFS frame driver — decode_frame concatenates subframe PCM
+- §5.5 + §C.2.5 end-to-end subframe→PCM bridge (SubframePcmDecoder)
+- §D.5.10/§D.5.11/§D.5.12 audio-data Huffman code books (ABITS 8/9/10)
+- §5.5 Primary Audio Data Arrays (Audio Data) decode walk
+- §5.3.2 Primary Audio Coding Header (Table 5-21) decoder
+- per-frame multi-channel 32-band synthesis QMF driver (§C.2.5 channel loop)
+- wire §C.2.5 QMF driver header bridge — FILTS polarity + output rScale ([#120](https://github.com/OxideAV/oxideav-dts/pull/120))
+- §D.5.9 25-level audio-data Huffman books A25..G25 (ABITS 7)
+- exercise the 12-bit A17 walk in the complete-prefix-code resolve test
+- §D.5.8 17-level audio-data Huffman code books A17..G17 (nQType==1, ABITS 6)
+- §D.8 LFE interpolation FIR tables + §C.2.6 nDecimationSelect selector (r321)
+- §D.5.7 13-level audio-data Huffman code books A13/B13/C13 (nQType==1, ABITS 5)
+- §D.5.1/§D.5.3/§D.5.4/§D.5.5 audio-data Huffman code books (nQType==1, low ABITS)
+- refresh to current status, drop per-round changelog cruft
+- dts r309: Annex D §D.6 Block Code Books + §C.2.1 table-look-up decoder
+- round 306 — §5.5 Table 5-29 DSYNC subsubframe sync check word
+- round 300 — §5.5 Table 5-29 Audio Data nQType dispatch + Table 5-26 codebook-group geometry
+- drop intra-doc link to private STEP_SIZE_INVALID const
+- round 293 — §D.2 step-size tables + §5.5 inverse-quant scale composition
+- round 286 — fused 32-band synthesis QMF driver (§C.2.5 QMFInterpolation)
+- land §5.4.1 Primary Audio Coding Side Information subframe walker + §D.5.2 TMODE codebooks
+- Add ETSI §D.8 32-band interpolation FIR tables + §C.2.5 fir_step() convolution
+- §C.2.5 write_pcm_output() integer-PCM output step
+- round 271: shift_z_output() — §C.2.5 raZ[] post-PCM accumulator rotate
+- round 263: FilterBankSelection — §C.2.5 FIR coefficient set selector
+- round 259: assemble_xin() + shift_x_history() — §C.2.5 FIR-independent QMF pre/post-roll
+- round 255: cos_mod_stage() — §C.2.5 cosine-modulation stage of QMFInterpolation()
+- round 249: SSC / nSSC / PSC — Subsubframe-Count prefix (ETSI §5.4.1 Table 5-28)
+- drop release-plz.toml — use release-plz defaults across the workspace
+- round 244: ADJ → Scale Factor Adjustment multiplier (ETSI §5.4.1 Table 5-27)
+- round 241: DIALNORM / UNSPEC → DNG in dB (ETSI §5.3.1 Table 5-20)
+- round 232: §C.2.1 Block Code (ETSI Annex C §C.2.1)
+- round 228: §C.2.2 Inverse ADPCM (ETSI Annex C §C.2.2)
+- round 223: §C.2.3 Joint Subband Coding (ETSI Annex C §C.2.3)
+- round 214: §C.2.4 Sum/Difference Decoding (ETSI Annex C §C.2.4)
+- round 208: PreCalCosMod() 544-entry cosine-modulation matrix (ETSI Annex C §C.2.5)
+- round 202: SFREQ / AMODE / PCMR resolvers (ETSI §5.3.1 Tables 5-5 / 5-4 / 5-17)
+- round 195: §5.4.1 ABITS / SCALES side-info decoders + Annex D tables
+- release v0.0.1
+- round 192: iter_frames_14bit — 14-bit container-stream frame walker
+- round 189: frame_size_container_bytes() — 14-bit advance per ETSI §5.3.1 / §6.1.3.1
+- RATE → targeted bit-rate via ETSI §5.3.1 Table 5-7
+- round 179: iter_syncs lazy iterator + SyncWordEncoding/SyncMatch accessors
+- round 165: find_next_sync first-byte gate (252/256 short-circuit)
+- round 159: iter_frames_resync error-tolerant frame walker
+- round 151: find_all_syncs bulk-scan helper + raw-LE iter_frames coverage
+- round 148: encode_frame_header_14bit_{be,le} — all 4 sync encodings round-trip
+- round 145: raw-LE encoder + bidirectional 14<->16-bit container pack/unpack
+- round 141: encode_frame_header_be — parse↔encode round-trip on header window
+- surface header->SUBFRAMES boundary as bit/byte length
+- round 6: multi-frame iterator + resync helper
+- round 5: post-CRC 16-bit trailing window (multirate / version / copy / PCMR / sum / dialnorm)
+- round 4: oxideav-core Decoder integration + ci-standalone job
+- round 3: trailing-13-bit fields + optional header CRC
+- round 2: 14-bit sync unpacking + parse_frame_header_14bit
+- round 1: frame-header parser per ETSI TS 102 114 §5.3
+- orphan rebuild: clean-room scaffold post 2026-05-18 audit
+
 ### Added
 
 - Round 453 — **optional tools**: embedded dynamic range
