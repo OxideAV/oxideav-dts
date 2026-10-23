@@ -6,8 +6,8 @@
 
 use oxideav_core::{CodecId, CodecParameters, Decoder, Frame, Packet, TimeBase};
 use oxideav_dts::{
-    iter_frames, make_decoder, pack_16bit_to_14bit, CoreStreamDecoder, FourteenBitByteOrder,
-    CODEC_ID_STR,
+    CODEC_ID_STR, CoreStreamDecoder, FourteenBitByteOrder, iter_frames, make_decoder,
+    pack_16bit_to_14bit,
 };
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/dts_joint_5_frames.bin");
@@ -31,7 +31,7 @@ fn decode_via_registry() -> Vec<Vec<i32>> {
         assert_eq!(audio.data.len(), 2, "stereo planar output");
         assert_eq!(audio.samples, 512, "one frame = 512 samples/ch");
         for (ch, plane) in audio.data.iter().enumerate() {
-            for c in plane.chunks_exact(4) {
+            for c in plane.as_chunks::<4>().0 {
                 out[ch].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
         }
@@ -98,7 +98,7 @@ fn registry_decodes_14bit_joint_container_matching_raw() {
             panic!("expected an audio frame");
         };
         for (ch, plane) in audio.data.iter().enumerate() {
-            for c in plane.chunks_exact(4) {
+            for c in plane.as_chunks::<4>().0 {
                 packed_out[ch].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
         }

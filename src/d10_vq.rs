@@ -59,8 +59,8 @@
 //! by the black-box reference decode of the §D.10-bearing fixture
 //! (`tests/black_box_d10.rs`).
 
-use crate::bitreader::BitReader;
 use crate::Result;
+use crate::bitreader::BitReader;
 
 // ------------------------------------------------------------------
 // §D.10.2 — High-Frequency Subband VQ (`HFreqVQ`)
@@ -237,7 +237,7 @@ impl HfVqCodebook {
             .iter()
             .map(|packed| {
                 let mut v = [0.0_f64; HFREQ_VQ_VECTOR_LEN];
-                for (pair, out) in packed.iter().zip(v.chunks_exact_mut(2)) {
+                for (pair, out) in packed.iter().zip(v.as_chunks_mut::<2>().0.iter_mut()) {
                     out.copy_from_slice(&unpack_hfreq_vq_entry(*pair));
                 }
                 v
@@ -634,11 +634,13 @@ mod tests {
             HfVqCodebook::from_elements(&vec![[0.0; HFREQ_VQ_VECTOR_LEN]; HFREQ_VQ_BOOK_SIZE])
                 .is_ok()
         );
-        assert!(AdpcmVqCodebook::from_coefficients(&vec![
-            [0.0; ADPCM_VQ_VECTOR_LEN];
-            ADPCM_VQ_BOOK_SIZE
-        ])
-        .is_ok());
+        assert!(
+            AdpcmVqCodebook::from_coefficients(&vec![
+                [0.0; ADPCM_VQ_VECTOR_LEN];
+                ADPCM_VQ_BOOK_SIZE
+            ])
+            .is_ok()
+        );
     }
 
     /// [`AdpcmVqCodebook::from_entries`] applies the §D.10.1 ÷ 2¹³

@@ -32,7 +32,7 @@
 //!   claim (5.1 streams come back as six planes in the reference's
 //!   `FL FR FC LFE SL SR` order, mapped below).
 
-use oxideav_dts::{iter_frames, parse_frame_header, CoreStreamDecoder};
+use oxideav_dts::{CoreStreamDecoder, iter_frames, parse_frame_header};
 
 /// Frames per fixture.
 const FRAMES: usize = 8;
@@ -89,18 +89,20 @@ fn signal(name: &str) -> Vec<Vec<f64>> {
         }
         // Quiet tone with one loud burst starting at the second
         // subsubframe of frame 2: exercises TMODE (two scale factors).
-        "mono_transient" => vec![(0..SAMPLES)
-            .map(|i| {
-                let t = i as f64 / 48_000.0;
-                let quiet = 0.002 * (2.0 * std::f64::consts::PI * 700.0 * t).sin();
-                let burst = if (1280..1280 + 400).contains(&i) {
-                    0.6 * (2.0 * std::f64::consts::PI * 2_900.0 * t).sin()
-                } else {
-                    0.0
-                };
-                quiet + burst
-            })
-            .collect()],
+        "mono_transient" => vec![
+            (0..SAMPLES)
+                .map(|i| {
+                    let t = i as f64 / 48_000.0;
+                    let quiet = 0.002 * (2.0 * std::f64::consts::PI * 700.0 * t).sin();
+                    let burst = if (1280..1280 + 400).contains(&i) {
+                        0.6 * (2.0 * std::f64::consts::PI * 2_900.0 * t).sin()
+                    } else {
+                        0.0
+                    };
+                    quiet + burst
+                })
+                .collect(),
+        ],
         // Multitone plus a −40 dBFS 20 kHz tone: at 128 kbit/s the top
         // band goes out as §D.10.2 high-frequency VQ.
         "stereo_hfvq" => (0..2)
@@ -121,7 +123,7 @@ fn signal(name: &str) -> Vec<Vec<f64>> {
 
 fn reference(bytes: &[u8], planes: usize) -> Vec<Vec<f64>> {
     let mut out = vec![Vec::new(); planes];
-    for (i, c) in bytes.chunks_exact(4).enumerate() {
+    for (i, c) in bytes.as_chunks::<4>().0.iter().enumerate() {
         let v = i32::from_le_bytes([c[0], c[1], c[2], c[3]]);
         out[i % planes].push(f64::from(v) / 2f64.powi(31));
     }

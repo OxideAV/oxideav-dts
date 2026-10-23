@@ -32,7 +32,7 @@
 
 mod common;
 
-use oxideav_dts::{iter_frames, CoreStreamDecoder, FrameType};
+use oxideav_dts::{CoreStreamDecoder, FrameType, iter_frames};
 
 /// The committed spec-built stream: 4 normal frames + 1 termination.
 const FIXTURE: &[u8] = include_bytes!("fixtures/dts_term_5_frames.bin");
@@ -101,7 +101,7 @@ fn decode_ours() -> Vec<Vec<i32>> {
 
 fn reference() -> Vec<Vec<i32>> {
     let mut out: Vec<Vec<i32>> = vec![Vec::new(), Vec::new()];
-    for (i, c) in FFMPEG_REF_S32LE.chunks_exact(4).enumerate() {
+    for (i, c) in FFMPEG_REF_S32LE.as_chunks::<4>().0.iter().enumerate() {
         out[i % 2].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
     }
     out

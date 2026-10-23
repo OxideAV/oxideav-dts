@@ -9,10 +9,10 @@
 
 mod common;
 
-use common::{build_frame_from_spec, scales_index, JointFrameSpec, Lcg};
+use common::{JointFrameSpec, Lcg, build_frame_from_spec, scales_index};
 use oxideav_dts::{
-    decode_core_frame, dts_dynrng_to_linear, join_scale, parse_frame_header, CoreFrameDecodeError,
-    DtsFrameHeader, Error, MultiChannelQmf, StepSizeTable, NUM_SUBBAND, RMS_6BIT,
+    CoreFrameDecodeError, DtsFrameHeader, Error, MultiChannelQmf, NUM_SUBBAND, RMS_6BIT,
+    StepSizeTable, decode_core_frame, dts_dynrng_to_linear, join_scale, parse_frame_header,
 };
 
 fn template() -> DtsFrameHeader {
@@ -106,19 +106,19 @@ fn analytic_pcm(spec: &JointFrameSpec, header: &DtsFrameHeader) -> Vec<Vec<i32>>
             &mut block,
         )
         .expect("analytic QMF synthesis");
-        if let Some(g) = gain {
-            if g != 1.0 {
-                for plane in block.iter_mut() {
-                    for s in plane.iter_mut() {
-                        let scaled = (*s as f64 * g).round();
-                        *s = if scaled >= i32::MAX as f64 {
-                            i32::MAX
-                        } else if scaled <= i32::MIN as f64 {
-                            i32::MIN
-                        } else {
-                            scaled as i32
-                        };
-                    }
+        if let Some(g) = gain
+            && g != 1.0
+        {
+            for plane in block.iter_mut() {
+                for s in plane.iter_mut() {
+                    let scaled = (*s as f64 * g).round();
+                    *s = if scaled >= i32::MAX as f64 {
+                        i32::MAX
+                    } else if scaled <= i32::MIN as f64 {
+                        i32::MIN
+                    } else {
+                        scaled as i32
+                    };
                 }
             }
         }

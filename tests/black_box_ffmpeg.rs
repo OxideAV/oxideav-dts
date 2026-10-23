@@ -20,8 +20,8 @@
 //! be checked against `(48000, 768000, 2)` here.
 
 use oxideav_dts::{
-    parse_frame_header, parse_frame_header_14bit, unpack_14bit_to_16bit, FourteenBitByteOrder,
-    FrameType, LfeMode, SyncWordEncoding, TargetedBitRate,
+    FourteenBitByteOrder, FrameType, LfeMode, SyncWordEncoding, TargetedBitRate,
+    parse_frame_header, parse_frame_header_14bit, unpack_14bit_to_16bit,
 };
 
 /// 16 bytes captured from a real `ffmpeg -c:a dca -b:a 768k -ar

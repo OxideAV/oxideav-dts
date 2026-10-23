@@ -495,7 +495,7 @@ mod tests {
         fields.push((7, 3)); // n=7 ABITS8: SEL=7 terminal
         fields.push((7, 3)); // n=8 ABITS9: SEL=7 terminal
         fields.push((7, 3)); // n=9 ABITS10: SEL=7 terminal
-                             // ADJ plane: only ABITS2 (SEL 2<3) and ABITS6 (SEL 4<7) emit.
+        // ADJ plane: only ABITS2 (SEL 2<3) and ABITS6 (SEL 4<7) emit.
         fields.push((1, 2)); // ABITS2 ADJ index 1 (1.1250)
         fields.push((2, 2)); // ABITS6 ADJ index 2 (1.2500)
         let bytes = pack_fields(&fields);

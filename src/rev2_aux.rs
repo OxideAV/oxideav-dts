@@ -78,7 +78,7 @@
 
 use crate::bitreader::BitReader;
 use crate::header::DtsFrameHeader;
-use crate::{dmix_scale, dts_dynrng_to_db, dts_dynrng_to_linear, Error, Result};
+use crate::{Error, Result, dmix_scale, dts_dynrng_to_db, dts_dynrng_to_linear};
 
 /// The §5.7.2 Rev2 auxiliary-data sync word (`nSYNCRev2AUX`),
 /// DWORD-aligned from the beginning of the core frame.
@@ -366,8 +366,8 @@ pub fn parse_rev2_aux(frame: &[u8], header: &DtsFrameHeader) -> Result<Option<Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{synth_header, synth_header_with_blocks, BitWriter};
     use crate::DMIX_TABLE_UNITY_INDEX;
+    use crate::test_util::{BitWriter, synth_header, synth_header_with_blocks};
 
     /// Build a frame: 32 bytes of non-sync filler, then the chunk
     /// DWORD-aligned at offset 32, padded out to the declared size.

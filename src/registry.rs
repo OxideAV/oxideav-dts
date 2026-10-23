@@ -16,7 +16,7 @@ use oxideav_core::{
 };
 
 use crate::header::{detect_sync, parse_frame_header, parse_frame_header_14bit};
-use crate::unpack14::{unpack_14bit_to_16bit, FourteenBitByteOrder};
+use crate::unpack14::{FourteenBitByteOrder, unpack_14bit_to_16bit};
 use crate::{DtsFrameHeader, Error as DtsError, SyncWordEncoding};
 
 /// Canonical codec id string for the DTS Coherent Acoustics codec.
@@ -251,7 +251,7 @@ impl Decoder for DtsDecoderHandle {
                 // the raw-BE domain before caching it (round 453 —
                 // found by the encoder's raw-LE output variant).
                 let mut swapped = bytes.to_vec();
-                for pair in swapped.chunks_exact_mut(2) {
+                for pair in swapped.as_chunks_mut::<2>().0 {
                     pair.swap(0, 1);
                 }
                 let hdr = parse_frame_header(&swapped).map_err(CoreError::from)?;

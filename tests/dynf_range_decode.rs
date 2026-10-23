@@ -191,10 +191,12 @@ fn dynf_frame_scales_baseline_pcm_by_signed_q2_gain() {
         );
     }
     // And the DYNF PCM is genuinely louder somewhere (proves it ran).
-    assert!(dynf_pcm[0]
-        .iter()
-        .zip(&base_pcm[0])
-        .any(|(&d, &b)| d.abs() > b.abs()));
+    assert!(
+        dynf_pcm[0]
+            .iter()
+            .zip(&base_pcm[0])
+            .any(|(&d, &b)| d.abs() > b.abs())
+    );
 }
 
 #[test]

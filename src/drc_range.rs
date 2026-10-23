@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(dts_dynrng_to_db(0x7F), 31.75); // +127
         assert_eq!(dts_dynrng_to_db(0x80), -32.0); // -128 (outside nominal)
         assert_eq!(dts_dynrng_to_db(0x81), -31.75); // -127
-                                                    // +20 dB = 80 quarter-dB steps -> linear 10.0.
+        // +20 dB = 80 quarter-dB steps -> linear 10.0.
         assert_eq!(dts_dynrng_to_db(80), 20.0);
         assert!((dts_dynrng_to_linear(80) - 10.0).abs() < 1e-12);
         // -20 dB -> linear 0.1.

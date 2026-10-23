@@ -8,8 +8,8 @@ use oxideav_core::{
     RuntimeContext, SampleFormat, TimeBase,
 };
 use oxideav_dts::{
-    iter_frames_14bit, make_decoder, make_encoder, register, CoreEncoder, EncoderConfig,
-    SyncWordEncoding, CODEC_ID_STR, ENCODER_FRAME_SAMPLES,
+    CODEC_ID_STR, CoreEncoder, ENCODER_FRAME_SAMPLES, EncoderConfig, SyncWordEncoding,
+    iter_frames_14bit, make_decoder, make_encoder, register,
 };
 
 fn multitone(n: usize, phase: f64) -> Vec<f64> {
@@ -63,7 +63,7 @@ fn decode_packets(packets: &[Packet], planes: usize) -> Vec<Vec<f64>> {
         assert_eq!(a.data.len(), planes);
         for (ch, plane) in a.data.iter().enumerate() {
             out[ch].extend(
-                plane.chunks_exact(4).map(|c| {
+                plane.as_chunks::<4>().0.iter().map(|c| {
                     f64::from(i32::from_le_bytes([c[0], c[1], c[2], c[3]])) / 2f64.powi(31)
                 }),
             );

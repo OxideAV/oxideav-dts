@@ -42,7 +42,7 @@
 
 use crate::cos_mod::NUM_SUBBAND;
 use crate::filter_bank::FilterBankSelection;
-use crate::qmf_assemble::{QmfAssembleError, PCM_OUTPUT_PER_SAMPLE};
+use crate::qmf_assemble::{PCM_OUTPUT_PER_SAMPLE, QmfAssembleError};
 use crate::qmf_synth::QmfSynthesis;
 
 /// Errors specific to the multi-channel synthesis driver, layered over
@@ -531,10 +531,11 @@ mod tests {
 
         // No output written, filters untouched.
         assert!(out.iter().all(|p| p.is_empty()));
-        assert!(mc
-            .channels()
-            .iter()
-            .all(|q| q.x_history().iter().all(|&v| v == 0.0)));
+        assert!(
+            mc.channels()
+                .iter()
+                .all(|q| q.x_history().iter().all(|&v| v == 0.0))
+        );
     }
 
     /// Channels with differing row counts are rejected (the §C.2.5

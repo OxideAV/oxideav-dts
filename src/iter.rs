@@ -58,7 +58,7 @@
 //!   round-6 docs gap #7.
 
 use crate::header::{detect_sync, parse_frame_header};
-use crate::{parse_frame_header_14bit, DtsFrameHeader, Error, Result, SyncWordEncoding};
+use crate::{DtsFrameHeader, Error, Result, SyncWordEncoding, parse_frame_header_14bit};
 
 /// Result of a [`find_next_sync`] lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1011,7 +1011,7 @@ mod tests {
         push(&mut bv, 0, 5); // rate
         push(&mut bv, 0, 13); // trailing flags
         push(&mut bv, 0, 16); // post-CRC window
-        while bv.len() % 8 != 0 {
+        while !bv.len().is_multiple_of(8) {
             bv.push(false);
         }
         // Convert bit-vector to bytes (MSB-first).
@@ -1070,7 +1070,7 @@ mod tests {
         push(&mut bv, 0, 13);
         push(&mut bv, 0xABCD, 16); // header_crc
         push(&mut bv, 0, 16); // post-CRC window
-        while bv.len() % 8 != 0 {
+        while !bv.len().is_multiple_of(8) {
             bv.push(false);
         }
         for (i, chunk) in bv.chunks(8).enumerate() {
@@ -1256,7 +1256,7 @@ mod tests {
             push(&mut bv, 0, 5); // rate
             push(&mut bv, 0, 13); // trailing flags
             push(&mut bv, 0, 16); // post-CRC window
-            while bv.len() % 8 != 0 {
+            while !bv.len().is_multiple_of(8) {
                 bv.push(false);
             }
             // Convert MSB-first bit-vector to bytes.
@@ -1278,7 +1278,7 @@ mod tests {
             be.extend_from_slice(&frame_bytes);
         }
         // Word-swap each 16-bit pair to produce the raw-LE form.
-        for pair in be.chunks_exact_mut(2) {
+        for pair in be.as_chunks_mut::<2>().0 {
             pair.swap(0, 1);
         }
         be
@@ -1393,7 +1393,7 @@ mod tests {
         push_bits(&mut bv, 0, 5); // rate
         push_bits(&mut bv, 0, 13); // trailing flags
         push_bits(&mut bv, 0, 16); // post-CRC window
-        while bv.len() % 8 != 0 {
+        while !bv.len().is_multiple_of(8) {
             bv.push(false);
         }
         let mut buf = bits_to_bytes(&bv);
@@ -1511,12 +1511,12 @@ mod tests {
 
         let real = build_min_frame_be(0x11);
         let mut buf = real.clone(); // frame at offset 0..95.
-                                    // 1 byte of garbage so the false sync is well-separated.
+        // 1 byte of garbage so the false sync is well-separated.
         buf.push(0xAA);
         let false_sync_off = buf.len(); // == 96
-                                        // Craft a header with FSIZE that overruns the remaining buffer.
+        // Craft a header with FSIZE that overruns the remaining buffer.
         let total_after_false_sync = 50; // we'll make remaining = 50.
-                                         // Declared frame_size = 200 > 50.
+        // Declared frame_size = 200 > 50.
         let mut bv: Vec<bool> = Vec::new();
         push_bits(&mut bv, 0x7FFE_8001, 32);
         push_bits(&mut bv, 0, 1);
@@ -1529,7 +1529,7 @@ mod tests {
         push_bits(&mut bv, 0, 5);
         push_bits(&mut bv, 0, 13);
         push_bits(&mut bv, 0, 16);
-        while bv.len() % 8 != 0 {
+        while !bv.len().is_multiple_of(8) {
             bv.push(false);
         }
         let hdr_bytes = bits_to_bytes(&bv);
@@ -1606,7 +1606,7 @@ mod tests {
         let real = build_min_frame_be(0x44);
         let mut buf = vec![0xAAu8; 4];
         buf[0..4].copy_from_slice(&RAW_BE_SYNC); // false sync at 0.
-                                                 // Pad so the false-sync header reads zeros → BlockCountOutOfRange.
+        // Pad so the false-sync header reads zeros → BlockCountOutOfRange.
         buf.resize(20, 0);
         // Real frame at offset 20.
         let real_off = buf.len();
@@ -1799,8 +1799,8 @@ mod tests {
         assert!(is_sync_first_byte_candidate(0xFE)); // raw LE
         assert!(is_sync_first_byte_candidate(0x1F)); // 14-bit BE
         assert!(is_sync_first_byte_candidate(0xFF)); // 14-bit LE
-                                                     // Spot-check a few adjacent bytes that look similar but are
-                                                     // explicitly NOT sync prefixes.
+        // Spot-check a few adjacent bytes that look similar but are
+        // explicitly NOT sync prefixes.
         assert!(!is_sync_first_byte_candidate(0x7E));
         assert!(!is_sync_first_byte_candidate(0xFD));
         assert!(!is_sync_first_byte_candidate(0x80));
@@ -2169,7 +2169,7 @@ mod tests {
     // (= 110 bytes for FSIZE+1 = 95: ceil(95 * 8 / 14) * 2 = 110).
     // ---------------------------------------------------------------
 
-    use crate::{pack_16bit_to_14bit, FourteenBitByteOrder};
+    use crate::{FourteenBitByteOrder, pack_16bit_to_14bit};
 
     /// Build a 95-byte raw-BE single-frame buffer: FTYPE=0
     /// (termination), SHORT=0, CRC_PRESENT=0, NBLKS=5, FSIZE-1=94 (=>
@@ -2193,7 +2193,7 @@ mod tests {
         push(&mut bv, 0, 5); // rate
         push(&mut bv, 0, 13);
         push(&mut bv, 0, 16); // post-CRC window
-        while bv.len() % 8 != 0 {
+        while !bv.len().is_multiple_of(8) {
             bv.push(false);
         }
         let mut buf = vec![0u8; 95];

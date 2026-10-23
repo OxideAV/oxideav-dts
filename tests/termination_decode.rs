@@ -17,8 +17,8 @@ mod common;
 use common::{JointFrameSpec, TERM_PSC, TERM_SAMPLES};
 use oxideav_core::{CodecId, CodecParameters, Decoder, Frame, Packet, TimeBase};
 use oxideav_dts::{
+    CODEC_ID_STR, CoreFrameDecodeError, CoreStreamDecoder, FrameType, SubframePcmError,
     decode_core_frame, decode_core_frame_with_info, iter_frames, make_decoder, parse_frame_header,
-    CoreFrameDecodeError, CoreStreamDecoder, FrameType, SubframePcmError, CODEC_ID_STR,
 };
 
 /// Decode one built frame with single-frame semantics, expecting
@@ -319,7 +319,7 @@ fn registry_path_matches_direct_on_termination_stream() {
         };
         frame_samples.push(audio.samples);
         for (ch, plane) in audio.data.iter().enumerate() {
-            for c in plane.chunks_exact(4) {
+            for c in plane.as_chunks::<4>().0 {
                 via_registry[ch].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
         }
@@ -347,7 +347,7 @@ fn registry_path_matches_direct_on_termination_stream() {
 /// the partial subsubframe and the container unpacking compose.
 #[test]
 fn fourteen_bit_container_round_trip_on_termination_stream() {
-    use oxideav_dts::{pack_16bit_to_14bit, FourteenBitByteOrder};
+    use oxideav_dts::{FourteenBitByteOrder, pack_16bit_to_14bit};
 
     let stream = common::build_termination_stream(3);
     let params = CodecParameters::audio(CodecId::new(CODEC_ID_STR));
@@ -365,7 +365,7 @@ fn fourteen_bit_container_round_trip_on_termination_stream() {
             panic!("expected an audio frame");
         };
         for (ch, plane) in audio.data.iter().enumerate() {
-            for c in plane.chunks_exact(4) {
+            for c in plane.as_chunks::<4>().0 {
                 raw_out[ch].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
         }
@@ -379,7 +379,7 @@ fn fourteen_bit_container_round_trip_on_termination_stream() {
             panic!("expected an audio frame");
         };
         for (ch, plane) in audio.data.iter().enumerate() {
-            for c in plane.chunks_exact(4) {
+            for c in plane.as_chunks::<4>().0 {
                 packed_out[ch].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
         }

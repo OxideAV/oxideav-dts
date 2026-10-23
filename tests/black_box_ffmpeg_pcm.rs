@@ -39,7 +39,7 @@
 //! filter is reset per frame instead of carried across the stream — the
 //! round-356 [`oxideav_dts::CoreStreamDecoder`] continuity fix).
 
-use oxideav_dts::{iter_frames, CoreStreamDecoder};
+use oxideav_dts::{CoreStreamDecoder, iter_frames};
 
 /// The 5-frame raw-16-bit DTS Core fixture (real 48 kHz stereo
 /// `ffmpeg -c:a dca` output).
@@ -70,7 +70,7 @@ fn decode_ours() -> Vec<Vec<i32>> {
 /// Deinterleave the committed `ffmpeg` reference into planar channels.
 fn reference() -> Vec<Vec<i32>> {
     let mut out: Vec<Vec<i32>> = vec![Vec::new(), Vec::new()];
-    for (i, c) in FFMPEG_REF_S32LE.chunks_exact(4).enumerate() {
+    for (i, c) in FFMPEG_REF_S32LE.as_chunks::<4>().0.iter().enumerate() {
         out[i % 2].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
     }
     out

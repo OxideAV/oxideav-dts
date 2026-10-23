@@ -78,12 +78,12 @@
 //! joint step.
 
 use crate::audio_array::{
-    decode_audio_data_subframe_vq_at, decode_lfe_phase_at, AdpcmContext, AdpcmHistory,
-    AudioArrayDecodeError, AudioArrayError, HfVqFill, SubbandSampleMatrix,
+    AdpcmContext, AdpcmHistory, AudioArrayDecodeError, AudioArrayError, HfVqFill,
+    SubbandSampleMatrix, decode_audio_data_subframe_vq_at, decode_lfe_phase_at,
 };
 use crate::audio_header::AudioCodingHeader;
 use crate::cos_mod::NUM_SUBBAND;
-use crate::d10_vq::{scan_hf_vq_indices_at, VqCodebooks};
+use crate::d10_vq::{VqCodebooks, scan_hf_vq_indices_at};
 use crate::filter_bank::FilterBankSelection;
 use crate::header::{AmodeArrangement, DtsFrameHeader};
 use crate::qmf_multichannel::{MultiChannelQmf, MultiChannelQmfError};
@@ -675,15 +675,13 @@ impl SubframePcmDecoder {
         let arrangement = header.amode_arrangement();
         let apply_front =
             header.front_sum || matches!(arrangement, AmodeArrangement::SumDifference);
-        if apply_front {
-            if let Some((l, r)) = arrangement.front_lr_channels() {
-                apply_sum_difference(&mut matrices, l, r, &eff_n_subs)?;
-            }
+        if apply_front && let Some((l, r)) = arrangement.front_lr_channels() {
+            apply_sum_difference(&mut matrices, l, r, &eff_n_subs)?;
         }
-        if header.surround_sum {
-            if let Some((l, r)) = arrangement.surround_lr_channels() {
-                apply_sum_difference(&mut matrices, l, r, &eff_n_subs)?;
-            }
+        if header.surround_sum
+            && let Some((l, r)) = arrangement.surround_lr_channels()
+        {
+            apply_sum_difference(&mut matrices, l, r, &eff_n_subs)?;
         }
 
         // (2) §C.2.5 per-channel 32-band synthesis -> planar PCM.
@@ -1238,10 +1236,10 @@ impl SubframePcmDecoder {
             // the offset-binary §D.4 presentation table. Suppressed
             // (the field is still consumed for framing) when a
             // CRC-verified Rev2AUX DRC payload overrides it (§5.7.2.2).
-            if let Some(code) = tail.range_index {
-                if rev2_drc.is_none() {
-                    apply_range(&mut block, crate::dts_dynrng_to_linear(code));
-                }
+            if let Some(code) = tail.range_index
+                && rev2_drc.is_none()
+            {
+                apply_range(&mut block, crate::dts_dynrng_to_linear(code));
             }
 
             for (ch, samples) in block.into_iter().enumerate() {
@@ -1571,11 +1569,12 @@ mod tests {
             SubframePcmError::ReservedPcmResolution { pcmr: 4 }
         ));
         // Filter untouched.
-        assert!(dec
-            .qmf()
-            .channels()
-            .iter()
-            .all(|q| q.x_history().iter().all(|&v| v == 0.0)));
+        assert!(
+            dec.qmf()
+                .channels()
+                .iter()
+                .all(|q| q.x_history().iter().all(|&v| v == 0.0))
+        );
     }
 
     /// A JOINX > 0 channel is declined.
@@ -1634,7 +1633,7 @@ mod tests {
         assert_eq!(matrices[1][0][3], -12.0); // -4 * 3
         assert_eq!(matrices[1][1][2], 10.0); // 5 * 2
         assert_eq!(matrices[1][1][3], 24.0); // 8 * 3
-                                             // Non-imported destination columns untouched.
+        // Non-imported destination columns untouched.
         assert_eq!(matrices[1][0][0], 99.0);
         // Source channel untouched.
         assert_eq!(matrices[0][0][2], 10.0);
@@ -2207,12 +2206,14 @@ mod tests {
         assert_eq!(stream.subframe_decoder().qmf().channel_count(), 1);
         let _ = stream.decode_frame(&f1, &h1).unwrap();
         assert_eq!(stream.subframe_decoder().qmf().channel_count(), 1);
-        assert!(stream
-            .subframe_decoder()
-            .qmf()
-            .channels()
-            .iter()
-            .all(|q| q.x_history().iter().all(|&v| v == 0.0)));
+        assert!(
+            stream
+                .subframe_decoder()
+                .qmf()
+                .channels()
+                .iter()
+                .all(|q| q.x_history().iter().all(|&v| v == 0.0))
+        );
     }
 
     /// A [`CoreStreamDecoder`] built for the wrong channel count rejects

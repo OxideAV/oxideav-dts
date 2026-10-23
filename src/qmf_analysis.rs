@@ -58,7 +58,7 @@
 //! `int(rScale·raZ)` output step maps back. Nothing here assumes a
 //! particular integer resolution.
 
-use crate::cos_mod::{cos_mod_stage, precal_cos_mod, NUM_SUBBAND};
+use crate::cos_mod::{NUM_SUBBAND, cos_mod_stage, precal_cos_mod};
 use crate::filter_bank::FilterBankSelection;
 use crate::qmf_assemble::X_HISTORY_LEN;
 

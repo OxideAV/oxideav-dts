@@ -27,7 +27,7 @@
 mod common;
 
 use common::build_d10_stress_stream;
-use oxideav_dts::{iter_frames, CoreStreamDecoder};
+use oxideav_dts::{CoreStreamDecoder, iter_frames};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/dts_d10_stress_6_frames.bin");
 const FFMPEG_REF_S32LE: &[u8] = include_bytes!("fixtures/dts_d10_stress_6_frames_ffmpeg_ref.s32");
@@ -50,7 +50,7 @@ fn reference() -> Vec<Vec<i32>> {
     assert_eq!(FFMPEG_REF_S32LE.len() % 8, 0);
     let mut ch0 = Vec::new();
     let mut ch1 = Vec::new();
-    for pair in FFMPEG_REF_S32LE.chunks_exact(8) {
+    for pair in FFMPEG_REF_S32LE.as_chunks::<8>().0 {
         ch0.push(i32::from_le_bytes(pair[0..4].try_into().unwrap()));
         ch1.push(i32::from_le_bytes(pair[4..8].try_into().unwrap()));
     }

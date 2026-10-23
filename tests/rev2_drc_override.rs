@@ -20,8 +20,8 @@
 //!   applies).
 
 use oxideav_dts::{
-    decode_core_frame, dts_crc16, dts_dynrng_to_linear, parse_frame_header, REV2_AUX_SYNC_WORD,
-    REV2_DRC_VERSION_SINGLE_BAND,
+    REV2_AUX_SYNC_WORD, REV2_DRC_VERSION_SINGLE_BAND, decode_core_frame, dts_crc16,
+    dts_dynrng_to_linear, parse_frame_header,
 };
 
 /// Pack a list of `(value, width)` fields MSB-first into bytes.
@@ -150,7 +150,7 @@ fn build_frame(
     bytes.extend_from_slice(&[0u8; 4]); // header-lookahead slack
 
     if let Some((code, valid)) = rev2 {
-        while bytes.len() % 4 != 0 {
+        while !bytes.len().is_multiple_of(4) {
             bytes.push(0);
         }
         bytes.extend_from_slice(&rev2_chunk(code, valid));

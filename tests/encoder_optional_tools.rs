@@ -5,8 +5,8 @@
 //! decoder.
 
 use oxideav_dts::{
-    decode_core_frame_with_info, iter_frames, parse_aux_data, parse_frame_header, CoreEncoder,
-    CoreStreamDecoder, DownmixSpec, DownmixType, EncoderConfig, ENCODER_FRAME_SAMPLES,
+    CoreEncoder, CoreStreamDecoder, DownmixSpec, DownmixType, ENCODER_FRAME_SAMPLES, EncoderConfig,
+    decode_core_frame_with_info, iter_frames, parse_aux_data, parse_frame_header,
 };
 
 fn multitone(n: usize, phase: f64) -> Vec<f64> {

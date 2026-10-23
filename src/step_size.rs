@@ -262,11 +262,7 @@ pub fn transient_scale_index(tmode: u8, n_ssc: usize, subsubframe: usize) -> usi
     } else {
         usize::from(tmode)
     };
-    if subsubframe < n_tmode {
-        0
-    } else {
-        1
-    }
+    if subsubframe < n_tmode { 0 } else { 1 }
 }
 
 /// Compose the §5.5 per-subband real scale `rScale` for one

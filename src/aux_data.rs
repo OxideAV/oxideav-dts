@@ -69,7 +69,7 @@
 use crate::bitreader::BitReader;
 use crate::crc16::dts_crc16;
 use crate::header::DtsFrameHeader;
-use crate::{decode_dmix_code, Error, Result};
+use crate::{Error, Result, decode_dmix_code};
 
 /// The §5.7.1 auxiliary-data sync word (`nSYNCAUX`), DWORD-aligned
 /// from the beginning of the core frame.
@@ -446,7 +446,7 @@ pub fn parse_aux_data(frame: &[u8], header: &DtsFrameHeader) -> Result<Option<Au
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{synth_header, BitWriter};
+    use crate::test_util::{BitWriter, synth_header};
 
     /// AMODE 2 = stereo, 2 channels, no LFE.
     fn stereo_header() -> DtsFrameHeader {

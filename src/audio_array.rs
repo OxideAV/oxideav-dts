@@ -81,16 +81,16 @@
 //! `PMODE == 0` and `nVQSUB == nSUBS` (the common Core case) decodes to
 //! PCM end-to-end with no books at all.
 
-use crate::audio_data::{audio_quant_type, AudioQuantType};
-use crate::audio_huff::{decode_audio_huff_at, AudioHuffCodebook};
+use crate::audio_data::{AudioQuantType, audio_quant_type};
+use crate::audio_huff::{AudioHuffCodebook, decode_audio_huff_at};
 use crate::bitreader::BitReader;
 use crate::block_code::decode_block_code;
 use crate::cos_mod::NUM_SUBBAND;
 use crate::d10_vq::{AdpcmVqCodebook, HfVqCodebook};
 use crate::dsync::DSYNC_WORD;
-use crate::inverse_adpcm::{inverse_adpcm_decode_f64, NUM_ADPCM_COEFF};
+use crate::inverse_adpcm::{NUM_ADPCM_COEFF, inverse_adpcm_decode_f64};
 use crate::side_info::ScaleFactorAdjustment;
-use crate::step_size::{transient_scale_index, StepSizeTable, SAMPLES_PER_SUBSUBFRAME};
+use crate::step_size::{SAMPLES_PER_SUBSUBFRAME, StepSizeTable, transient_scale_index};
 use crate::subframe::ChannelSideInfo;
 use crate::{Error, Result};
 
@@ -769,28 +769,28 @@ pub fn decode_audio_data_subframe_vq_at(
                 // history is the four samples preceding this
                 // subsubframe (earlier rows of this subframe, else
                 // the persistent inter-subframe history).
-                if ch_side.pmode[n] != 0 {
-                    if let Some(ctx) = adpcm.as_mut() {
-                        // Checked non-None in the pre-walk validation.
-                        let pvq = ch_side.pvq_index[n].unwrap_or_default();
-                        let coeffs = ctx.book.coefficients(pvq);
-                        let mut hist = [0.0_f64; NUM_ADPCM_COEFF];
-                        for (j, slot) in hist.iter_mut().enumerate() {
-                            // Logical row `base - 4 + j`.
-                            *slot = if base + j >= NUM_ADPCM_COEFF {
-                                matrix[base + j - NUM_ADPCM_COEFF][n]
-                            } else {
-                                ctx.history.subband(ch, n)[j]
-                            };
-                        }
-                        let mut block = [0.0_f64; SAMPLES_PER_SUBSUBFRAME];
-                        for (m, slot) in block.iter_mut().enumerate().take(count) {
-                            *slot = matrix[base + m][n];
-                        }
-                        inverse_adpcm_decode_f64(&hist, coeffs, &mut block[..count])?;
-                        for (m, &value) in block.iter().enumerate().take(count) {
-                            matrix[base + m][n] = value;
-                        }
+                if ch_side.pmode[n] != 0
+                    && let Some(ctx) = adpcm.as_mut()
+                {
+                    // Checked non-None in the pre-walk validation.
+                    let pvq = ch_side.pvq_index[n].unwrap_or_default();
+                    let coeffs = ctx.book.coefficients(pvq);
+                    let mut hist = [0.0_f64; NUM_ADPCM_COEFF];
+                    for (j, slot) in hist.iter_mut().enumerate() {
+                        // Logical row `base - 4 + j`.
+                        *slot = if base + j >= NUM_ADPCM_COEFF {
+                            matrix[base + j - NUM_ADPCM_COEFF][n]
+                        } else {
+                            ctx.history.subband(ch, n)[j]
+                        };
+                    }
+                    let mut block = [0.0_f64; SAMPLES_PER_SUBSUBFRAME];
+                    for (m, slot) in block.iter_mut().enumerate().take(count) {
+                        *slot = matrix[base + m][n];
+                    }
+                    inverse_adpcm_decode_f64(&hist, coeffs, &mut block[..count])?;
+                    for (m, &value) in block.iter().enumerate().take(count) {
+                        matrix[base + m][n] = value;
                     }
                 }
             }
@@ -1224,10 +1224,11 @@ mod tests {
                 // Lay the candidate at the front of a padded buffer.
                 let padded = (code << (32 - len)) | ((1 << (32 - len)) - 1) >> 1;
                 let bytes = padded.to_be_bytes();
-                if let Ok((got, consumed)) = decode_audio_huff_at(&bytes, 0, book) {
-                    if consumed == usize::from(len) && got == level {
-                        return (code, len);
-                    }
+                if let Ok((got, consumed)) = decode_audio_huff_at(&bytes, 0, book)
+                    && consumed == usize::from(len)
+                    && got == level
+                {
+                    return (code, len);
                 }
             }
         }
@@ -1357,7 +1358,7 @@ mod tests {
         let lff = 1u8; // 128×
         let n_ssc = 2usize;
         let n_lfe = 2 * (lff as usize) * n_ssc; // 4 samples
-                                                // 4 sample bytes (all 0) + 1 scale-index byte (10).
+        // 4 sample bytes (all 0) + 1 scale-index byte (10).
         let mut fields: Vec<(u32, u8)> = vec![(0, 8); n_lfe];
         fields.push((10, 8));
         let stream = pack_fields(&fields);

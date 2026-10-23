@@ -27,7 +27,7 @@
 // uses every helper.
 #![allow(dead_code)]
 
-use oxideav_dts::{parse_frame_header, DtsFrameHeader, FrameType, LfeMode};
+use oxideav_dts::{DtsFrameHeader, FrameType, LfeMode, parse_frame_header};
 
 /// MSB-first bit packer mirroring the spec's `ExtractBits` order.
 #[derive(Default)]
@@ -45,7 +45,7 @@ impl BitSink {
     pub fn push(&mut self, value: u32, width: u8) {
         for i in (0..width).rev() {
             let bit = ((value >> i) & 1) as u8;
-            if self.bit_len % 8 == 0 {
+            if self.bit_len.is_multiple_of(8) {
                 self.bytes.push(0);
             }
             let byte = self.bytes.last_mut().unwrap();

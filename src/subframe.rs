@@ -53,8 +53,8 @@
 use crate::bitreader::BitReader;
 use crate::cos_mod::NUM_SUBBAND;
 use crate::side_info::{
-    decode_abits, decode_scales, decode_tmode, AbitsCodebook, ScalesCodebook, SubsubframeCount,
-    TmodeCodebook,
+    AbitsCodebook, ScalesCodebook, SubsubframeCount, TmodeCodebook, decode_abits, decode_scales,
+    decode_tmode,
 };
 use crate::{Error, Result};
 

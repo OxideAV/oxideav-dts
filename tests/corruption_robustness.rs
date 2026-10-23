@@ -14,7 +14,7 @@
 
 mod common;
 
-use oxideav_dts::{iter_frames_resync, CoreStreamDecoder, VqCodebooks};
+use oxideav_dts::{CoreStreamDecoder, VqCodebooks, iter_frames_resync};
 
 const STEREO: &[u8] = include_bytes!("fixtures/dts_5_frames.bin");
 const FIVE_ONE: &[u8] = include_bytes!("fixtures/dts_51_lfe.bin");

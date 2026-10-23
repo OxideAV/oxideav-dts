@@ -51,7 +51,7 @@ impl BitWriter {
         }
         for i in (0..width).rev() {
             let bit = ((value >> i) & 1) as u8;
-            if self.bit_len % 8 == 0 {
+            if self.bit_len.is_multiple_of(8) {
                 self.bytes.push(0);
             }
             let last = self.bytes.last_mut().expect("pushed above");

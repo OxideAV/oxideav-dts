@@ -48,22 +48,22 @@
 //! convention the black-box reference encoder's streams exhibit.
 
 use crate::audio_data::{CODEBOOK_GROUP_SIZE, QUANT_LEVELS};
-use crate::audio_huff::{table_for, AudioHuffCodebook};
+use crate::audio_huff::{AudioHuffCodebook, table_for};
 use crate::bitwriter::BitWriter;
 use crate::block_code::block_code_offset;
 use crate::cos_mod::NUM_SUBBAND;
 use crate::filter_bank::FilterBankSelection;
-use crate::header::{encode_frame_header_be, DtsFrameHeader, FrameType, LfeMode, SyncWordEncoding};
+use crate::header::{DtsFrameHeader, FrameType, LfeMode, SyncWordEncoding, encode_frame_header_be};
 use crate::inverse_adpcm::NUM_ADPCM_COEFF;
 use crate::lfe_analysis::LfeAnalysis;
 use crate::lfe_interp::LfeInterpolationSelection;
 use crate::lfe_synth::LFE_SCALE_STEP;
 use crate::qmf_analysis::QmfAnalysis;
 use crate::side_info::{
-    abits_table, scales_table, tmode_table, AbitsCodebook, ScalesCodebook, TmodeCodebook, RMS_6BIT,
-    RMS_7BIT,
+    AbitsCodebook, RMS_6BIT, RMS_7BIT, ScalesCodebook, TmodeCodebook, abits_table, scales_table,
+    tmode_table,
 };
-use crate::step_size::{StepSizeTable, SAMPLES_PER_SUBSUBFRAME};
+use crate::step_size::{SAMPLES_PER_SUBSUBFRAME, StepSizeTable};
 use crate::unpack14::FourteenBitByteOrder;
 
 /// Samples per channel in one encoded frame (16 blocks of 32).
@@ -796,11 +796,7 @@ fn noise_power(abits: u8, peak: f64, step_table: StepSizeTable) -> f64 {
 /// `TMODE` (1 bit for the A4 zero code, 2 for a transient) plus one
 /// or two 7-bit scale factors.
 fn activation_side_bits(tmode: u8) -> usize {
-    if tmode > 0 {
-        2 + 14
-    } else {
-        1 + 7
-    }
+    if tmode > 0 { 2 + 14 } else { 1 + 7 }
 }
 
 /// One allocator step (for rollback): `(channel, band, previous
@@ -845,7 +841,7 @@ fn allocate(
                         continue;
                     }
                     let score = gain / extra as f64;
-                    if best.map_or(true, |(.., s)| score > s) {
+                    if best.is_none_or(|(.., s)| score > s) {
                         best = Some((ch, n, next, extra, score));
                     }
                 }
@@ -964,7 +960,7 @@ fn lpc_candidate(
     let mut best: Option<(f64, u16)> = None;
     for &(_, i) in coarse.iter().take(24) {
         let e = energy(book.coefficients(i));
-        if best.map_or(true, |(be, _)| e < be) {
+        if best.is_none_or(|(be, _)| e < be) {
             best = Some((e, i));
         }
     }
@@ -1326,8 +1322,8 @@ fn encode_frame_bits(
 
     // --- Fixed-cost accounting (worst case) --------------------------
     let header_bits = 104usize; // CPF = 0
-                                // Coding header: 4 + 3 + per channel (5+5+3+2+3+3) + SEL planes
-                                // (1 + 4·2 + 5·3 = 24) + ADJ (2 per Huffman family, ≤ 10).
+    // Coding header: 4 + 3 + per channel (5+5+3+2+3+3) + SEL planes
+    // (1 + 4·2 + 5·3 = 24) + ADJ (2 per Huffman family, ≤ 10).
     let coding_header_bits = 7 + (21 + 24 + 20) * channels;
     let lfe_bits = if lfe_decimated.is_some() {
         8 * ENCODER_FRAME_SAMPLES / 64 + 8
@@ -1475,12 +1471,12 @@ fn encode_frame_bits(
                         (3, ScalesCodebook::Sd129),
                         (4, ScalesCodebook::Se129),
                     ] {
-                        if let Some(bits) = scales_huffman_bits(&seq, cb) {
-                            if bits < best_bits {
-                                best_bits = bits;
-                                shuff = hcode;
-                                chosen_table = table;
-                            }
+                        if let Some(bits) = scales_huffman_bits(&seq, cb)
+                            && bits < best_bits
+                        {
+                            best_bits = bits;
+                            shuff = hcode;
+                            chosen_table = table;
                         }
                     }
                 }
@@ -1815,7 +1811,7 @@ fn emit_band_subsubframe(w: &mut BitWriter, band: &BandPlan, coding: &ChannelCod
         let levels = u32::from(QUANT_LEVELS[a as usize]);
         let offset = block_code_offset(levels);
         let width = BLOCK_WORD_BITS[a as usize];
-        for block in idx.chunks_exact(4) {
+        for block in idx.as_chunks::<4>().0 {
             let mut code = 0u32;
             for &v in block.iter().rev() {
                 code = code * levels + (v + offset) as u32;
@@ -1937,7 +1933,7 @@ fn to_wire(mut frame: Vec<u8>, encoding: SyncWordEncoding) -> Vec<u8> {
     match encoding {
         SyncWordEncoding::RawBigEndian => frame,
         SyncWordEncoding::RawLittleEndian => {
-            for pair in frame.chunks_exact_mut(2) {
+            for pair in frame.as_chunks_mut::<2>().0 {
                 pair.swap(0, 1);
             }
             frame

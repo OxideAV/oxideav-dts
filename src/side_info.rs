@@ -551,7 +551,7 @@ impl ScalesCodebook {
 /// Annex D §D.5.12 129-level books A129..E129 (see the note above the
 /// [`ScalesCodebook`] definition). The dispatch is by codebook variant.
 fn scales_huffman_codebook(codebook: ScalesCodebook) -> (&'static [HuffmanEntry], &'static str) {
-    use crate::audio_huff::{table_for, AudioHuffCodebook};
+    use crate::audio_huff::{AudioHuffCodebook, table_for};
     match codebook {
         ScalesCodebook::Sa129 => (table_for(AudioHuffCodebook::A129), "SA129"),
         ScalesCodebook::Sb129 => (table_for(AudioHuffCodebook::B129), "SB129"),
@@ -1127,11 +1127,7 @@ impl SubsubframeCount {
     /// subsubframe by definition holds fewer than 8 subband
     /// samples).
     pub fn partial_sample_count(self) -> Option<u8> {
-        if self.psc == 0 {
-            None
-        } else {
-            Some(self.psc)
-        }
+        if self.psc == 0 { None } else { Some(self.psc) }
     }
 
     /// Returns `true` if this prefix signals a termination frame
@@ -1489,9 +1485,9 @@ mod tests {
 
         assert_eq!(RMS_7BIT[0], 1); // (0,0 dB)
         assert_eq!(RMS_7BIT[31], 64); // (36,1 dB)
-                                      // Index 63 is the bottom of column 1 in the §D.1.2 table; the
-                                      // staged PDF p.192 shows index 63 = 3673 ((71,3 dB)) and
-                                      // index 64 = 4169 (top of column 2, (72,4 dB)).
+        // Index 63 is the bottom of column 1 in the §D.1.2 table; the
+        // staged PDF p.192 shows index 63 = 3673 ((71,3 dB)) and
+        // index 64 = 4169 (top of column 2, (72,4 dB)).
         assert_eq!(RMS_7BIT[63], 3673);
         assert_eq!(RMS_7BIT[64], 4169);
         assert_eq!(RMS_7BIT[124], 8317638); // (138,4 dB)

@@ -49,7 +49,7 @@
 mod common;
 
 use common::{build_d10_stream, synthetic_vq_codebooks};
-use oxideav_dts::{iter_frames, CoreStreamDecoder};
+use oxideav_dts::{CoreStreamDecoder, iter_frames};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/dts_d10_5_frames.bin");
 const FFMPEG_REF_S32LE: &[u8] = include_bytes!("fixtures/dts_d10_5_frames_ffmpeg_ref.s32");
@@ -75,7 +75,7 @@ fn reference() -> Vec<Vec<i32>> {
     assert_eq!(FFMPEG_REF_S32LE.len() % 8, 0);
     let mut ch0 = Vec::new();
     let mut ch1 = Vec::new();
-    for pair in FFMPEG_REF_S32LE.chunks_exact(8) {
+    for pair in FFMPEG_REF_S32LE.as_chunks::<8>().0 {
         ch0.push(i32::from_le_bytes(pair[0..4].try_into().unwrap()));
         ch1.push(i32::from_le_bytes(pair[4..8].try_into().unwrap()));
     }
@@ -264,7 +264,7 @@ fn registry_default_decodes_d10_stream() {
         assert_eq!(audio.data.len(), 2, "stereo planar output");
         assert_eq!(audio.samples as usize, SAMPLES_PER_FRAME);
         for (ch, plane) in audio.data.iter().enumerate() {
-            for c in plane.chunks_exact(4) {
+            for c in plane.as_chunks::<4>().0 {
                 via_registry[ch].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
             }
         }

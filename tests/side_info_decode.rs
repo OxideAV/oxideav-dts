@@ -9,8 +9,8 @@
 //! the in-module tests' direct `BitReader` access.
 
 use oxideav_dts::{
-    decode_abits_at, decode_scales_at, scales_code, AbitsCodebook, ScalesCodebook, RMS_6BIT,
-    RMS_7BIT,
+    AbitsCodebook, RMS_6BIT, RMS_7BIT, ScalesCodebook, decode_abits_at, decode_scales_at,
+    scales_code,
 };
 
 /// Pack a series of (code, code_length) pairs into a byte stream

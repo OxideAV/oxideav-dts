@@ -62,11 +62,11 @@
 //! exactly as the spec hoists the `prCoeff = …` assignment out of the
 //! per-sample loop.
 
-use crate::cos_mod::{cos_mod_stage, precal_cos_mod, COS_MOD_LEN, NUM_SUBBAND};
+use crate::cos_mod::{COS_MOD_LEN, NUM_SUBBAND, cos_mod_stage, precal_cos_mod};
 use crate::filter_bank::FilterBankSelection;
 use crate::qmf_assemble::{
-    assemble_xin, fir_step, shift_x_history, shift_z_output, write_pcm_output, QmfAssembleError,
-    PCM_OUTPUT_PER_SAMPLE, X_HISTORY_LEN, Z_OUTPUT_LEN,
+    PCM_OUTPUT_PER_SAMPLE, QmfAssembleError, X_HISTORY_LEN, Z_OUTPUT_LEN, assemble_xin, fir_step,
+    shift_x_history, shift_z_output, write_pcm_output,
 };
 
 /// Persistent per-channel 32-band synthesis QMF state — the §C.2.5

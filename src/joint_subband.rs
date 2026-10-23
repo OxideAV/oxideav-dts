@@ -107,11 +107,7 @@ use crate::{Error, Result};
 /// ```
 #[must_use]
 pub fn joint_source_channel(joinx: u8) -> Option<u8> {
-    if joinx == 0 {
-        None
-    } else {
-        Some(joinx - 1)
-    }
+    if joinx == 0 { None } else { Some(joinx - 1) }
 }
 
 /// Returns `true` when channel `ch`'s `JOINX[ch]` selector enables

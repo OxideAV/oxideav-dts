@@ -17,9 +17,8 @@
 //! `frame_size_bytes == 1024`.
 
 use oxideav_dts::{
-    find_next_sync, iter_frames, iter_frames_14bit, iter_frames_resync, pack_16bit_to_14bit,
-    parse_frame_header, FourteenBitByteOrder, FrameType, ResyncCause, ResyncEvent,
-    SyncWordEncoding,
+    FourteenBitByteOrder, FrameType, ResyncCause, ResyncEvent, SyncWordEncoding, find_next_sync,
+    iter_frames, iter_frames_14bit, iter_frames_resync, pack_16bit_to_14bit, parse_frame_header,
 };
 
 const FIVE_FRAME_STREAM: &[u8] = include_bytes!("fixtures/dts_5_frames.bin");
@@ -218,7 +217,7 @@ fn iter_frames_14bit_walks_repackaged_ffmpeg_fixture_be() {
     // is exactly the `frame_size_container_bytes` count the parser
     // exposes).
     let mut stream = Vec::new();
-    for chunk in FIVE_FRAME_STREAM.chunks_exact(1024) {
+    for chunk in FIVE_FRAME_STREAM.as_chunks::<1024>().0 {
         let (packed, _) = pack_16bit_to_14bit(chunk, FourteenBitByteOrder::BigEndian);
         // 1024 logical bytes × 8 = 8192 bits ⇒ ceil(8192 / 14) = 586
         // container words ⇒ 1172 container bytes.
@@ -266,7 +265,7 @@ fn iter_frames_14bit_walks_repackaged_ffmpeg_fixture_be() {
 #[test]
 fn iter_frames_14bit_walks_repackaged_ffmpeg_fixture_le() {
     let mut stream = Vec::new();
-    for chunk in FIVE_FRAME_STREAM.chunks_exact(1024) {
+    for chunk in FIVE_FRAME_STREAM.as_chunks::<1024>().0 {
         let (packed, _) = pack_16bit_to_14bit(chunk, FourteenBitByteOrder::LittleEndian);
         assert_eq!(packed.len(), 1172);
         stream.extend_from_slice(&packed);

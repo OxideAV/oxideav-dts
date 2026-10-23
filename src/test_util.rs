@@ -24,7 +24,7 @@ impl BitWriter {
     pub(crate) fn push_bits(&mut self, value: u64, n: u32) {
         for i in (0..n).rev() {
             let bit = (value >> i) & 1;
-            if self.bit_len % 8 == 0 {
+            if self.bit_len.is_multiple_of(8) {
                 self.bytes.push(0);
             }
             let byte = self.bytes.last_mut().unwrap();
@@ -35,7 +35,7 @@ impl BitWriter {
 
     /// Zero-pad until the running bit length is a multiple of `bits`.
     pub(crate) fn align(&mut self, bits: usize) {
-        while self.bit_len % bits != 0 {
+        while !self.bit_len.is_multiple_of(bits) {
             self.push_bits(0, 1);
         }
     }

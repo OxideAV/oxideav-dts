@@ -2907,7 +2907,7 @@ mod tests {
         assert_eq!(AudioHuffCodebook::from_abits_sel(5, 3), None); // V13
         assert_eq!(AudioHuffCodebook::from_abits_sel(6, 7), None); // V17
         assert_eq!(AudioHuffCodebook::from_abits_sel(7, 7), None); // V25
-                                                                   // No bits allocated / outside the transcribed families.
+        // No bits allocated / outside the transcribed families.
         assert_eq!(AudioHuffCodebook::from_abits_sel(0, 0), None);
         // ABITS 8..=10 now resolve their seven Huffman books; the
         // terminal SEL 7 (NFE) and ABITS 11 carry no Huffman book.

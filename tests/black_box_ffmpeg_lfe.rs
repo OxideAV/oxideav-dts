@@ -49,7 +49,7 @@
 //! correlation 1.000000 on all five primary channels **and the LFE
 //! channel** against the reference's respective planes.
 
-use oxideav_dts::{iter_frames, AmodeArrangement, CoreStreamDecoder, LfeMode};
+use oxideav_dts::{AmodeArrangement, CoreStreamDecoder, LfeMode, iter_frames};
 
 /// The 10-frame raw-16-bit 5.1 DTS Core fixture (48 kHz, AMODE 9 +
 /// LFE, real `ffmpeg -c:a dca` output).
@@ -97,7 +97,7 @@ fn decode_ours() -> (Vec<Vec<i32>>, Vec<i32>) {
 /// Deinterleave the committed reference into its six planar channels.
 fn reference() -> Vec<Vec<i32>> {
     let mut out: Vec<Vec<i32>> = vec![Vec::new(); REF_CHANNELS];
-    for (i, c) in FFMPEG_REF_S32LE.chunks_exact(4).enumerate() {
+    for (i, c) in FFMPEG_REF_S32LE.as_chunks::<4>().0.iter().enumerate() {
         out[i % REF_CHANNELS].push(i32::from_le_bytes([c[0], c[1], c[2], c[3]]));
     }
     out
@@ -126,7 +126,7 @@ fn sign_agreement(a: &[i32], b: &[i32]) -> f64 {
     let agree = a
         .iter()
         .zip(b)
-        .filter(|(&x, &y)| x == 0 || y == 0 || (x > 0) == (y > 0))
+        .filter(|&(&x, &y)| x == 0 || y == 0 || (x > 0) == (y > 0))
         .count();
     agree as f64 / a.len() as f64
 }

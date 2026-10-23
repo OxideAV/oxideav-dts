@@ -11,9 +11,9 @@
 //! accessors.
 
 use oxideav_dts::{
-    decode_core_frame, decode_core_frame_with_info, iter_frames, parse_aux_data,
-    parse_frame_header, parse_rev2_aux, DownmixType, AUX_SYNC_WORD, AUX_TIME_STAMP_MARKER,
-    REV2_AUX_SYNC_WORD, REV2_DRC_VERSION_SINGLE_BAND,
+    AUX_SYNC_WORD, AUX_TIME_STAMP_MARKER, DownmixType, REV2_AUX_SYNC_WORD,
+    REV2_DRC_VERSION_SINGLE_BAND, decode_core_frame, decode_core_frame_with_info, iter_frames,
+    parse_aux_data, parse_frame_header, parse_rev2_aux,
 };
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/dts_5_frames.bin");
@@ -35,7 +35,7 @@ impl BitWriter {
     fn push_bits(&mut self, value: u64, n: u32) {
         for i in (0..n).rev() {
             let bit = (value >> i) & 1;
-            if self.bit_len % 8 == 0 {
+            if self.bit_len.is_multiple_of(8) {
                 self.bytes.push(0);
             }
             let byte = self.bytes.last_mut().unwrap();
@@ -45,7 +45,7 @@ impl BitWriter {
     }
 
     fn align_byte(&mut self) {
-        while self.bit_len % 8 != 0 {
+        while !self.bit_len.is_multiple_of(8) {
             self.push_bits(0, 1);
         }
     }

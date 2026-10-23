@@ -5,8 +5,8 @@
 //! construction — frame `k` decodes to input samples `512k…`).
 
 use oxideav_dts::{
-    iter_frames, parse_frame_header, CoreEncoder, CoreStreamDecoder, EncoderConfig,
-    ENCODER_FRAME_SAMPLES,
+    CoreEncoder, CoreStreamDecoder, ENCODER_FRAME_SAMPLES, EncoderConfig, iter_frames,
+    parse_frame_header,
 };
 
 /// Full-scale-relative multitone: content across the whole spectrum,
@@ -302,7 +302,9 @@ fn adpcm_predicts_tonal_bands_and_improves_the_round_trip() {
         .map(|f| predicted_bands(f.unwrap().data).iter().sum::<usize>())
         .sum();
     assert!(predicted > 0, "ADPCM must be used on the tonal stream");
-    assert!(iter_frames(&without).all(|f| predicted_bands(f.unwrap().data).iter().all(|&c| c == 0)));
+    assert!(
+        iter_frames(&without).all(|f| predicted_bands(f.unwrap().data).iter().all(|&c| c == 0))
+    );
 
     let (pcm_with, _) = decode_stream(&with, 2);
     let (pcm_without, _) = decode_stream(&without, 2);

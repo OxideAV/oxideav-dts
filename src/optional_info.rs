@@ -42,9 +42,9 @@
 //!   `docs/audio/dts/dts-crc16.md`) but the core check words are
 //!   normatively untested placeholders, so the word is surfaced raw.
 
+use crate::Result;
 use crate::bitreader::BitReader;
 use crate::header::DtsFrameHeader;
-use crate::Result;
 
 /// The maximum §5.6 `AUXCT` auxiliary byte count (6-bit field,
 /// documented range 1..=63 when `AUXF == 1`).
@@ -132,7 +132,7 @@ pub fn decode_optional_info_at(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::{synth_header, BitWriter};
+    use crate::test_util::{BitWriter, synth_header};
 
     /// 13-bit flag-window bit positions (MSB-first within the window):
     /// downmix, dynamic_range, time_stamp, aux_data, hdcd,
