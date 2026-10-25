@@ -368,10 +368,6 @@ gone.
 
 - Extensions (EXSS / XCH / XXCH / X96 / XLL) are out of scope for the
   current Core-profile effort.
-- The `SA129..SE129` scale-factor Huffman books (`SHUFF 0..=4`) are
-  a docs gap — see "Encoder gaps" above; the decoder's 129-level
-  routing is the structural interpretation, unverified against the
-  reference.
 - `DtsFrameHeader::verify_header_crc` returns `None` **by design**,
   not because of a docs gap: the Annex B CRC algorithm is documented
   and implemented (`dts_crc16`), but §5.3.1 states "The CRC value
@@ -458,18 +454,15 @@ round trip is unity through both decoders.
 
 ### Encoder gaps
 
-- **`SA129..SE129` scale-factor books (Table 5-24, `SHUFF 0..=4`)**:
-  the spec names them but prints no table under those names. This
-  crate routes them to the §D.5.12 129-level A129..E129 audio books
-  (structurally consistent: ±64 differences over the 64-entry §D.1.1
-  grid from a zeroed accumulator, and the `JOIN_SCALES` `+64` bias
-  into the 129-entry §D.3 table), but the reference decoder rejects
-  streams coded that way — so the real books are distinct, unprinted
-  tables. The encoder therefore defaults to linear 7-bit scales
-  (`HuffmanScales::Never`); `WhenCheaper` / `LowRatesOnly` round-trip
-  only through this crate's decoder. The same gap bounds joint
-  intensity to factors ≥ 1.0 (linear `JOIN_SHUFF` reaches §D.3
-  indices 64..=128 only).
+- **`SA129..SE129` scale-factor books (Table 5-24, `SHUFF 0..=4`)**
+  are the five tables printed at the head of Annex D §D.5.12 (pages
+  219 to 223), now transcribed in `src/scales_huff.rs` and used by
+  both decoder and encoder; earlier releases routed the selectors to
+  the audio-data books A129..E129 and so rejected every stream from a
+  production encoder on its first scale factor. The encoder still
+  defaults to linear 7-bit scales (`HuffmanScales::Never`); joint
+  intensity remains bounded to factors ≥ 1.0 (linear `JOIN_SHUFF`
+  reaches §D.3 indices 64..=128 only).
 - **No perceptual model in the spec**: TS 102 114 specifies the
   decoder; the allocator is noise-power-greedy (maximum SNR per bit),
   not masking-driven.

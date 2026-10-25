@@ -317,3 +317,45 @@ fn adpcm_predicts_tonal_bands_and_improves_the_round_trip() {
         );
     }
 }
+
+/// The header's source PCM resolution describes the encoder's input, not the output level: the
+/// same signal declared as a 24-bit source decodes to exactly the PCM of its 16-bit declaration.
+/// (Film soundtracks declare 24 bits; scaling the output by that declaration made them 256 times
+/// too loud.)
+#[test]
+fn a_24_bit_source_declaration_leaves_the_decoded_level_unchanged() {
+    let planes = [multitone(3 * ENCODER_FRAME_SAMPLES, 0.0)];
+    let config = EncoderConfig::new(48_000, 1).unwrap();
+    let refs: Vec<&[f64]> = planes.iter().map(Vec::as_slice).collect();
+    let mut streams = Vec::new();
+    for bits in [16u8, 24] {
+        let mut enc = CoreEncoder::new(config.clone()).expect("config is valid");
+        enc.set_source_pcm_bits(bits)
+            .expect("16 and 24 are valid declarations");
+        let mut out = Vec::new();
+        for frame in enc.push(&refs).expect("push") {
+            out.extend_from_slice(&frame);
+        }
+        for frame in enc.flush() {
+            out.extend_from_slice(&frame);
+        }
+        streams.push(out);
+    }
+    let header16 = oxideav_dts::parse_frame_header(&streams[0]).unwrap();
+    let header24 = oxideav_dts::parse_frame_header(&streams[1]).unwrap();
+    assert_eq!(header16.source_pcm_bits_per_sample(), Some(16));
+    assert_eq!(header24.source_pcm_bits_per_sample(), Some(24));
+    assert_ne!(streams[0], streams[1], "the header differs");
+    let (pcm16, _) = decode_stream(&streams[0], 1);
+    let (pcm24, _) = decode_stream(&streams[1], 1);
+    assert_eq!(
+        pcm16, pcm24,
+        "decoded PCM must not depend on the declared source resolution"
+    );
+    assert!(pcm16[0].iter().any(|&s| s != 0.0));
+    let mut enc = CoreEncoder::new(config).unwrap();
+    assert!(
+        enc.set_source_pcm_bits(12).is_err(),
+        "only 16, 20 and 24 bits exist"
+    );
+}

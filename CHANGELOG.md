@@ -6,6 +6,24 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The five scale-factor Huffman books (`SHUFF 0..=4`, Tables SA129..SE129 of
+  Annex D §D.5.12) are transcribed from the specification and replace the
+  audio-data books A129..E129 that stood in for them; every production-encoder
+  stream (all of which choose a Huffman scale book) failed on its first scale
+  factor with `InvalidSideInfo { field: "SCALES" }`.
+- The output level no longer follows the header's source PCM resolution
+  (`PCMR`): a 24-bit source, which most film soundtracks declare, decoded 256
+  times too loud and clipped. Every stream is reconstructed to the same 32-bit
+  full scale, as the reference decoders do (`OUTPUT_R_SCALE`).
+
+### Added
+
+- `CoreEncoder::set_source_pcm_bits` declares a 16-, 20- or 24-bit source in
+  the frame header, so fixtures can exercise the resolution-independent output
+  level.
+
 ### Changed
 
 - edition 2024, MSRV 1.95.

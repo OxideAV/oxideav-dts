@@ -541,6 +541,7 @@ mod qmf_assemble;
 mod qmf_multichannel;
 mod qmf_synth;
 mod rev2_aux;
+mod scales_huff;
 mod side_info;
 mod step_size;
 mod subframe;

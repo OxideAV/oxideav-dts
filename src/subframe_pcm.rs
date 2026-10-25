@@ -120,6 +120,15 @@ pub const PCM_PER_SUBBAND_ROW: usize = NUM_SUBBAND;
 /// unity), instead of documenting the ratio test-side.
 pub const OUTPUT_LEVEL_CALIBRATION: f64 = std::f64::consts::SQRT_2;
 
+/// The §C.2.5 `rScale` this decoder hands the synthesis filter for every
+/// stream: the gain that maps the `raZ` domain to 32-bit full-scale PCM
+/// for a 16-bit source, kept constant for 20- and 24-bit sources too.
+/// `PCMR` describes the encoder's input, not the level of the decoded
+/// output: the reference decoders reconstruct every stream to the same
+/// full scale, and scaling by `2^(bits-1)` instead made every 24-bit
+/// source (most film soundtracks) 256 times too loud and clipped.
+pub const OUTPUT_R_SCALE: f64 = 32768.0;
+
 /// Errors from the §5.5 + §C.2.5 end-to-end subframe→PCM bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -486,18 +495,19 @@ impl SubframePcmDecoder {
             });
         }
 
-        // The §C.2.5 output rScale must be defined (PCMR not reserved)
-        // before any decode work runs, so a reserved-PCMR frame fails
-        // cleanly without disturbing the persistent filter state.
-        let Some(r_scale) = header.output_r_scale() else {
+        // A reserved PCMR code still fails cleanly before any decode
+        // work runs, so the persistent filter state is undisturbed.
+        if header.output_r_scale().is_none() {
             return Err(SubframePcmError::ReservedPcmResolution {
                 pcmr: header.source_pcm_resolution_index,
             });
-        };
-        // The header accessor gives the PCMR full-scale gain; the
-        // decoder's own output level is that times the calibration
-        // constant (see OUTPUT_LEVEL_CALIBRATION).
-        let r_scale = r_scale * OUTPUT_LEVEL_CALIBRATION;
+        }
+        // The output level does not follow the source resolution the
+        // header declares: every frame is reconstructed to the same
+        // 32-bit full scale, as the reference decoders do (see
+        // OUTPUT_R_SCALE). Scaling by `output_r_scale()` made a 24-bit
+        // source 256 times louder than a 16-bit one.
+        let r_scale = OUTPUT_R_SCALE * OUTPUT_LEVEL_CALIBRATION;
         let filter: FilterBankSelection = header.filter_bank_selection();
 
         // Joint-intensity subband coding (JOINX > 0) is applied below
