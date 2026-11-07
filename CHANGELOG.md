@@ -18,12 +18,6 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
   times too loud and clipped. Every stream is reconstructed to the same 32-bit
   full scale, as the reference decoders do (`OUTPUT_R_SCALE`).
 
-### Added
-
-- `CoreEncoder::set_source_pcm_bits` declares a 16-, 20- or 24-bit source in
-  the frame header, so fixtures can exercise the resolution-independent output
-  level.
-
 ### Changed
 
 - API hygiene: `EncoderConfig`, `DownmixSpec`, `HuffmanScales`, `DtsFrameHeader`, `SyncMatch`, `FrameView`, `FrameView14`, `ResyncEvent` and `ResyncCause` are now `#[non_exhaustive]`. Build `EncoderConfig` through `EncoderConfig::new` + `with_*`. `FrameType`, `LfeMode`, `DownmixType` and `FourteenBitByteOrder` stay exhaustive because the bitstream field fixes their value set.
@@ -31,6 +25,9 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `DownmixSpec::new(downmix_type, coefficients)`.
+- `CoreEncoder::set_source_pcm_bits` declares a 16-, 20- or 24-bit source in
+  the frame header, so fixtures can exercise the resolution-independent output
+  level.
 
 ## [0.0.3](https://github.com/OxideAV/oxideav-dts/compare/v0.0.2...v0.0.3) - 2026-10-23
 
