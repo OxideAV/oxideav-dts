@@ -6,6 +6,14 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- API hygiene: `EncoderConfig`, `DownmixSpec`, `HuffmanScales`, `DtsFrameHeader`, `SyncMatch`, `FrameView`, `FrameView14`, `ResyncEvent` and `ResyncCause` are now `#[non_exhaustive]`. Build `EncoderConfig` through `EncoderConfig::new` + `with_*`. `FrameType`, `LfeMode`, `DownmixType` and `FourteenBitByteOrder` stay exhaustive because the bitstream field fixes their value set.
+
+### Added
+
+- `DownmixSpec::new(downmix_type, coefficients)`.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-dts/compare/v0.0.2...v0.0.3) - 2026-10-23
 
 ### Other

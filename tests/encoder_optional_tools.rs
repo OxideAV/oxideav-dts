@@ -158,10 +158,10 @@ fn aux_chunk_carries_crc_checked_downmix_coefficients() {
     let config = EncoderConfig::new(48_000, 5)
         .unwrap()
         .with_lfe(true)
-        .with_downmix(Some(DownmixSpec {
-            downmix_type: DownmixType::LoRo,
-            coefficients: coefficients.clone(),
-        }));
+        .with_downmix(Some(DownmixSpec::new(
+            DownmixType::LoRo,
+            coefficients.clone(),
+        )));
     let bytes = encode_stream(config, &planes);
     for fv in iter_frames(&bytes) {
         let fv = fv.unwrap();
@@ -194,10 +194,7 @@ fn aux_chunk_carries_crc_checked_downmix_coefficients() {
         CoreEncoder::new(
             EncoderConfig::new(48_000, 2)
                 .unwrap()
-                .with_downmix(Some(DownmixSpec {
-                    downmix_type: DownmixType::LoRo,
-                    coefficients: vec![1.0; 3],
-                }))
+                .with_downmix(Some(DownmixSpec::new(DownmixType::LoRo, vec![1.0; 3])))
         )
         .is_err()
     );

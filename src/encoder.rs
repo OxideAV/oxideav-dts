@@ -167,6 +167,7 @@ fn huff_code(table: &[(i16, u8, u16)], symbol: i16) -> Option<(u32, u32)> {
 /// channel when present). Coefficients are snapped to the §D.11
 /// table on emission (`0.0` codes as "no contribution").
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DownmixSpec {
     /// Table 5-32 downmix group.
     pub downmix_type: crate::DownmixType,
@@ -174,8 +175,19 @@ pub struct DownmixSpec {
     pub coefficients: Vec<f64>,
 }
 
+impl DownmixSpec {
+    /// A downmix to `downmix_type` with the out-major `coefficients` matrix.
+    pub fn new(downmix_type: crate::DownmixType, coefficients: Vec<f64>) -> Self {
+        Self {
+            downmix_type,
+            coefficients,
+        }
+    }
+}
+
 /// Encoder configuration.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct EncoderConfig {
     /// Core sample rate in Hz (must be a Table 5-5 rate).
     pub sample_rate: u32,
@@ -234,6 +246,7 @@ pub struct EncoderConfig {
 /// The other policies exist for experimentation and for the day the
 /// real books are staged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HuffmanScales {
     /// Never (always `SHUFF = 6`, 7-bit linear) — interoperable.
     Never,

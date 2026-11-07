@@ -685,6 +685,7 @@ fn dialog_normalization_from_codes(vernum: u8, dialnorm: u8) -> DialogNormalizat
 /// bitrate table (ETSI §5.3.1 Table 5-7) landed in round 185, so
 /// [`Self::bit_rate_bps`] / [`Self::targeted_bit_rate`] now resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct DtsFrameHeader {
     /// Which of the four documented sync encodings was found at
     /// offset zero.

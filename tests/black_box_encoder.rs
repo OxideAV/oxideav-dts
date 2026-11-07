@@ -392,10 +392,10 @@ fn regenerate_fixture_streams_when_requested() {
                 .with_bit_rate(192_000)
                 .unwrap()
                 .with_joint_intensity_start(Some(8))
-                .with_downmix(Some(oxideav_dts::DownmixSpec {
-                    downmix_type: oxideav_dts::DownmixType::OneZero,
-                    coefficients: vec![0.7, 0.7],
-                })),
+                .with_downmix(Some(oxideav_dts::DownmixSpec::new(
+                    oxideav_dts::DownmixType::OneZero,
+                    vec![0.7, 0.7],
+                ))),
             signal("stereo_joint"),
         ),
     ];
