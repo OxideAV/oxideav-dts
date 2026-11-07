@@ -461,9 +461,9 @@ pub(crate) fn decode_tmode(br: &mut BitReader<'_>, codebook: TmodeCodebook) -> R
 // so the very first index of a channel is itself coded as a
 // difference from zero. Earlier releases routed these selectors
 // through the audio-data books A129..E129, whose codes differ, so
-// every stream from a production encoder (which all choose a Huffman
-// book here; FFmpeg's encoder alone writes `SHUFF = 6`) failed on its
-// first scale factor.
+// every stream that chooses a Huffman scale book failed on its first
+// scale factor; the reference-encoder fixtures bundled here all use
+// `SHUFF = 6` (7-bit linear) and so never reached this path.
 
 /// Codebook selector for the scale-factor (SCALES) field, per §5.3.x
 /// Table 5-24. `SHUFF[ch] == 7` is reserved/invalid.
@@ -533,9 +533,10 @@ impl ScalesCodebook {
     }
 }
 
-/// Per Table 5-24, the SHUFF=0..=4 entries (SA129..SE129) are the
-/// Annex D §D.5.12 129-level books A129..E129 (see the note above the
-/// [`ScalesCodebook`] definition). The dispatch is by codebook variant.
+/// Per Table 5-24, the SHUFF=0..=4 entries select the Annex D §D.5.12
+/// scale-factor books SA129..SE129 (`crate::scales_huff`; see the note
+/// above the [`ScalesCodebook`] definition). The dispatch is by
+/// codebook variant.
 fn scales_huffman_codebook(codebook: ScalesCodebook) -> (&'static [HuffmanEntry], &'static str) {
     use crate::scales_huff::{TABLE_SA129, TABLE_SB129, TABLE_SC129, TABLE_SD129, TABLE_SE129};
     match codebook {

@@ -236,15 +236,12 @@ pub struct EncoderConfig {
 
 /// Policy for the difference-coded scale factors (`SHUFF 0..=4`).
 ///
-/// **Default [`Never`](Self::Never).** The spec names the five
-/// scale-factor books `SA129..SE129` (Table 5-24) but prints no table
-/// under those names; this crate codes them through the §D.5.12
-/// A129..E129 audio books, which is structurally consistent (a ±64
-/// difference alphabet over the 64-entry §D.1.1 grid, accumulated
-/// from zero) yet **rejected by the black-box reference decoder**, so
-/// such streams round-trip only through this crate's own decoder.
-/// The other policies exist for experimentation and for the day the
-/// real books are staged.
+/// **Default [`Never`](Self::Never).** The Huffman policies code the
+/// scale-factor index differences (a ±64 alphabet over the 64-entry
+/// §D.1.1 grid, accumulated from zero) through the five Annex D
+/// §D.5.12 scale-factor books `SA129..SE129` that Table 5-24 selects
+/// (`SHUFF 0..=4`), choosing per channel whichever book is cheapest
+/// when it beats the linear code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HuffmanScales {

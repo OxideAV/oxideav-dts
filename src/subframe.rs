@@ -517,16 +517,16 @@ mod tests {
     use super::*;
     use crate::side_info::{RMS_6BIT, RMS_7BIT};
 
-    /// Pack a series of (value, bit_width) fields into a byte stream
-    /// MSB-first. Trailing bits are zero-padded.
     /// `(code, len)` of a SCALES difference symbol in the SA129 book
-    /// (§D.5.12 Table A129).
+    /// (§D.5.12 Table SA129).
     fn sa129(diff: i16) -> (u32, u8) {
         let table = crate::side_info::scales_table(ScalesCodebook::Sa129).unwrap();
         let &(_, len, code) = table.iter().find(|&&(s, _, _)| s == diff).unwrap();
         (u32::from(code), len)
     }
 
+    /// Pack a series of (value, bit_width) fields into a byte stream
+    /// MSB-first. Trailing bits are zero-padded.
     fn pack_fields(fields: &[(u32, u8)]) -> Vec<u8> {
         let total_bits: usize = fields.iter().map(|(_, w)| *w as usize).sum();
         let mut out = vec![0u8; total_bits.div_ceil(8)];
