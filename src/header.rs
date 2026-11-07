@@ -979,10 +979,17 @@ impl DtsFrameHeader {
     /// `Some(32768.0 / 524288.0 / 8388608.0)`), and `None` for the
     /// two reserved/invalid codes ([`SourcePcmResolution::Invalid`]),
     /// matching the `Option` semantics of
-    /// [`Self::source_pcm_bits_per_sample`]. Implementations that
-    /// apply their own headroom/clip-guard factor or carry a
-    /// different internal `raZ` normalization should pass their own
-    /// `rScale` to `crate::QmfSynthesis::synthesize` instead.
+    /// [`Self::source_pcm_bits_per_sample`].
+    ///
+    /// **This crate's decoder does not use it as its output gain.**
+    /// `PCMR` describes the encoder's input, not the level of the
+    /// decoded output, so [`crate::SubframePcmDecoder`] and
+    /// `MultiChannelQmf::synthesize_planar_from_header` synthesize
+    /// every stream with the constant [`crate::OUTPUT_R_SCALE`] (the
+    /// 16-bit value) whatever `PCMR` says; scaling by this accessor
+    /// made a 24-bit source 256 times louder than a 16-bit one. The
+    /// accessor stays as the source-resolution full scale, for callers
+    /// that want to requantize to the declared source depth.
     #[must_use]
     pub fn output_r_scale(&self) -> Option<f64> {
         self.source_pcm_bits_per_sample()
@@ -4686,6 +4693,40 @@ mod tests {
 
         assert_eq!(via_header, manual);
         assert!(via_header[0].iter().any(|&s| s != 0));
+    }
+
+    /// The multi-channel header convenience synthesizes at the same
+    /// output level whatever source resolution `PCMR` declares: a
+    /// 20- or 24-bit header gives exactly the PCM of a 16-bit one.
+    #[test]
+    fn multichannel_from_header_level_ignores_declared_pcmr() {
+        use crate::cos_mod::NUM_SUBBAND;
+        use crate::qmf_multichannel::MultiChannelQmf;
+
+        let rows: Vec<[f64; NUM_SUBBAND]> = (0..6)
+            .map(|s| {
+                let mut r = [0.0; NUM_SUBBAND];
+                r[1] = (s as f64 - 2.5) * 1e5;
+                r
+            })
+            .collect();
+        let refs: Vec<&[[f64; NUM_SUBBAND]]> = vec![rows.as_slice()];
+        let n_subs = [4usize];
+
+        let mut outputs = Vec::new();
+        for pcmr in [0u8, 0b010, 0b110] {
+            let h = synth_hdr(|h| h.source_pcm_resolution_index = pcmr);
+            let mut mc = MultiChannelQmf::new(1);
+            let mut out = vec![Vec::new()];
+            let outcome = mc
+                .synthesize_planar_from_header(&h, &refs, &n_subs, &mut out)
+                .unwrap();
+            assert_eq!(outcome, Some(()));
+            outputs.push(out);
+        }
+        assert!(outputs[0][0].iter().any(|&s| s != 0));
+        assert_eq!(outputs[0], outputs[1], "20-bit PCMR changed the level");
+        assert_eq!(outputs[0], outputs[2], "24-bit PCMR changed the level");
     }
 
     /// A reserved PCMR code yields `Ok(None)` from the multi-channel

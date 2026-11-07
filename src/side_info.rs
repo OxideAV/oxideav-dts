@@ -28,12 +28,10 @@
 //!   `pScaleTable` lookups in Table 5-28.
 //! - Annex D §D.5.6 (12 Levels for BHUFF: tables A12, B12, C12, D12,
 //!   E12).
-//! - Annex D §D.5.3 (5 Levels: tables A5, B5, C5) and §D.5.4 (7 Levels:
-//!   tables A7, B7, C7) — the SHUFF Huffman codebooks for the
-//!   {SA129, SB129, SC129, SD129, SE129} selectors. The spec routes
-//!   the SHUFF=0..4 codes through the 5-level tables for SA129/SB129/
-//!   SC129 and the 7-level tables for SD129/SE129; §5.4.1's
-//!   `QSCALES.ppQ[nQSelect]->InverseQ(...)` is the dispatch table.
+//! - Annex D §D.5.12 Tables SA129..SE129 (pages 219 to 223) — the five
+//!   SHUFF Huffman code books for scale-factor differences, kept in
+//!   [`crate::scales_huff`]. They are separate books from the
+//!   audio-data tables A129..G129 printed after them.
 //!
 //! The module is feature-independent (no `oxideav-core` dep), so it
 //! is available under both the default and `--no-default-features`
@@ -130,7 +128,7 @@ impl AbitsCodebook {
 /// The codeword is read MSB-first from the bit stream; matching
 /// happens by progressively reading bits and comparing against this
 /// table by `code_length`.
-type HuffmanEntry = (i16, u8, u16);
+pub(crate) type HuffmanEntry = (i16, u8, u16);
 
 /// Annex D §D.5.6 Table A12.
 const TABLE_A12: &[HuffmanEntry] = &[
@@ -454,30 +452,18 @@ pub(crate) fn decode_tmode(br: &mut BitReader<'_>, codebook: TmodeCodebook) -> R
 // |     6     | 7-bit linear    | 7 bit (clause D.1.2)    |
 // |     7     | Invalid         | Invalid                 |
 //
-// The five `SA129..SE129` code books are the Annex D §D.5.12 "129
-// Levels" Huffman tables A129..E129 (staged PDF p.219 ff.): the
-// `S` prefix marks their SCALES use, the `129` their level count.
-// Per Table 5-28's `nScaleSum += nScale; pScaleTable->LookUp(
-// nScaleSum, …)` flow the transmitted symbol is a **difference**
-// between consecutive scale-factor quantization indexes, accumulated
-// from `nScaleSum = 0` — so the very first index of a channel is
-// itself coded as a difference from zero, which only a ±64 alphabet
-// can reach across the 64-entry §D.1.1 table (and the §5.4.1
-// `JOIN_SCALES` path biases the same symbol by +64 into the
-// 129-entry §D.3 table: again exactly the 129-level alphabet).
-// Rounds 195–452 routed these selectors through the 5-/7-level
-// §D.5.3/§D.5.4 books, which cannot express a first index above 3.
-// Round 453 moved them to the structurally consistent 129-level
-// alphabet — **but this remains unverified**: the spec never prints
-// tables named `SA129..SE129`, and streams the round-453 encoder
-// codes through A129..E129 (`HuffmanScales::WhenCheaper`) are
-// rejected by the black-box reference decoder ("invalid scale factor
-// index" on every frame) while its `SHUFF = 6` streams decode
-// perfectly. The five scale-factor books are therefore distinct,
-// unprinted tables — a `docs/` gap, recorded in the README. Streams
-// in the wild (every reference-encoder fixture bundled here) use
-// `SHUFF = 6`, so the decode path below is exercised only by
-// spec-shaped synthetic tests.
+// The five `SA129..SE129` code books are printed in Annex D §D.5.12
+// right before the audio-data books A129..G129 (pages 219 to 223)
+// and live in `crate::scales_huff`. Per Table 5-28's `nScaleSum +=
+// nScale; pScaleTable->LookUp(nScaleSum, …)` flow the transmitted
+// symbol is a **difference** between consecutive scale-factor
+// quantization indexes in -64..=64, accumulated from `nScaleSum = 0`,
+// so the very first index of a channel is itself coded as a
+// difference from zero. Earlier releases routed these selectors
+// through the audio-data books A129..E129, whose codes differ, so
+// every stream that chooses a Huffman scale book failed on its first
+// scale factor; the reference-encoder fixtures bundled here all use
+// `SHUFF = 6` (7-bit linear) and so never reached this path.
 
 /// Codebook selector for the scale-factor (SCALES) field, per §5.3.x
 /// Table 5-24. `SHUFF[ch] == 7` is reserved/invalid.
@@ -547,17 +533,18 @@ impl ScalesCodebook {
     }
 }
 
-/// Per Table 5-24, the SHUFF=0..=4 entries (SA129..SE129) are the
-/// Annex D §D.5.12 129-level books A129..E129 (see the note above the
-/// [`ScalesCodebook`] definition). The dispatch is by codebook variant.
+/// Per Table 5-24, the SHUFF=0..=4 entries select the Annex D §D.5.12
+/// scale-factor books SA129..SE129 (`crate::scales_huff`; see the note
+/// above the [`ScalesCodebook`] definition). The dispatch is by
+/// codebook variant.
 fn scales_huffman_codebook(codebook: ScalesCodebook) -> (&'static [HuffmanEntry], &'static str) {
-    use crate::audio_huff::{AudioHuffCodebook, table_for};
+    use crate::scales_huff::{TABLE_SA129, TABLE_SB129, TABLE_SC129, TABLE_SD129, TABLE_SE129};
     match codebook {
-        ScalesCodebook::Sa129 => (table_for(AudioHuffCodebook::A129), "SA129"),
-        ScalesCodebook::Sb129 => (table_for(AudioHuffCodebook::B129), "SB129"),
-        ScalesCodebook::Sc129 => (table_for(AudioHuffCodebook::C129), "SC129"),
-        ScalesCodebook::Sd129 => (table_for(AudioHuffCodebook::D129), "SD129"),
-        ScalesCodebook::Se129 => (table_for(AudioHuffCodebook::E129), "SE129"),
+        ScalesCodebook::Sa129 => (TABLE_SA129, "SA129"),
+        ScalesCodebook::Sb129 => (TABLE_SB129, "SB129"),
+        ScalesCodebook::Sc129 => (TABLE_SC129, "SC129"),
+        ScalesCodebook::Sd129 => (TABLE_SD129, "SD129"),
+        ScalesCodebook::Se129 => (TABLE_SE129, "SE129"),
         // Unreachable: the caller dispatches linear variants
         // separately via the `is_huffman_encoded()` check.
         ScalesCodebook::Linear6Bit | ScalesCodebook::Linear7Bit => (&[], "<linear>"),

@@ -236,15 +236,12 @@ pub struct EncoderConfig {
 
 /// Policy for the difference-coded scale factors (`SHUFF 0..=4`).
 ///
-/// **Default [`Never`](Self::Never).** The spec names the five
-/// scale-factor books `SA129..SE129` (Table 5-24) but prints no table
-/// under those names; this crate codes them through the §D.5.12
-/// A129..E129 audio books, which is structurally consistent (a ±64
-/// difference alphabet over the 64-entry §D.1.1 grid, accumulated
-/// from zero) yet **rejected by the black-box reference decoder**, so
-/// such streams round-trip only through this crate's own decoder.
-/// The other policies exist for experimentation and for the day the
-/// real books are staged.
+/// **Default [`Never`](Self::Never).** The Huffman policies code the
+/// scale-factor index differences (a ±64 alphabet over the 64-entry
+/// §D.1.1 grid, accumulated from zero) through the five Annex D
+/// §D.5.12 scale-factor books `SA129..SE129` that Table 5-24 selects
+/// (`SHUFF 0..=4`), choosing per channel whichever book is cheapest
+/// when it beats the linear code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HuffmanScales {
@@ -286,6 +283,12 @@ pub enum EncodeError {
         /// The rejected 5-bit RATE code.
         rate_index: u8,
     },
+    /// A declared source PCM resolution other than the 16, 20 or 24
+    /// bits Table 5-16 can code.
+    UnsupportedSourcePcmBits {
+        /// The rejected bit depth.
+        bits: u8,
+    },
     /// Pushed plane count does not match the configuration.
     ChannelCountMismatch {
         /// Planes the configuration requires (primaries + LFE).
@@ -309,6 +312,9 @@ impl core::fmt::Display for EncodeError {
         match self {
             Self::UnsupportedSampleRate { sample_rate } => {
                 write!(f, "unsupported core sample rate {sample_rate} Hz")
+            }
+            Self::UnsupportedSourcePcmBits { bits } => {
+                write!(f, "source PCM resolution {bits} bits is not 16, 20 or 24")
             }
             Self::UnsupportedChannelCount { channels } => {
                 write!(f, "unsupported primary channel count {channels}")
@@ -526,6 +532,9 @@ fn sfreq_code(sample_rate: u32) -> Option<u8> {
 pub struct CoreEncoder {
     config: EncoderConfig,
     frame_bytes: usize,
+    /// The §5.3.1 `PCMR` code written in every header (Table 5-16):
+    /// 0 for a 16-bit source, 2 for 20 bits, 6 for 24 bits.
+    source_pcm_index: u8,
     qmf: QmfAnalysis,
     lfe: Option<LfeAnalysis>,
     /// Per-plane input buffers (primaries, then LFE), in normalized
@@ -562,8 +571,23 @@ impl CoreEncoder {
             consumed: 0,
             history: vec![[[0.0; NUM_ADPCM_COEFF]; NUM_SUBBAND]; config.channels],
             frame_bytes,
+            source_pcm_index: 0,
             config,
         })
+    }
+
+    /// Declare the source's PCM resolution (`PCMR`, Table 5-16) in every
+    /// frame header: 16 (the default), 20 or 24 bits. The field describes
+    /// the encoder's input; decoders reconstruct every stream to the same
+    /// output level whatever it says.
+    pub fn set_source_pcm_bits(&mut self, bits: u8) -> Result<(), EncodeError> {
+        self.source_pcm_index = match bits {
+            16 => 0,
+            20 => 2,
+            24 => 6,
+            _ => return Err(EncodeError::UnsupportedSourcePcmBits { bits }),
+        };
+        Ok(())
     }
 
     /// The configuration in use.
@@ -681,6 +705,7 @@ impl CoreEncoder {
         let frame = encode_frame_bits(
             &self.config,
             self.frame_bytes,
+            self.source_pcm_index,
             &rows,
             lfe_decimated.as_deref(),
             &mut self.history,
@@ -1271,6 +1296,7 @@ fn scales_huffman_bits(indices: &[u8], cb: ScalesCodebook) -> Option<usize> {
 fn encode_frame_bits(
     config: &EncoderConfig,
     frame_bytes: usize,
+    source_pcm_index: u8,
     rows: &[Vec<[f64; NUM_SUBBAND]>],
     lfe_decimated: Option<&[f64]>,
     history: &mut [[[f64; NUM_ADPCM_COEFF]; NUM_SUBBAND]],
@@ -1603,7 +1629,7 @@ fn encode_frame_bits(
     debug_assert!(used <= budget_total);
 
     // --- Emission ---------------------------------------------------
-    let header = frame_header(config, frame_bytes);
+    let header = frame_header(config, frame_bytes, source_pcm_index);
     let header_bytes = encode_frame_header_be(&header).expect("encoder header fields are bounded");
     let mut w = BitWriter::from_bytes(header_bytes);
 
@@ -1961,7 +1987,11 @@ fn to_wire(mut frame: Vec<u8>, encoding: SyncWordEncoding) -> Vec<u8> {
 }
 
 /// Build the §5.3.1 header for one normal frame.
-fn frame_header(config: &EncoderConfig, frame_bytes: usize) -> DtsFrameHeader {
+fn frame_header(
+    config: &EncoderConfig,
+    frame_bytes: usize,
+    source_pcm_index: u8,
+) -> DtsFrameHeader {
     DtsFrameHeader {
         sync_word_encoding: SyncWordEncoding::RawBigEndian,
         frame_type: FrameType::Normal,
@@ -1990,7 +2020,7 @@ fn frame_header(config: &EncoderConfig, frame_bytes: usize) -> DtsFrameHeader {
         multirate_inter: config.filter == FilterBankSelection::PerfectReconstruction,
         version: 7,
         copy_history: 0,
-        source_pcm_resolution_index: 0,
+        source_pcm_resolution_index: source_pcm_index,
         front_sum: false,
         surround_sum: false,
         dialog_normalization: 0,

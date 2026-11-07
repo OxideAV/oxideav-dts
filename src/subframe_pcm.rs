@@ -103,13 +103,12 @@ pub type SubframePcm = Vec<Vec<i32>>;
 pub const PCM_PER_SUBBAND_ROW: usize = NUM_SUBBAND;
 
 /// Implementation-defined output-level calibration applied on top of
-/// [`DtsFrameHeader::output_r_scale`] by the §C.2.5 synthesis step of
-/// this decoder.
+/// [`OUTPUT_R_SCALE`] by the §C.2.5 synthesis step of this decoder.
 ///
 /// Per `docs/audio/dts/dts-qmf-driver.md` §2, the §C.2.5 output
 /// `rScale` is **not** a normative constant: it is whatever fixed gain
 /// maps the implementation's internal `raZ` normalization to
-/// full-scale integer PCM at the `PCMR` resolution. This crate's
+/// full-scale integer PCM. This crate's
 /// `raZ` domain (fixed by the literal §C.2.5 cosine-modulation
 /// scalers) sits exactly √2 below the level the black-box reference
 /// decoder emits for the same streams — a constant ratio measured to
@@ -119,6 +118,15 @@ pub const PCM_PER_SUBBAND_ROW: usize = NUM_SUBBAND;
 /// reference (and the round trip through this crate's own encoder is
 /// unity), instead of documenting the ratio test-side.
 pub const OUTPUT_LEVEL_CALIBRATION: f64 = std::f64::consts::SQRT_2;
+
+/// The §C.2.5 `rScale` this decoder hands the synthesis filter for every
+/// stream: the gain that maps the `raZ` domain to 32-bit full-scale PCM
+/// for a 16-bit source, kept constant for 20- and 24-bit sources too.
+/// `PCMR` describes the encoder's input, not the level of the decoded
+/// output: the reference decoders reconstruct every stream to the same
+/// full scale, and scaling by `2^(bits-1)` instead made every 24-bit
+/// source (most film soundtracks) 256 times too loud and clipped.
+pub const OUTPUT_R_SCALE: f64 = 32768.0;
 
 /// Errors from the §5.5 + §C.2.5 end-to-end subframe→PCM bridge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +360,8 @@ impl SubframePcmDecoder {
     ///   §5.4.1 side information).
     /// * `header` — the parsed §5.3.1 [`DtsFrameHeader`]; supplies the
     ///   frame-wide `FILTS` ([`DtsFrameHeader::filter_bank_selection`])
-    ///   and the output `rScale` ([`DtsFrameHeader::output_r_scale`]).
+    ///   (and, through `PCMR`, only the reserved-code check; the output
+    ///   `rScale` is the constant [`OUTPUT_R_SCALE`]).
     /// * `coding` — the §5.3.2 [`AudioCodingHeader`]; supplies the
     ///   `SEL` / `arADJ` planes and the per-channel `nSUBS` / `nVQSUB`
     ///   loop bounds and `JOINX`.
@@ -486,18 +495,19 @@ impl SubframePcmDecoder {
             });
         }
 
-        // The §C.2.5 output rScale must be defined (PCMR not reserved)
-        // before any decode work runs, so a reserved-PCMR frame fails
-        // cleanly without disturbing the persistent filter state.
-        let Some(r_scale) = header.output_r_scale() else {
+        // A reserved PCMR code still fails cleanly before any decode
+        // work runs, so the persistent filter state is undisturbed.
+        if header.output_r_scale().is_none() {
             return Err(SubframePcmError::ReservedPcmResolution {
                 pcmr: header.source_pcm_resolution_index,
             });
-        };
-        // The header accessor gives the PCMR full-scale gain; the
-        // decoder's own output level is that times the calibration
-        // constant (see OUTPUT_LEVEL_CALIBRATION).
-        let r_scale = r_scale * OUTPUT_LEVEL_CALIBRATION;
+        }
+        // The output level does not follow the source resolution the
+        // header declares: every frame is reconstructed to the same
+        // 32-bit full scale, as the reference decoders do (see
+        // OUTPUT_R_SCALE). Scaling by `output_r_scale()` made a 24-bit
+        // source 256 times louder than a 16-bit one.
+        let r_scale = OUTPUT_R_SCALE * OUTPUT_LEVEL_CALIBRATION;
         let filter: FilterBankSelection = header.filter_bank_selection();
 
         // Joint-intensity subband coding (JOINX > 0) is applied below
@@ -970,7 +980,7 @@ pub fn decode_core_frame_with_info(
 /// (Pearson correlation 1.0 over the whole stream), versus 0.73 when
 /// the filter is reset per frame. (The two differ only by the
 /// implementation-defined output `rScale` constant — see
-/// [`DtsFrameHeader::output_r_scale`] and the round-356 report.)
+/// [`OUTPUT_R_SCALE`] and [`OUTPUT_LEVEL_CALIBRATION`].)
 #[derive(Debug, Clone)]
 pub struct CoreStreamDecoder {
     decoder: SubframePcmDecoder,

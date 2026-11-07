@@ -36,9 +36,9 @@
 //! step — the only spec construct it materialises is the channel loop
 //! around `aPrmCh[ch].QMFInterpolation(...)` and the planar/interleaved
 //! arrangement of the per-channel `naCh[]` outputs. The header-sourced
-//! `FILTS` / `rScale` come from [`crate::DtsFrameHeader`] accessors
-//! ([`crate::DtsFrameHeader::filter_bank_selection`] /
-//! [`crate::DtsFrameHeader::output_r_scale`]) per the round-335 bridge.
+//! `FILTS` comes from [`crate::DtsFrameHeader::filter_bank_selection`];
+//! the output `rScale` is the constant [`crate::OUTPUT_R_SCALE`],
+//! independent of the header's `PCMR`.
 
 use crate::cos_mod::NUM_SUBBAND;
 use crate::filter_bank::FilterBankSelection;
@@ -270,19 +270,19 @@ impl MultiChannelQmf {
     }
 
     /// Convenience: drive [`MultiChannelQmf::synthesize_planar`] with
-    /// the two frame-wide §C.2.5 parameters sourced directly from a
-    /// parsed [`crate::DtsFrameHeader`] — `FILTS` via
+    /// the frame-wide §C.2.5 parameters for a parsed
+    /// [`crate::DtsFrameHeader`] — `FILTS` via
     /// [`crate::DtsFrameHeader::filter_bank_selection`] and the output
-    /// `rScale` via [`crate::DtsFrameHeader::output_r_scale`] (the
-    /// round-335 header bridge).
+    /// `rScale` [`crate::OUTPUT_R_SCALE`], the same constant the
+    /// decoder uses for every `PCMR` (the declared source resolution
+    /// does not change the output level).
     ///
     /// # Errors
     ///
     /// Returns `Ok(None)` if the header's `PCMR` code is one of the two
-    /// reserved values (so [`crate::DtsFrameHeader::output_r_scale`]
-    /// yields `None` and no full-scale gain is defined); otherwise
-    /// runs the synthesis and returns `Ok(Some(()))`, or the same
-    /// errors as [`MultiChannelQmf::synthesize_planar`].
+    /// reserved values (the frame is invalid); otherwise runs the
+    /// synthesis and returns `Ok(Some(()))`, or the same errors as
+    /// [`MultiChannelQmf::synthesize_planar`].
     pub fn synthesize_planar_from_header(
         &mut self,
         header: &crate::header::DtsFrameHeader,
@@ -290,11 +290,17 @@ impl MultiChannelQmf {
         n_subs: &[usize],
         output: &mut [Vec<i32>],
     ) -> Result<Option<()>, MultiChannelQmfError> {
-        let Some(r_scale) = header.output_r_scale() else {
+        if header.output_r_scale().is_none() {
             return Ok(None);
-        };
+        }
         let filter = header.filter_bank_selection();
-        self.synthesize_planar(channel_samples, n_subs, filter, r_scale, output)?;
+        self.synthesize_planar(
+            channel_samples,
+            n_subs,
+            filter,
+            crate::subframe_pcm::OUTPUT_R_SCALE,
+            output,
+        )?;
         Ok(Some(()))
     }
 
