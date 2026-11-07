@@ -16,7 +16,10 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 - The output level no longer follows the header's source PCM resolution
   (`PCMR`): a 24-bit source, which most film soundtracks declare, decoded 256
   times too loud and clipped. Every stream is reconstructed to the same 32-bit
-  full scale, as the reference decoders do (`OUTPUT_R_SCALE`).
+  full scale, as the reference decoders do (`OUTPUT_R_SCALE`). The
+  `MultiChannelQmf::synthesize_planar_from_header` convenience uses the same
+  constant; `DtsFrameHeader::output_r_scale` still returns the declared
+  source-resolution full scale but is no longer the decoder's output gain.
 
 ### Changed
 
@@ -28,6 +31,7 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 - `CoreEncoder::set_source_pcm_bits` declares a 16-, 20- or 24-bit source in
   the frame header, so fixtures can exercise the resolution-independent output
   level.
+- `OUTPUT_R_SCALE` is exported next to `OUTPUT_LEVEL_CALIBRATION`.
 
 ## [0.0.3](https://github.com/OxideAV/oxideav-dts/compare/v0.0.2...v0.0.3) - 2026-10-23
 

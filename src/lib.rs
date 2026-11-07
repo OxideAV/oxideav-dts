@@ -727,9 +727,9 @@ pub use crate::subframe::{
     decode_primary_side_info_at, decode_primary_side_info_tail_at,
 };
 pub use crate::subframe_pcm::{
-    CoreFrameDecodeError, CoreStreamDecoder, OUTPUT_LEVEL_CALIBRATION, PCM_PER_SUBBAND_ROW,
-    Subframe, SubframePcm, SubframePcmDecoder, SubframePcmError, decode_core_frame,
-    decode_core_frame_with_info,
+    CoreFrameDecodeError, CoreStreamDecoder, OUTPUT_LEVEL_CALIBRATION, OUTPUT_R_SCALE,
+    PCM_PER_SUBBAND_ROW, Subframe, SubframePcm, SubframePcmDecoder, SubframePcmError,
+    decode_core_frame, decode_core_frame_with_info,
 };
 // internal — exposed for tests/fuzz; not part of the stable API
 #[doc(hidden)]

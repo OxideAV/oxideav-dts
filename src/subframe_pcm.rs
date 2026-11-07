@@ -103,13 +103,12 @@ pub type SubframePcm = Vec<Vec<i32>>;
 pub const PCM_PER_SUBBAND_ROW: usize = NUM_SUBBAND;
 
 /// Implementation-defined output-level calibration applied on top of
-/// [`DtsFrameHeader::output_r_scale`] by the §C.2.5 synthesis step of
-/// this decoder.
+/// [`OUTPUT_R_SCALE`] by the §C.2.5 synthesis step of this decoder.
 ///
 /// Per `docs/audio/dts/dts-qmf-driver.md` §2, the §C.2.5 output
 /// `rScale` is **not** a normative constant: it is whatever fixed gain
 /// maps the implementation's internal `raZ` normalization to
-/// full-scale integer PCM at the `PCMR` resolution. This crate's
+/// full-scale integer PCM. This crate's
 /// `raZ` domain (fixed by the literal §C.2.5 cosine-modulation
 /// scalers) sits exactly √2 below the level the black-box reference
 /// decoder emits for the same streams — a constant ratio measured to
@@ -361,7 +360,8 @@ impl SubframePcmDecoder {
     ///   §5.4.1 side information).
     /// * `header` — the parsed §5.3.1 [`DtsFrameHeader`]; supplies the
     ///   frame-wide `FILTS` ([`DtsFrameHeader::filter_bank_selection`])
-    ///   and the output `rScale` ([`DtsFrameHeader::output_r_scale`]).
+    ///   (and, through `PCMR`, only the reserved-code check; the output
+    ///   `rScale` is the constant [`OUTPUT_R_SCALE`]).
     /// * `coding` — the §5.3.2 [`AudioCodingHeader`]; supplies the
     ///   `SEL` / `arADJ` planes and the per-channel `nSUBS` / `nVQSUB`
     ///   loop bounds and `JOINX`.
@@ -980,7 +980,7 @@ pub fn decode_core_frame_with_info(
 /// (Pearson correlation 1.0 over the whole stream), versus 0.73 when
 /// the filter is reset per frame. (The two differ only by the
 /// implementation-defined output `rScale` constant — see
-/// [`DtsFrameHeader::output_r_scale`] and the round-356 report.)
+/// [`OUTPUT_R_SCALE`] and [`OUTPUT_LEVEL_CALIBRATION`].)
 #[derive(Debug, Clone)]
 pub struct CoreStreamDecoder {
     decoder: SubframePcmDecoder,
