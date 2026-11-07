@@ -359,3 +359,51 @@ fn a_24_bit_source_declaration_leaves_the_decoded_level_unchanged() {
         "only 16, 20 and 24 bits exist"
     );
 }
+
+/// `HuffmanScales::WhenCheaper` codes the scale factors through the Annex D §D.5.12
+/// scale-factor books SA129..SE129 (`SHUFF 0..=4`) and the stream round-trips through the
+/// decoder: at least one channel of the stream picks a Huffman book, and the reconstruction
+/// holds the same floor as the linear-scale 192 kbit/s stream.
+#[test]
+fn huffman_scale_books_round_trip_when_cheaper() {
+    let n = ENCODER_FRAME_SAMPLES * 4;
+    let planes = vec![multitone(n, 0.0), multitone(n, 1.3)];
+    let base = EncoderConfig::new(48_000, 2)
+        .unwrap()
+        .with_bit_rate(192_000)
+        .unwrap();
+    let linear = encode_stream(base.clone(), &planes);
+    let bytes = encode_stream(
+        base.with_huffman_scales(oxideav_dts::HuffmanScales::WhenCheaper),
+        &planes,
+    );
+    assert_ne!(bytes, linear, "the Huffman policy changes the stream");
+
+    let mut huffman_channels = 0usize;
+    for fv in iter_frames(&bytes) {
+        let fv = fv.expect("every encoded frame iterates");
+        let hb = fv.header.header_bit_length() as usize;
+        let (coding, _) =
+            oxideav_dts::decode_audio_coding_header_at(fv.data, hb, fv.header.crc_present)
+                .expect("coding header parses");
+        huffman_channels += coding
+            .channel_params
+            .iter()
+            .filter(|p| p.scales_codebook.is_huffman_encoded())
+            .count();
+    }
+    assert!(
+        huffman_channels > 0,
+        "no channel chose an SA129..SE129 scale book"
+    );
+
+    let (pcm, _) = decode_stream(&bytes, 2);
+    for ch in 0..2 {
+        assert_eq!(pcm[ch].len(), n);
+        let snr = snr_db(&planes[ch], &pcm[ch]);
+        assert!(
+            snr > 25.0,
+            "ch {ch}: Huffman-scale round-trip SNR {snr:.1} dB"
+        );
+    }
+}
