@@ -6,6 +6,21 @@ to [SemVer](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-dts/compare/v0.0.3...v0.0.4) - 2026-11-07
+
+### Fixed
+
+- fixup for #5: round-trip test for HuffmanScales::WhenCheaper through SA129..SE129
+- fixup for #5: one PCMR-independent output gain across the synthesis entry points
+- fixup for #5: retire the comments that still describe the A129..E129 scale routing
+- fixup for #5: fold the two [Unreleased] Added sections after the master merge
+
+### Other
+
+- Merge remote-tracking branch 'origin/master' into pr-5
+- API hygiene: non_exhaustive encoder config, frame header and iterator records
+- Decode production DTS core streams: real scale-factor books, level independent of PCMR
+
 ### Fixed
 
 - The five scale-factor Huffman books (`SHUFF 0..=4`, Tables SA129..SE129 of
