@@ -62,6 +62,7 @@ use crate::{DtsFrameHeader, Error, Result, SyncWordEncoding, parse_frame_header_
 
 /// Result of a [`find_next_sync`] lookup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncMatch {
     /// Absolute byte offset (within the input slice passed to
     /// [`find_next_sync`]) where the sync sequence starts.
@@ -190,6 +191,7 @@ pub fn find_next_sync(bytes: &[u8], start: usize) -> Option<SyncMatch> {
 /// One step of a [`FrameIterator`] over a raw-16-bit DTS Core
 /// stream.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct FrameView<'a> {
     /// Parsed header.
     pub header: DtsFrameHeader,
@@ -357,6 +359,7 @@ pub fn iter_frames(bytes: &[u8]) -> FrameIterator<'_> {
 /// variant (e.g. log truncated tails differently from false-positive
 /// syncs mid-buffer).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResyncCause {
     /// The header bits that follow the sync failed one of the
     /// structural bounds the spec mandates (NBLKS &lt; 5 → [`Error::BlockCountOutOfRange`],
@@ -397,6 +400,7 @@ pub enum ResyncCause {
 /// [`find_next_sync`] match; `cause` documents which check rejected
 /// the candidate (see [`ResyncCause`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResyncEvent {
     /// Absolute byte offset of the discarded sync candidate within
     /// the iterator's input.
@@ -740,6 +744,7 @@ pub fn iter_syncs(bytes: &[u8]) -> SyncIterator<'_> {
 ///   want to decode the SUBFRAMES region must run
 ///   [`crate::unpack_14bit_to_16bit`] on `data` first.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct FrameView14<'a> {
     /// Parsed header. `header.sync_word_encoding` is one of
     /// [`SyncWordEncoding::FourteenBitBigEndian`] /
